@@ -35,10 +35,16 @@ in the `Authorization` header), so the two can be hosted anywhere independently.
 
 3. **Fill in `frontend/.env`** — the same Google Client ID.
 
-4. **Create/update the database tables** (Drizzle reads `backend/src/db/schema.ts` —
-   the single source of truth — and applies any changes to the live database):
+4. **Create/update the database tables.** The schema lives in `backend/src/db/schema.ts`
+   (single source of truth); every change to it becomes a versioned SQL file in
+   `backend/drizzle/` that is committed to git and applied in order:
    ```bash
-   npm run db:migrate
+   npm run db:migrate     # applies any pending migrations (all of them on a fresh DB)
+   ```
+   When you **change the schema** later:
+   ```bash
+   npm run db:generate    # writes a new migration file into backend/drizzle/ — review it, commit it
+   npm run db:migrate     # applies it to the database
    ```
    Bonus: `npm --prefix backend run db:studio` opens a visual database browser.
 
@@ -58,7 +64,9 @@ production frontend URL later. Put the Client ID in **both** `.env` files.
 
 **Backend** (Render / Railway / Fly.io / a VPS — anything that runs Node):
 1. Deploy the `backend/` folder. Build: `npm install && npm run build`, start: `npm start`.
-2. Set the same env vars from `backend/.env` on the host, with
+2. Run migrations on every deploy, **before** the new version starts:
+   `npm run db:migrate` (most hosts have a "pre-deploy" / "release command" slot for this).
+3. Set the same env vars from `backend/.env` on the host, with
    `FRONTEND_URL=https://your-frontend-domain.com`.
 
 **Frontend** (Vercel / Netlify / Cloudflare Pages — it's just static files):

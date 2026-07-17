@@ -1,5 +1,8 @@
 // Single source of truth for the database schema.
-// Schema changes: edit here, then run `npm run db:migrate` (drizzle-kit push).
+// Schema changes: edit here, then
+//   1. `npm run db:generate` — writes a versioned SQL migration into drizzle/ (commit it)
+//   2. review the generated SQL (especially anything that drops/renames with data)
+//   3. `npm run db:migrate` — applies pending migrations to the database
 import { sql } from "drizzle-orm";
 import { pgTable, uuid, varchar, text, timestamp, index, unique, check } from "drizzle-orm/pg-core";
 
