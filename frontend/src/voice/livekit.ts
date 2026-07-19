@@ -5,7 +5,9 @@ import { api, ApiError } from "../api/http";
 // squad actually forms, so it costs nothing at startup.
 let room: Room | null = null;
 let currentRoomName: string | null = null;
-let micEnabled = true;
+// Mic starts OFF — players hear the squad immediately but only transmit after
+// deliberately unmuting (which is also when the browser asks mic permission).
+let micEnabled = false;
 
 export function isVoiceConnected(): boolean {
   return room !== null;

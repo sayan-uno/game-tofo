@@ -7,7 +7,9 @@ import { redis } from "./redis.js";
 import { authRouter } from "./routes/auth.js";
 import { friendsRouter } from "./routes/friends.js";
 import { voiceRouter } from "./routes/voice.js";
+import { chatRouter } from "./routes/chat.js";
 import { registerSockets } from "./sockets/index.js";
+import { startChatRetention } from "./services/chat.js";
 
 const missing = assertConfig();
 if (missing.length > 0) {
@@ -39,12 +41,14 @@ const io = new Server(server, {
 app.use("/api/auth", authRouter);
 app.use("/api/friends", friendsRouter(io));
 app.use("/api/voice", voiceRouter);
+app.use("/api/chat", chatRouter);
 
 registerSockets(io);
 
 async function start() {
   await redis.connect();
   console.log("✔ Redis connected");
+  startChatRetention();
   server.listen(config.port, () => {
     console.log(`✔ TOFO Games backend listening on http://localhost:${config.port}`);
     console.log(`  Allowing frontend origin: ${config.frontendUrl}`);

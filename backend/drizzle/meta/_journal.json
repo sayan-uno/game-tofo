@@ -8,6 +8,20 @@
       "when": 1784281525370,
       "tag": "0000_groovy_goblin_queen",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1784457660732,
+      "tag": "0001_known_phalanx",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1784460626008,
+      "tag": "0002_puzzling_vulture",
+      "breakpoints": true
     }
   ]
 }

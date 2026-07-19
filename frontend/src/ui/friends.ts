@@ -1,6 +1,6 @@
 import { api } from "../api/http";
 import { emitAck } from "../api/socket";
-import { toast } from "./toast";
+import { actionToast, toast } from "./toast";
 import type { Friend, FriendRequest } from "../types";
 
 type Tab = "friends" | "requests" | "add";
@@ -15,6 +15,8 @@ export class FriendsPanel {
   private open = false;
   private friends: Friend[] = [];
   private requests: FriendRequest[] = [];
+  private myLobbyId: string | null = null;
+  private dnd = false;
 
   constructor(private container: HTMLElement) {
     this.panel = document.createElement("div");
@@ -44,13 +46,21 @@ export class FriendsPanel {
     if (this.open) void this.refresh();
   }
 
+  /** Called on every lobby:members update so "Same group" tags stay honest. */
+  setLobby(lobbyId: string) {
+    if (this.myLobbyId === lobbyId) return;
+    this.myLobbyId = lobbyId;
+    if (this.open) void this.refresh();
+  }
+
   async refresh() {
     try {
       const [friendsRes, requestsRes] = await Promise.all([
-        api.get<{ friends: Friend[] }>("/api/friends"),
+        api.get<{ friends: Friend[]; dnd: boolean }>("/api/friends"),
         api.get<{ requests: FriendRequest[] }>("/api/friends/requests"),
       ]);
       this.friends = friendsRes.friends;
+      this.dnd = friendsRes.dnd;
       this.requests = requestsRes.requests;
       this.updateBadge();
       this.render();
@@ -88,8 +98,32 @@ export class FriendsPanel {
   }
 
   private renderFriends() {
+    // Do Not Disturb: friends can still message me, but can't invite me or
+    // ask to join my group while this is on.
+    const dndRow = document.createElement("label");
+    dndRow.className = "dnd-row";
+    dndRow.innerHTML = `
+      <span class="dnd-label">🔕 Do Not Disturb</span>
+      <span class="dnd-hint">Friends can message, but can't invite you</span>
+      <span class="switch"><input type="checkbox" ${this.dnd ? "checked" : ""} /><span class="switch-slider"></span></span>
+    `;
+    const checkbox = dndRow.querySelector<HTMLInputElement>("input")!;
+    checkbox.onchange = async () => {
+      const wanted = checkbox.checked;
+      try {
+        const res = await emitAck<{ ok?: boolean; on?: boolean; error?: string }>("user:dnd", { on: wanted });
+        if (res.error) throw new Error(res.error);
+        this.dnd = wanted;
+        toast(wanted ? "Do Not Disturb on — no more invites" : "Do Not Disturb off");
+      } catch (err) {
+        checkbox.checked = !wanted;
+        toast(err instanceof Error ? err.message : "Failed to update", true);
+      }
+    };
+    this.body.appendChild(dndRow);
+
     if (this.friends.length === 0) {
-      this.body.innerHTML = `<p class="empty-note">No friends yet. Use the Add tab to find players by UID.</p>`;
+      this.body.insertAdjacentHTML("beforeend", `<p class="empty-note">No friends yet. Use the Add tab to find players by UID.</p>`);
       return;
     }
     const sorted = [...this.friends].sort((a, b) => Number(b.online) - Number(a.online));
@@ -104,7 +138,13 @@ export class FriendsPanel {
         </div>
       `;
       row.querySelector(".friend-name")!.textContent = friend.name;
-      if (friend.online) {
+      const sameGroup = friend.online && friend.lobbyId !== null && friend.lobbyId === this.myLobbyId;
+      if (sameGroup) {
+        const tag = document.createElement("span");
+        tag.className = "same-group-tag";
+        tag.textContent = "Same group";
+        row.appendChild(tag);
+      } else if (friend.online) {
         const inviteBtn = document.createElement("button");
         inviteBtn.className = "btn btn-primary btn-small";
         inviteBtn.textContent = "Invite";
@@ -121,7 +161,48 @@ export class FriendsPanel {
           }
         };
         row.appendChild(inviteBtn);
+        if (friend.inGroup) {
+          const joinBtn = document.createElement("button");
+          joinBtn.className = "btn btn-ghost btn-small";
+          joinBtn.textContent = "Join";
+          joinBtn.title = `Ask to join ${friend.name}'s group`;
+          joinBtn.onclick = async () => {
+            joinBtn.disabled = true;
+            try {
+              const res = await emitAck("lobby:joinRequest", { friendUid: friend.uid });
+              if (res.error) toast(res.error, true);
+              else toast(`Join request sent to ${friend.name}`);
+            } catch (err) {
+              toast(err instanceof Error ? err.message : "Request failed", true);
+            } finally {
+              joinBtn.disabled = false;
+            }
+          };
+          row.appendChild(joinBtn);
+        }
       }
+      const unfriendBtn = document.createElement("button");
+      unfriendBtn.className = "btn btn-ghost btn-small btn-danger";
+      unfriendBtn.textContent = "✕";
+      unfriendBtn.title = "Unfriend";
+      unfriendBtn.onclick = () => {
+        actionToast(
+          `Remove ${friend.name} from your friends?`,
+          () => {
+            void (async () => {
+              try {
+                await api.post("/api/friends/unfriend", { uid: friend.uid });
+                toast(`${friend.name} removed from friends`);
+                await this.refresh();
+              } catch (err) {
+                toast(err instanceof Error ? err.message : "Failed to unfriend", true);
+              }
+            })();
+          },
+          () => {}
+        );
+      };
+      row.appendChild(unfriendBtn);
       this.body.appendChild(row);
     }
   }

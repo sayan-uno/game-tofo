@@ -1,7 +1,7 @@
 import { Router } from "express";
 import type { Server } from "socket.io";
 import { requireAuth } from "../middleware/auth.js";
-import { getOnlineSet } from "../redis.js";
+import { getLobbyMembers, getOnlineSet, getUserLobby, isDnd } from "../redis.js";
 import { getUserByUid, toPublicUser } from "../services/users.js";
 import {
   acceptFriendRequest,
@@ -12,18 +12,29 @@ import {
   listFriends,
   listIncomingRequests,
 } from "../services/friends.js";
+import { getBlockState } from "../services/chat.js";
 
 export function friendsRouter(io: Server) {
   const router = Router();
   router.use(requireAuth);
 
-  // Accepted friends, with live online status from Redis.
+  // Accepted friends with live status: online, which lobby they're in (so the
+  // client can tag "Same group"), whether that lobby is a real group, plus the
+  // caller's own Do Not Disturb state.
   router.get("/", async (req, res) => {
-    const friends = await listFriends(req.auth!.userId);
-    const online = await getOnlineSet(friends.map((f) => f.id));
-    res.json({
-      friends: friends.map((f) => ({ ...toPublicUser(f), online: online.has(f.id) })),
-    });
+    const userId = req.auth!.userId;
+    const friends = await listFriends(userId);
+    const [online, dnd] = await Promise.all([getOnlineSet(friends.map((f) => f.id)), isDnd(userId)]);
+    const enriched = await Promise.all(
+      friends.map(async (f) => {
+        const base = { ...toPublicUser(f), online: online.has(f.id) };
+        if (!base.online) return { ...base, lobbyId: null, inGroup: false };
+        const lobbyId = await getUserLobby(f.id);
+        const members = lobbyId ? await getLobbyMembers(lobbyId) : [];
+        return { ...base, lobbyId, inGroup: members.length > 1 };
+      })
+    );
+    res.json({ friends: enriched, dnd });
   });
 
   // Incoming pending requests.
@@ -58,6 +69,11 @@ export function friendsRouter(io: Server) {
       res.status(400).json({ error: "That's your own UID" });
       return;
     }
+    const blockState = await getBlockState(userId, target.id);
+    if (blockState.byA || blockState.byB) {
+      res.status(403).json({ error: "You can't add this player" });
+      return;
+    }
     const existing = await findFriendshipBetween(userId, target.id);
     if (existing) {
       if (existing.status === "accepted") {
@@ -73,6 +89,29 @@ export function friendsRouter(io: Server) {
     // Realtime ping to the target if they're online.
     io.to(`user:${target.id}`).emit("friend:request", {
       requestId,
+      uid: req.auth!.uid,
+      name: req.auth!.name,
+    });
+    res.json({ ok: true });
+  });
+
+  // Remove an existing friend. Their DM history simply shows up under the
+  // "Recent" chat section from now on — messages are never deleted by this.
+  router.post("/unfriend", async (req, res) => {
+    const userId = req.auth!.userId;
+    const { uid } = req.body as { uid?: string };
+    const target = uid ? await getUserByUid(uid.trim()) : null;
+    if (!target) {
+      res.status(404).json({ error: "Player not found" });
+      return;
+    }
+    const existing = await findFriendshipBetween(userId, target.id);
+    if (!existing || existing.status !== "accepted") {
+      res.status(404).json({ error: "You are not friends with this player" });
+      return;
+    }
+    await deleteFriendship(existing.id);
+    io.to(`user:${target.id}`).emit("friend:removed", {
       uid: req.auth!.uid,
       name: req.auth!.name,
     });
