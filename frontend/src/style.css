@@ -1,3 +1,20 @@
+/* Self-hosted display font (18 KB woff2, preloaded in index.html). Only used
+   for headings/brand — body text stays on the system stack for zero cost. */
+@font-face {
+  font-family: "Archivo Black";
+  src: url("/fonts/archivo-black.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --display-font: "Archivo Black", "Arial Black", system-ui, sans-serif;
+  --red: #e5182e;
+  --red-hot: #ff2f43;
+  --ink: #0b0507;
+}
+
 * {
   margin: 0;
   padding: 0;
@@ -9,7 +26,7 @@ body {
   width: 100%;
   height: 100%;
   overflow: hidden;
-  background: #0a0e1a;
+  background: var(--ink);
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   color: #e8ecf8;
   -webkit-tap-highlight-color: transparent;
@@ -81,54 +98,513 @@ body {
   position: absolute;
   inset: 0;
   display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--ink);
+  --pad-x: clamp(20px, 4.5vw, 56px);
+  --pad-y: clamp(18px, 3.2vw, 40px);
+  padding: max(var(--pad-y), env(safe-area-inset-top)) var(--pad-x)
+    max(var(--pad-y), env(safe-area-inset-bottom));
+}
+
+/* --- background scenography (decorative, removed with the screen) --- */
+.lg-bg {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.lg-glow {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(46vw 46vw at 69% 42%, rgba(229, 24, 46, 0.24), transparent 62%),
+    radial-gradient(34vw 36vh at 84% 96%, rgba(229, 24, 46, 0.14), transparent 65%),
+    radial-gradient(28vw 30vh at 6% 4%, rgba(229, 24, 46, 0.08), transparent 60%);
+}
+.lg-rings {
+  position: absolute;
+  left: 69%;
+  top: 44%;
+  width: 0;
+  height: 0;
+}
+.lg-ring,
+.lg-arc,
+.lg-emblem {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  translate: -50% -50%;
+  border-radius: 50%;
+}
+.lg-ring {
+  border: 1px solid rgba(229, 24, 46, 0.3);
+}
+.lg-ring.r1 { width: 330px; height: 330px; border-color: rgba(229, 24, 46, 0.42); }
+.lg-ring.r2 { width: 480px; height: 480px; border-color: rgba(229, 24, 46, 0.26); }
+.lg-ring.r3 {
+  width: 650px;
+  height: 650px;
+  border-style: dashed;
+  border-width: 1.5px;
+  border-color: rgba(229, 24, 46, 0.3);
+  animation: lg-spin 90s linear infinite;
+}
+.lg-ring.r4 { width: 830px; height: 830px; border-color: rgba(229, 24, 46, 0.14); }
+.lg-arc {
+  border: 2px solid transparent;
+}
+.lg-arc.a1 {
+  width: 480px;
+  height: 480px;
+  border-top-color: rgba(255, 47, 67, 0.75);
+  animation: lg-spin 24s linear infinite;
+}
+.lg-arc.a2 {
+  width: 650px;
+  height: 650px;
+  border-bottom-color: rgba(255, 47, 67, 0.45);
+  animation: lg-spin 38s linear infinite reverse;
+}
+.lg-emblem img {
+  display: block;
+  width: 290px;
+  height: 290px;
+  filter: drop-shadow(0 0 30px rgba(229, 24, 46, 0.55)) drop-shadow(0 0 90px rgba(229, 24, 46, 0.3));
+  /* pulse animates transform:scale, spin animates the separate rotate
+     property — they compose without fighting each other */
+  animation: lg-pulse 5s ease-in-out infinite, lg-spin 36s linear infinite;
+}
+@keyframes lg-spin {
+  to { rotate: 360deg; }
+}
+@keyframes lg-pulse {
+  0%, 100% { transform: scale(1); opacity: 0.95; }
+  50% { transform: scale(1.035); opacity: 1; }
+}
+/* ruined-city silhouette along the bottom */
+.lg-city {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 24vh;
+  background: #060304;
+  filter: drop-shadow(0 -2px 14px rgba(229, 24, 46, 0.18));
+  clip-path: polygon(
+    0 100%, 0 62%, 4% 62%, 4% 48%, 7% 48%, 7% 70%, 12% 70%, 12% 38%, 13.5% 33%, 15% 38%,
+    15% 58%, 19% 58%, 19% 44%, 23% 44%, 23% 66%, 27% 66%, 27% 30%, 28% 25%, 29.5% 30%,
+    29.5% 52%, 33% 52%, 33% 62%, 38% 62%, 38% 42%, 41% 42%, 41% 56%, 45% 56%, 45% 24%,
+    46% 18%, 47.5% 24%, 47.5% 46%, 51% 46%, 51% 60%, 55% 60%, 55% 36%, 58% 36%, 58% 52%,
+    62% 52%, 62% 28%, 63.5% 21%, 65% 28%, 65% 48%, 68% 48%, 68% 62%, 72% 62%, 72% 34%,
+    75% 34%, 75% 56%, 79% 56%, 79% 44%, 82% 44%, 82% 64%, 86% 64%, 86% 30%, 87.5% 24%,
+    89% 30%, 89% 54%, 93% 54%, 93% 68%, 100% 68%, 100% 100%
+  );
+}
+/* floating embers */
+.lg-embers i {
+  position: absolute;
+  bottom: -2vh;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #ff6a5e 0%, #e5182e 60%, transparent 100%);
+  box-shadow: 0 0 10px 2px rgba(255, 64, 64, 0.45);
+  opacity: 0;
+  animation: lg-ember var(--dur, 12s) linear var(--delay, 0s) infinite;
+}
+.lg-embers i:nth-child(1)  { left: 8%;  --dur: 13s; --delay: 0s;   --dx: 30px; }
+.lg-embers i:nth-child(2)  { left: 22%; --dur: 16s; --delay: 3s;   --dx: -24px; width: 4px; height: 4px; }
+.lg-embers i:nth-child(3)  { left: 34%; --dur: 11s; --delay: 6s;   --dx: 18px; }
+.lg-embers i:nth-child(4)  { left: 47%; --dur: 15s; --delay: 1.5s; --dx: -30px; width: 3px; height: 3px; }
+.lg-embers i:nth-child(5)  { left: 58%; --dur: 10s; --delay: 4s;   --dx: 26px; }
+.lg-embers i:nth-child(6)  { left: 66%; --dur: 14s; --delay: 7s;   --dx: -18px; width: 6px; height: 6px; }
+.lg-embers i:nth-child(7)  { left: 74%; --dur: 12s; --delay: 2s;   --dx: 34px; }
+.lg-embers i:nth-child(8)  { left: 82%; --dur: 17s; --delay: 5s;   --dx: -26px; width: 4px; height: 4px; }
+.lg-embers i:nth-child(9)  { left: 90%; --dur: 11s; --delay: 8s;   --dx: 20px; }
+.lg-embers i:nth-child(10) { left: 96%; --dur: 15s; --delay: 0.5s; --dx: -14px; width: 3px; height: 3px; }
+@keyframes lg-ember {
+  0% { transform: translate3d(0, 0, 0); opacity: 0; }
+  6% { opacity: 0.9; }
+  70% { opacity: 0.55; }
+  100% { transform: translate3d(var(--dx, 20px), -80vh, 0); opacity: 0; }
+}
+.lg-vignette {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(180deg, rgba(0, 0, 0, 0.42), transparent 18%),
+    radial-gradient(130% 130% at 50% 45%, transparent 52%, rgba(0, 0, 0, 0.62) 100%);
+}
+
+/* --- header / brand --- */
+.lg-header {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  flex: none;
+}
+.lg-mark {
+  width: clamp(38px, 4vw, 48px);
+  height: auto;
+  filter: drop-shadow(0 0 12px rgba(229, 24, 46, 0.5));
+  animation: lg-spin 14s linear infinite;
+}
+.lg-word {
+  display: flex;
+  flex-direction: column;
+  font-family: var(--display-font);
+  line-height: 1;
+}
+.lg-word .t {
+  color: #fff;
+  font-size: clamp(19px, 2vw, 23px);
+  letter-spacing: 0.08em;
+}
+.lg-word .g {
+  color: var(--red);
+  font-size: clamp(11px, 1.15vw, 13px);
+  letter-spacing: 0.4em;
+  margin-top: 4px;
+}
+
+/* --- main content --- */
+.lg-main {
+  position: relative;
+  z-index: 2;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  max-width: 620px;
+  padding: 22px 0;
+}
+.lg-title {
+  font-family: var(--display-font);
+  font-weight: 400;
+  text-transform: uppercase;
+  color: #fff;
+  font-size: clamp(38px, 4.8vw, 66px);
+  line-height: 1.03;
+  letter-spacing: 0.004em;
+}
+.lg-title span {
+  display: block;
+}
+.lg-title .accent {
+  color: var(--red);
+  text-shadow: 0 0 30px rgba(229, 24, 46, 0.45);
+}
+.lg-sub {
+  margin-top: 18px;
+  color: #a7abb4;
+  font-size: clamp(15px, 1.3vw, 17px);
+  line-height: 1.6;
+  max-width: 44ch;
+}
+.lg-feats {
+  display: flex;
+  list-style: none;
+  margin-top: 30px;
+}
+.lg-feats li {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 0 clamp(16px, 2vw, 26px);
+}
+.lg-feats li:first-child {
+  padding-left: 0;
+}
+.lg-feats li + li {
+  border-left: 1px solid rgba(255, 255, 255, 0.14);
+}
+.lg-feats svg {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  color: var(--red);
+  filter: drop-shadow(0 0 7px rgba(229, 24, 46, 0.55));
+}
+.lg-feats span {
+  font-size: 13px;
+  line-height: 1.35;
+  color: #c7cbd1;
+}
+
+/* --- Google sign-in: custom visual + the real (invisible) GIS button on top --- */
+.lg-google {
+  position: relative;
+  margin-top: 34px;
+  width: min(410px, 100%);
+  height: 58px;
+  border-radius: 14px;
+  cursor: pointer;
+}
+.lg-google-visual {
+  position: absolute;
+  inset: 0;
+  display: flex;
   align-items: center;
   justify-content: center;
-  background:
-    radial-gradient(1200px 600px at 50% -10%, rgba(26, 159, 255, 0.18), transparent),
-    radial-gradient(800px 500px at 80% 110%, rgba(120, 60, 255, 0.15), transparent),
-    #0a0e1a;
+  gap: 13px;
+  background: #fff;
+  border-radius: 14px;
+  color: #17181c;
+  font-size: 16.5px;
+  font-weight: 700;
+  overflow: hidden;
+  box-shadow:
+    0 0 26px rgba(255, 255, 255, 0.2),
+    0 10px 42px rgba(229, 24, 46, 0.2),
+    0 4px 18px rgba(0, 0, 0, 0.55);
+  transition: transform 0.15s ease, box-shadow 0.2s ease;
 }
-.login-card {
-  text-align: center;
-  padding: 48px 40px;
-  border-radius: 24px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  backdrop-filter: blur(16px);
-  max-width: 90vw;
+.lg-google:hover .lg-google-visual {
+  transform: translateY(-1px);
+  box-shadow:
+    0 0 36px rgba(255, 255, 255, 0.32),
+    0 14px 50px rgba(229, 24, 46, 0.28),
+    0 4px 18px rgba(0, 0, 0, 0.55);
 }
-.login-logo {
-  font-size: 44px;
-  font-weight: 900;
-  letter-spacing: 4px;
-  background: linear-gradient(135deg, #1a9fff, #9b5cff);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+.lg-google:active .lg-google-visual {
+  transform: scale(0.985);
 }
-.login-logo span {
-  display: block;
-  font-size: 16px;
-  letter-spacing: 12px;
-  color: #8a94b8;
-  -webkit-text-fill-color: #8a94b8;
+.lg-google:focus-within .lg-google-visual {
+  outline: 3px solid rgba(229, 24, 46, 0.65);
+  outline-offset: 3px;
 }
-.login-tagline {
-  margin: 14px 0 30px;
-  color: #8a94b8;
-  font-size: 15px;
+.lg-google-visual svg {
+  width: 22px;
+  height: 22px;
+  flex: none;
 }
+/* shimmer while the Google script warms up */
+.lg-google.loading .lg-google-visual::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 30%, rgba(0, 0, 0, 0.06) 50%, transparent 70%);
+  background-size: 220% 100%;
+  animation: lg-shimmer 1.3s linear infinite;
+}
+@keyframes lg-shimmer {
+  from { background-position: 120% 0; }
+  to { background-position: -120% 0; }
+}
+.lg-google.failed .lg-google-visual {
+  opacity: 0.55;
+  filter: grayscale(0.5);
+}
+/* The official GIS iframe is stretched over the visual at ~0 opacity so the
+   real Google flow handles every click. Never display:none — GIS won't render. */
 .google-btn-slot {
+  position: absolute;
+  inset: 0;
   display: flex;
+  align-items: center;
   justify-content: center;
-  min-height: 44px;
+  overflow: hidden;
+  border-radius: 14px;
+  opacity: 0.001;
+}
+.google-btn-slot > div {
+  transform: scale(3);
+}
+
+.lg-secure {
+  margin-top: 22px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #dfe2e6;
+  font-size: 13.5px;
+}
+.lg-secure svg {
+  width: 14px;
+  height: 14px;
+  color: #a7abb4;
+}
+.lg-privacy {
+  margin-top: 6px;
+  color: #7d828c;
+  font-size: 13px;
 }
 .login-error {
-  margin-top: 16px;
-  color: #ff6b7a;
+  margin-top: 14px;
+  color: #ff8493;
   font-size: 13px;
   min-height: 18px;
-  max-width: 300px;
+  max-width: 410px;
+}
+
+/* --- corner badge --- */
+.lg-badge {
+  position: absolute;
+  right: var(--pad-x);
+  bottom: max(var(--pad-y), env(safe-area-inset-bottom));
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 13px 18px;
+  border-radius: 14px;
+  background: rgba(18, 7, 10, 0.62);
+  border: 1px solid rgba(229, 24, 46, 0.42);
+  box-shadow: 0 0 24px rgba(229, 24, 46, 0.14), inset 0 0 20px rgba(229, 24, 46, 0.05);
+  backdrop-filter: blur(8px);
+}
+.lg-badge-icon {
+  width: 40px;
+  height: 40px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: rgba(229, 24, 46, 0.12);
+  border: 1px solid rgba(229, 24, 46, 0.5);
+  color: var(--red);
+}
+.lg-badge-icon svg {
+  width: 22px;
+  height: 22px;
+}
+.lg-badge-text strong {
+  display: block;
+  font-size: 14px;
+  color: #fff;
+}
+.lg-badge-text span {
+  font-size: 12.5px;
+  color: #a7abb4;
+}
+.lg-badge-mobile {
+  display: none;
+}
+
+/* --- footer --- */
+.lg-footer {
+  position: relative;
+  z-index: 2;
+  flex: none;
+  color: #7d828c;
+  font-size: 12.5px;
+  letter-spacing: 0.02em;
+}
+.lg-footer .accent {
+  color: var(--red);
+  font-weight: 600;
+}
+
+/* --- responsive: tablets and phones --- */
+@media (max-width: 1150px) {
+  .lg-rings {
+    left: 74%;
+    scale: 0.78;
+  }
+}
+@media (max-width: 860px) {
+  .login-screen {
+    --pad-x: 22px;
+    --pad-y: 16px;
+  }
+  .lg-header {
+    justify-content: center;
+  }
+  .lg-main {
+    margin: 0 auto;
+    align-items: center;
+    text-align: center;
+    max-width: 460px;
+    padding-bottom: 96px; /* keep clear of the bottom badge */
+  }
+  .lg-title {
+    /* sized so "OWN THE GAME." stays on one line down to 320px-wide phones */
+    font-size: clamp(26px, 8.8vw, 44px);
+  }
+  .lg-sub {
+    font-size: 15px;
+    max-width: 34ch;
+  }
+  .lg-feats {
+    width: 100%;
+    justify-content: center;
+    margin-top: 26px;
+  }
+  .lg-feats li {
+    flex: 1 1 0;
+    flex-direction: column;
+    text-align: center;
+    gap: 9px;
+    padding: 0 8px;
+  }
+  .lg-feats li:first-child {
+    padding-left: 8px;
+  }
+  .lg-google {
+    margin-top: 28px;
+    width: 100%;
+    max-width: 410px;
+  }
+  .lg-glow {
+    background:
+      radial-gradient(120vw 60vh at 50% 108%, rgba(229, 24, 46, 0.26), transparent 62%),
+      radial-gradient(90vw 40vh at 50% -6%, rgba(229, 24, 46, 0.12), transparent 65%);
+  }
+  .lg-rings {
+    left: 50%;
+    top: 34%;
+    scale: 0.62;
+    opacity: 0.4;
+  }
+  .lg-emblem {
+    display: none;
+  }
+  .lg-city {
+    height: 15vh;
+  }
+  .lg-footer {
+    display: none;
+  }
+  .lg-badge-desktop {
+    display: none;
+  }
+  .lg-badge-mobile {
+    display: flex;
+    right: auto;
+    left: 50%;
+    translate: -50%;
+    bottom: max(18px, env(safe-area-inset-bottom));
+    white-space: nowrap;
+  }
+}
+@media (max-width: 400px) {
+  .lg-feats li,
+  .lg-feats li:first-child {
+    padding: 0 4px;
+  }
+  .lg-feats span {
+    font-size: 12px;
+  }
+}
+/* short landscape phones: drop the badge so content breathes */
+@media (max-height: 480px) {
+  .lg-badge {
+    display: none !important;
+  }
+  .lg-main {
+    padding-bottom: 8px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .login-screen *,
+  .login-screen *::after {
+    animation: none !important;
+    transition: none !important;
+  }
 }
 
 /* ---------- HUD ---------- */

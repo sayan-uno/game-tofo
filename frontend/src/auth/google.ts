@@ -54,11 +54,14 @@ export async function mountGoogleSignIn(
       }
     },
   });
+  // The button is rendered at max width and stretched invisibly over our own
+  // styled button (see .google-btn-slot in style.css), so the official Google
+  // flow handles every click while the page keeps its custom look.
   window.google!.accounts.id.renderButton(container, {
     theme: "filled_black",
     size: "large",
-    shape: "pill",
+    shape: "rectangular",
     text: "continue_with",
-    width: 280,
+    width: 400,
   });
 }
