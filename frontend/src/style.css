@@ -599,9 +599,137 @@ body {
   }
 }
 
+/* ---------- Mobile entry gate (fullscreen + landscape, PUBG-style) ---------- */
+.entry-gate {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  text-align: center;
+  padding: 24px;
+  background: var(--ink);
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.eg-glow {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(70vmin 70vmin at 50% 42%, rgba(229, 24, 46, 0.22), transparent 62%),
+    radial-gradient(130% 130% at 50% 50%, transparent 55%, rgba(0, 0, 0, 0.6) 100%);
+}
+.eg-logo {
+  position: relative;
+  width: clamp(76px, 20vmin, 110px);
+  height: auto;
+  filter: drop-shadow(0 0 26px rgba(229, 24, 46, 0.55));
+  animation: lg-spin 14s linear infinite;
+}
+.eg-brand {
+  position: relative;
+  margin-top: 14px;
+  font-family: var(--display-font);
+  font-size: 19px;
+  letter-spacing: 0.1em;
+  color: #fff;
+}
+.eg-brand span {
+  color: var(--red);
+}
+.eg-tap {
+  position: relative;
+  margin-top: 26px;
+  font-family: var(--display-font);
+  text-transform: uppercase;
+  font-size: clamp(24px, 7vmin, 34px);
+  color: #fff;
+  animation: eg-beat 1.6s ease-in-out infinite;
+}
+.eg-tap em {
+  font-style: normal;
+  color: var(--red);
+  text-shadow: 0 0 24px rgba(229, 24, 46, 0.5);
+}
+.eg-tap-busy {
+  display: none;
+}
+.entry-gate.busy .eg-tap-idle {
+  display: none;
+}
+.entry-gate.busy .eg-tap-busy {
+  display: inline;
+}
+.entry-gate.busy .eg-tap {
+  animation: none;
+  opacity: 0.85;
+}
+@keyframes eg-beat {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(0.985); }
+}
+.eg-note {
+  position: relative;
+  margin-top: 12px;
+  color: #7d828c;
+  font-size: 13px;
+}
+
+/* ---------- rotate-to-landscape overlay (iOS can't orientation-lock) ---------- */
+#rotate-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 32px;
+  text-align: center;
+  background: rgba(11, 5, 7, 0.97);
+}
+#rotate-overlay svg {
+  width: 64px;
+  height: 64px;
+  color: var(--red);
+  filter: drop-shadow(0 0 14px rgba(229, 24, 46, 0.5));
+  animation: ro-tilt 2.2s ease-in-out infinite;
+}
+@keyframes ro-tilt {
+  0%, 20% { transform: rotate(0deg); }
+  55%, 80% { transform: rotate(90deg); }
+  100% { transform: rotate(90deg); }
+}
+.ro-title {
+  font-family: var(--display-font);
+  text-transform: uppercase;
+  font-size: 24px;
+  color: #fff;
+  margin-top: 8px;
+}
+.ro-note {
+  color: #a7abb4;
+  font-size: 13.5px;
+  line-height: 1.55;
+  max-width: 34ch;
+}
+@media (hover: none) and (pointer: coarse) and (orientation: portrait) {
+  body.in-game:not(.gating) #rotate-overlay {
+    display: flex;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .login-screen *,
-  .login-screen *::after {
+  .login-screen *::after,
+  .entry-gate *,
+  #rotate-overlay svg {
     animation: none !important;
     transition: none !important;
   }

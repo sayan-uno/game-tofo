@@ -2,6 +2,7 @@ import "./style.css";
 import { api, getToken, clearSession } from "./api/http";
 import { connectSocket, emitAck } from "./api/socket";
 import { showLogin } from "./ui/login";
+import { passEntryGate } from "./ui/entryGate";
 import { Hud } from "./ui/hud";
 import { FriendsPanel } from "./ui/friends";
 import { toast, actionToast } from "./ui/toast";
@@ -27,10 +28,14 @@ async function enterLobby(user: User) {
 
   // Babylon is the heaviest dependency — load it only when actually entering
   // the lobby, so the login screen stays instant even on slow connections.
-  const [{ createEngine, startRenderLoop }, { LobbyScene }] = await Promise.all([
-    import("./game/engine"),
-    import("./game/lobbyScene"),
-  ]);
+  // Kicked off before the entry gate so the chunks download while the player
+  // is tapping through it.
+  const heavyChunks = Promise.all([import("./game/engine"), import("./game/lobbyScene")]);
+
+  // Phones: one-tap gate → fullscreen + landscape (PUBG-style). No-op on desktop.
+  const closeGate = await passEntryGate();
+
+  const [{ createEngine, startRenderLoop }, { LobbyScene }] = await heavyChunks;
 
   const canvas = document.getElementById("game-canvas") as HTMLCanvasElement;
   const engine = createEngine(canvas);
@@ -46,6 +51,7 @@ async function enterLobby(user: User) {
       });
     },
   });
+  closeGate();
 
   const socket = connectSocket();
 
