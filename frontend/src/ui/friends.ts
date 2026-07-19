@@ -46,11 +46,31 @@ export class FriendsPanel {
     if (this.open) void this.refresh();
   }
 
-  /** Called on every lobby:members update so "Same group" tags stay honest. */
-  setLobby(lobbyId: string) {
-    if (this.myLobbyId === lobbyId) return;
+  /** Called on every lobby:members update so "Same group" tags stay honest.
+   *  Membership can change while my lobby id stays the same (a friend accepted
+   *  my invite, a teammate left) — so friend rows are patched locally from the
+   *  member list and re-rendered right away, no network round-trip needed. */
+  setLobby(lobbyId: string, memberUids: string[]) {
+    const lobbyChanged = this.myLobbyId !== lobbyId;
     this.myLobbyId = lobbyId;
-    if (this.open) void this.refresh();
+    const members = new Set(memberUids);
+    let touched = false;
+    for (const friend of this.friends) {
+      if (members.has(friend.uid)) {
+        friend.online = true;
+        friend.lobbyId = lobbyId;
+        friend.inGroup = memberUids.length > 1;
+        touched = true;
+      } else if (friend.lobbyId === lobbyId) {
+        // They were in my group and aren't anymore — back on their own.
+        friend.lobbyId = null;
+        friend.inGroup = false;
+        touched = true;
+      }
+    }
+    if (!this.open) return;
+    if (lobbyChanged) void this.refresh();
+    else if (touched && this.tab === "friends") this.render();
   }
 
   async refresh() {

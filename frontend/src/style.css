@@ -889,6 +889,40 @@ body {
   color: #a7abb4;
 }
 
+/* ---------- Member menu (leader taps a teammate's character) ---------- */
+.member-menu-backdrop {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(4, 2, 3, 0.55);
+  z-index: 40;
+}
+.member-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(260px, calc(100vw - 48px));
+  padding: 14px;
+  background: rgba(13, 6, 8, 0.97);
+  border: 1px solid rgba(229, 24, 46, 0.4);
+  border-radius: 16px;
+  backdrop-filter: blur(14px);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6), 0 0 24px rgba(229, 24, 46, 0.12);
+}
+.member-menu-title {
+  font-weight: 800;
+  font-size: 15px;
+  text-align: center;
+  padding: 2px 0 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.member-menu .btn {
+  width: 100%;
+}
+
 /* ---------- Friends panel ---------- */
 .friends-panel {
   position: absolute;
@@ -1131,6 +1165,15 @@ body {
   padding: 1px 6px;
   border-radius: 6px;
 }
+/* Unread marker on a conversation row — cleared when the thread is opened. */
+.chat-row-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--red);
+  box-shadow: 0 0 6px rgba(229, 24, 46, 0.9);
+}
 .chat-chevron {
   color: #4a5370;
   font-size: 18px;
@@ -1263,14 +1306,17 @@ body {
   }
 }
 /* landscape phones (the in-game orientation): full-height left column, over
-   the top-left chip and the chat button, game still visible on the right */
+   the top-left chip and the chat button, game still visible on the right.
+   Hugs the left edge (only backing off enough to clear a notch) and stays
+   narrow so it doesn't sprawl toward the middle of the screen. */
 @media (max-height: 520px) {
   .chat-panel {
     top: 8px;
-    left: max(10px, env(safe-area-inset-left));
+    left: 8px;
+    left: max(8px, calc(env(safe-area-inset-left) - 24px));
     right: auto;
     bottom: 8px;
-    width: min(400px, 56vw);
+    width: min(352px, 48vw);
     height: auto;
   }
 }

@@ -16,6 +16,12 @@ import { StandardMaterial } from "@babylonjs/core/Materials/standardMaterial";
 import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
 import { GlowLayer } from "@babylonjs/core/Layers/glowLayer";
 import "@babylonjs/core/Layers/effectLayerSceneComponent";
+import { PointerEventTypes } from "@babylonjs/core/Events/pointerEvents";
+// Side-effect import: registers the REAL Scene.prototype.pick. Without it,
+// tree-shaken builds get a stub that always returns an empty PickingInfo,
+// so character taps silently hit nothing.
+import "@babylonjs/core/Culling/ray";
+import type { Node } from "@babylonjs/core/node";
 import type { Mesh } from "@babylonjs/core/Meshes/mesh";
 import { AdvancedDynamicTexture } from "@babylonjs/gui/2D/advancedDynamicTexture";
 import { TextBlock } from "@babylonjs/gui/2D/controls/textBlock";
@@ -30,6 +36,10 @@ const SLOTS: [number, number][] = [
   [-4.6, -1.4],
 ];
 
+function plateText(member: LobbyMember): string {
+  return `${member.name}${member.isLeader ? " ★" : ""}\nUID ${member.uid}`;
+}
+
 function colorFromUid(uid: string): Color3 {
   let hash = 0;
   for (let i = 0; i < uid.length; i++) hash = (hash * 31 + uid.charCodeAt(i)) >>> 0;
@@ -38,7 +48,13 @@ function colorFromUid(uid: string): Color3 {
 }
 
 interface CharacterInstance {
+  /** Fixed slot node — parent of everything, including the pedestal disc. */
+  anchor: TransformNode;
+  /** Animated (bobbing) child holding the body meshes. */
   root: TransformNode;
+  /** Name plate text — updated in place when leadership moves. */
+  label: TextBlock;
+  isLeader: boolean;
   disposables: { dispose: () => void }[];
 }
 
@@ -49,13 +65,31 @@ export class LobbyScene {
   private localUid: string;
   private time = 0;
 
-  constructor(engine: Engine, localUid: string) {
+  constructor(engine: Engine, localUid: string, onMemberTap?: (uid: string) => void) {
     this.localUid = localUid;
     this.scene = new Scene(engine);
     const scene = this.scene;
 
     scene.clearColor = new Color4(0.02, 0.03, 0.07, 1);
     scene.skipPointerMovePicking = true; // no hover picking needed in the lobby
+
+    // Tap a character → report which member was tapped (one raycast per tap,
+    // never per frame; camera drags don't count as taps). The picked mesh's
+    // ancestor chain carries the member uid in its metadata.
+    if (onMemberTap) {
+      scene.onPointerObservable.add((pointerInfo) => {
+        if (pointerInfo.type !== PointerEventTypes.POINTERTAP) return;
+        let node: Node | null = pointerInfo.pickInfo?.pickedMesh ?? null;
+        while (node) {
+          const uid = (node.metadata as { memberUid?: string } | null)?.memberUid;
+          if (uid) {
+            onMemberTap(uid);
+            return;
+          }
+          node = node.parent;
+        }
+      });
+    }
 
     // Camera: gentle framing like a lobby showcase; user can rotate a little.
     const camera = new ArcRotateCamera("cam", -Math.PI / 2, 1.25, 9, new Vector3(0, 1.2, 0), scene);
@@ -101,6 +135,7 @@ export class LobbyScene {
 
     // Floor
     const ground = MeshBuilder.CreateDisc("ground", { radius: 14, tessellation: 48 }, scene);
+    ground.isPickable = false; // only characters need tap-picking
     ground.rotation.x = Math.PI / 2;
     const groundMat = new StandardMaterial("groundMat", scene);
     groundMat.diffuseColor = new Color3(0.05, 0.07, 0.13);
@@ -109,6 +144,7 @@ export class LobbyScene {
 
     // Neon ring accent around the stage
     const ring = MeshBuilder.CreateTorus("ring", { diameter: 12, thickness: 0.06, tessellation: 64 }, scene);
+    ring.isPickable = false;
     ring.position.y = 0.02;
     const ringMat = new StandardMaterial("ringMat", scene);
     ringMat.emissiveColor = new Color3(0.1, 0.6, 1.0);
@@ -120,11 +156,13 @@ export class LobbyScene {
     panelMat.diffuseColor = new Color3(0.04, 0.05, 0.1);
     panelMat.emissiveColor = new Color3(0.01, 0.02, 0.05);
     const basePanel = MeshBuilder.CreateBox("panel0", { width: 2.2, height: 6, depth: 0.3 }, scene);
+    basePanel.isPickable = false;
     basePanel.material = panelMat;
     basePanel.position.set(0, 3, 8);
     for (let i = 1; i < 7; i++) {
       // Instances share geometry+material: 7 panels ≈ cost of 1 draw call
       const inst = basePanel.createInstance(`panel${i}`);
+      inst.isPickable = false;
       const angle = (i - 3) * 0.28;
       inst.position.set(Math.sin(angle) * 11, 3, Math.cos(angle) * 8 + 1);
       inst.rotation.y = -angle;
@@ -145,12 +183,14 @@ export class LobbyScene {
       a.uid === this.localUid ? -1 : b.uid === this.localUid ? 1 : a.uid.localeCompare(b.uid)
     );
 
-    // Remove characters that left.
+    // Remove characters that left. Disposing the anchor takes the whole
+    // hierarchy with it — body, name plate link AND the pedestal disc, which
+    // used to linger as a bare white plate when only the root was disposed.
     const keep = new Set(ordered.map((m) => m.uid));
     for (const [uid, character] of this.characters) {
       if (!keep.has(uid)) {
+        character.anchor.dispose();
         character.disposables.forEach((d) => d.dispose());
-        character.root.dispose();
         this.characters.delete(uid);
       }
     }
@@ -159,7 +199,12 @@ export class LobbyScene {
       const [x, z] = SLOTS[index] ?? [0, 0];
       const existing = this.characters.get(member.uid);
       if (existing) {
-        (existing.root.parent as TransformNode).position.set(x, 0, z);
+        existing.anchor.position.set(x, 0, z);
+        if (existing.isLeader !== member.isLeader) {
+          // Leadership moved (transfer / old leader left) — restar the plate.
+          existing.isLeader = member.isLeader;
+          existing.label.text = plateText(member);
+        }
         return;
       }
       this.characters.set(member.uid, this.createCharacter(member, x, z));
@@ -174,6 +219,7 @@ export class LobbyScene {
 
     // anchor = fixed slot position; root = animated (bobbing) child
     const anchor = new TransformNode(`anchor_${member.uid}`, scene);
+    anchor.metadata = { memberUid: member.uid }; // tap-picking looks this up
     anchor.position.set(x, 0, z);
     const root = new TransformNode(`char_${member.uid}`, scene);
     root.parent = anchor;
@@ -248,7 +294,7 @@ export class LobbyScene {
     plate.linkOffsetY = -70;
 
     const label = new TextBlock(`label_${member.uid}`);
-    label.text = `${member.name}${member.isLeader ? " ★" : ""}\nUID ${member.uid}`;
+    label.text = plateText(member);
     label.color = "#e8ecf8";
     label.fontSize = 13;
     label.fontFamily = "system-ui, sans-serif";
@@ -258,7 +304,7 @@ export class LobbyScene {
     // Characters face the camera side
     anchor.rotation.y = Math.PI;
 
-    return { root, disposables };
+    return { anchor, root, label, isLeader: member.isLeader, disposables };
   }
 
   dispose() {

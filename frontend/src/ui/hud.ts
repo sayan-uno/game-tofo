@@ -20,7 +20,7 @@ export class Hud {
   private modeName: HTMLElement;
   private modeCount: HTMLElement;
   private modePop: HTMLElement;
-  private mode: LobbyMode = "squad";
+  private mode: LobbyMode = "solo";
 
   constructor(user: User, callbacks: HudCallbacks) {
     this.root = document.createElement("div");
@@ -41,11 +41,12 @@ export class Hud {
       <div class="hud-bottom">
         <button class="btn btn-ghost leave-btn hidden">Leave</button>
         <button class="mode-card" title="Change party mode">
-          <span class="mode-info"><span class="mode-name">SQUAD</span><span class="mode-count">1/4</span></span>
+          <span class="mode-info"><span class="mode-name">SOLO</span><span class="mode-count">1/1</span></span>
           <span class="mode-caret">▲</span>
         </button>
       </div>
       <div class="mode-pop hidden">
+        <button data-mode="solo" class="mode-opt"><strong>SOLO</strong><span>Play on your own</span></button>
         <button data-mode="duo" class="mode-opt"><strong>DUO</strong><span>Up to 2 players</span></button>
         <button data-mode="squad" class="mode-opt"><strong>SQUAD</strong><span>Up to 4 players</span></button>
       </div>
@@ -107,13 +108,15 @@ export class Hud {
 
   setLobby(memberCount: number, _isOwnLobby: boolean, mode: LobbyMode) {
     this.mode = mode;
-    const capacity = mode === "duo" ? 2 : 4;
+    const capacity = mode === "solo" ? 1 : mode === "duo" ? 2 : 4;
     this.modeName.textContent = mode.toUpperCase();
     this.modeCount.textContent = `${memberCount}/${capacity}`;
     this.modePop.querySelectorAll<HTMLElement>(".mode-opt").forEach((btn) => {
       btn.classList.toggle("active", btn.dataset.mode === mode);
     });
-    // Leaders can leave too — the group passes to the longest-present member.
-    this.leaveBtn.classList.toggle("hidden", memberCount <= 1);
+    // Leave is available whenever a party is open — even for an owner left
+    // alone in it (leaving drops them back to solo). Leaders with teammates
+    // can leave too; the group passes to the longest-present member.
+    this.leaveBtn.classList.toggle("hidden", mode === "solo");
   }
 }

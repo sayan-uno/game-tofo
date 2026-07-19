@@ -1,5 +1,5 @@
 import { api } from "../api/http";
-import { emitAck } from "../api/socket";
+import { emitAck, getSocket } from "../api/socket";
 import { actionToast, toast } from "./toast";
 import type { ChatMessage, ChatThread, DmHistory, Friend, TeamHistory, User } from "../types";
 
@@ -35,6 +35,12 @@ export class ChatPanel {
   private msgsEl: HTMLElement | null = null;
   private renderSeq = 0;
   private unread: Record<Tab, boolean> = { team: false, friends: false, recent: false };
+  /** Senders whose conversation has messages I haven't opened yet — each of
+   *  their rows shows a red dot until I open that thread. */
+  private unreadFrom = new Set<string>();
+  /** Threads opened this session — keeps the boot-time seed (fetched before
+   *  the user could read anything) from re-flagging an already-read thread. */
+  private readThisSession = new Set<string>();
   private vvHandler = () => this.adjustForKeyboard();
 
   constructor(container: HTMLElement, private me: User, private cb: ChatCallbacks) {
@@ -79,6 +85,22 @@ export class ChatPanel {
     this.cb.onUnread(this.unread.team || this.unread.friends || this.unread.recent);
   }
 
+  /** Boot-time restore of unread markers that accrued while I was offline.
+   *  Only ever adds dots — anything read since login stays read. */
+  seedUnread(entries: { uid: string; isFriend: boolean }[]) {
+    let friends = false;
+    let recent = false;
+    for (const entry of entries) {
+      if (this.readThisSession.has(entry.uid)) continue;
+      this.unreadFrom.add(entry.uid);
+      if (entry.isFriend) friends = true;
+      else recent = true;
+    }
+    if (friends) this.setUnread("friends", true);
+    if (recent) this.setUnread("recent", true);
+    if ((friends || recent) && this.open && this.activeDm === null) this.renderTab();
+  }
+
   /** Called on every lobby:members update. */
   setTeam(inTeam: boolean) {
     if (this.inTeam === inTeam) return;
@@ -89,12 +111,17 @@ export class ChatPanel {
 
   onDmReceived(msg: DmEvent) {
     const section: Tab = msg.isFriend ? "friends" : "recent";
-    const viewingThread =
-      this.open && this.tab === section && this.activeDm !== null && this.activeDm.user.uid === msg.from.uid;
+    // The open thread counts as read wherever it was opened from.
+    const viewingThread = this.open && this.activeDm !== null && this.activeDm.user.uid === msg.from.uid;
     const viewingList = this.open && this.tab === section && this.activeDm === null;
     if (viewingThread) {
       this.appendMsg({ id: msg.id, fromMe: false, body: msg.body, at: msg.at });
-    } else if (viewingList) {
+      // Seen live — drop the server-side unread marker too.
+      getSocket().emit("chat:read", { uid: msg.from.uid });
+      return;
+    }
+    this.unreadFrom.add(msg.from.uid);
+    if (viewingList) {
       this.renderTab(); // refresh previews in place — already looking at it
     } else {
       this.setUnread(section, true);
@@ -287,6 +314,7 @@ export class ChatPanel {
         }</div>
         <div class="chat-row-preview"></div>
       </div>
+      ${this.unreadFrom.has(user.uid) ? '<span class="chat-row-dot"></span>' : ""}
       <span class="chat-chevron">›</span>
     `;
     row.querySelector(".chat-row-title")!.textContent = user.name;
@@ -323,6 +351,9 @@ export class ChatPanel {
       const data = await api.get<DmHistory>(`/api/chat/dm/${user.uid}`);
       if (this.stale(seq)) return;
       this.activeDm = { user: data.user, isFriend: data.isFriend, blockedByMe: data.blockedByMe };
+      // Opening the thread reads it (the server dropped its marker on the GET).
+      this.unreadFrom.delete(data.user.uid);
+      this.readThisSession.add(data.user.uid);
       this.renderDmThread(data);
     } catch (err) {
       if (this.stale(seq)) return;

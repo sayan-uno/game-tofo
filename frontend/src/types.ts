@@ -54,7 +54,7 @@ export interface TeamHistory {
   messages: ChatMessage[];
 }
 
-export type LobbyMode = "duo" | "squad";
+export type LobbyMode = "solo" | "duo" | "squad";
 
 export interface LobbyState {
   lobbyId: string;

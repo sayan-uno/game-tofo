@@ -41,20 +41,31 @@ const lobbyModeKey = (lobbyId: string) => `lobby:${lobbyId}:mode`;
 const lobbyJoinedKey = (lobbyId: string) => `lobby:${lobbyId}:joinedAt`;
 
 // Free Fire-style party modes. The mode belongs to the lobby (i.e. its
-// leader) and caps how many players can join.
-export type LobbyMode = "duo" | "squad";
+// leader) and caps how many players can join. "solo" means not in a group at
+// all — it's every player's state until they invite someone or join a party.
+export type LobbyMode = "solo" | "duo" | "squad";
 
 export function lobbyCapacity(mode: LobbyMode): number {
-  return mode === "duo" ? 2 : MAX_LOBBY_SIZE;
+  return mode === "solo" ? 1 : mode === "duo" ? 2 : MAX_LOBBY_SIZE;
 }
 
 export async function getLobbyMode(lobbyId: string): Promise<LobbyMode> {
   const mode = await redis.get(lobbyModeKey(lobbyId));
-  return mode === "duo" ? "duo" : "squad";
+  return mode === "duo" || mode === "squad" ? mode : "solo";
 }
 
 export async function setLobbyMode(lobbyId: string, mode: LobbyMode): Promise<void> {
   await redis.set(lobbyModeKey(lobbyId), mode);
+}
+
+/** Connect-time mode reset: a fresh session always starts solo. If the user's
+ *  own lobby still holds members (a leader reconnecting to their live squad),
+ *  the group mode is kept — writing squad only when no mode was stored, so a
+ *  legacy lobby from before solo existed can't be read as capacity 1. */
+export async function ensureLobbyModeOnConnect(lobbyId: string): Promise<void> {
+  const size = await redis.scard(lobbyKey(lobbyId));
+  if (size === 0) await redis.set(lobbyModeKey(lobbyId), "solo");
+  else await redis.set(lobbyModeKey(lobbyId), "squad", "NX");
 }
 
 export async function getUserLobby(userId: string): Promise<string | null> {
@@ -137,6 +148,30 @@ export async function createJoinRequest(requesterId: string, targetId: string): 
 
 export async function consumeJoinRequest(requesterId: string, targetId: string): Promise<boolean> {
   return (await redis.del(joinReqKey(requesterId, targetId))) > 0;
+}
+
+// ---- Unread DMs: set of sender uids whose messages the user hasn't opened.
+// ---- Lives in Redis (not Postgres) so red dots survive logouts without any
+// ---- read-state queries on the message tables; TTL mirrors chat retention.
+const unreadDmKey = (userId: string) => `unread:dm:${userId}`;
+const UNREAD_TTL_SECONDS = 15 * 24 * 60 * 60;
+
+export async function addUnreadDm(userId: string, senderUid: string): Promise<void> {
+  await redis
+    .multi()
+    .sadd(unreadDmKey(userId), senderUid)
+    .expire(unreadDmKey(userId), UNREAD_TTL_SECONDS)
+    .exec();
+}
+
+export async function clearUnreadDm(userId: string, senderUids: string | string[]): Promise<void> {
+  const uids = Array.isArray(senderUids) ? senderUids : [senderUids];
+  if (uids.length === 0) return;
+  await redis.srem(unreadDmKey(userId), ...uids);
+}
+
+export async function getUnreadDmUids(userId: string): Promise<string[]> {
+  return redis.smembers(unreadDmKey(userId));
 }
 
 // ---- Team chat sessions ----

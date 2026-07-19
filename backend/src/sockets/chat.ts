@@ -2,9 +2,12 @@ import { randomUUID } from "node:crypto";
 import type { Server, Socket } from "socket.io";
 import type { AuthPayload } from "../middleware/auth.js";
 import {
+  addUnreadDm,
   clearTeamSession,
+  clearUnreadDm,
   ensureTeamSession,
   getLobbyMembers,
+  getLobbyMode,
   getUserLobby,
 } from "../redis.js";
 import { areFriends, getUserByUid } from "../services/users.js";
@@ -20,17 +23,19 @@ interface AuthedSocket extends Socket {
   data: { auth: AuthPayload };
 }
 
-/** Keep the squad-chat session in step with lobby membership:
+/** Keep the squad-chat session in step with the party's lifetime:
  *  ≥2 members → make sure a session exists (a squad is alive);
- *  ≤1 member → the squad disbanded: drop the session AND its messages, so the
- *  chat disappears for everyone and the next squad starts blank. */
+ *  1 member in an open duo/squad → the group still lives (teammates left, but
+ *  the last player keeps the group and its chat until THEY leave too);
+ *  0 members, or the lobby dropped back to solo → the group is destroyed:
+ *  drop the session AND its messages so the next squad starts blank. */
 export async function syncTeamChatSession(lobbyId: string): Promise<void> {
-  const members = await getLobbyMembers(lobbyId);
-  if (members.length >= 2) {
-    await ensureTeamSession(lobbyId, randomUUID());
-  } else {
+  const [members, mode] = await Promise.all([getLobbyMembers(lobbyId), getLobbyMode(lobbyId)]);
+  if (members.length === 0 || mode === "solo") {
     const sessionId = await clearTeamSession(lobbyId);
     if (sessionId) await deleteTeamSessionMessages(sessionId);
+  } else if (members.length >= 2) {
+    await ensureTeamSession(lobbyId, randomUUID());
   }
 }
 
@@ -60,6 +65,10 @@ export function registerChatHandlers(io: Server, socket: AuthedSocket): void {
         if (blockState.byB) return ack?.({ error: "This player has blocked you" });
 
         const row = await insertDm(userId, target.id, text);
+        // Mark unread for the recipient — persists across their sessions; the
+        // recipient's client reports back (chat:read / opening the thread)
+        // when the conversation is actually looked at.
+        await addUnreadDm(target.id, uid);
         const isFriend = await areFriends(userId, target.id);
         io.to(`user:${target.id}`).emit("chat:dm", {
           id: row.id,
@@ -83,8 +92,11 @@ export function registerChatHandlers(io: Server, socket: AuthedSocket): void {
       const text = cleanBody(body);
       if (!text) return ack?.({ error: "Message must be 1–500 characters" });
       const lobbyId = await getUserLobby(userId);
-      const members = lobbyId ? await getLobbyMembers(lobbyId) : [];
-      if (!lobbyId || members.length < 2) return ack?.({ error: "You're not in a squad" });
+      if (!lobbyId) return ack?.({ error: "You're not in a squad" });
+      // Being alone in an open duo/squad still counts as in the group — only
+      // solo mode means there's no team to talk to.
+      const [members, mode] = await Promise.all([getLobbyMembers(lobbyId), getLobbyMode(lobbyId)]);
+      if (mode === "solo") return ack?.({ error: "You're not in a squad" });
 
       const sessionId = await ensureTeamSession(lobbyId, randomUUID());
       const row = await insertTeamMessage(sessionId, lobbyId, userId, text, members);
@@ -98,6 +110,16 @@ export function registerChatHandlers(io: Server, socket: AuthedSocket): void {
     } catch (err) {
       console.error("chat:team error:", err);
       ack?.({ error: "Send failed" });
+    }
+  });
+
+  // The client had this sender's thread open when a message arrived — the
+  // persistent unread marker can go (opening a thread clears via the DM GET).
+  socket.on("chat:read", async ({ uid: senderUid }: { uid?: string }) => {
+    try {
+      if (typeof senderUid === "string" && senderUid) await clearUnreadDm(userId, senderUid);
+    } catch (err) {
+      console.error("chat:read error:", err);
     }
   });
 }

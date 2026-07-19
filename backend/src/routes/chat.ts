@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth.js";
-import { getLobbyMembers, getTeamSession, getUserLobby } from "../redis.js";
+import { clearUnreadDm, getLobbyMode, getTeamSession, getUnreadDmUids, getUserLobby } from "../redis.js";
 import { areFriends, getFriendIds, getUserByUid, getUsersByIds, toPublicUser } from "../services/users.js";
 import {
   getBlockState,
@@ -58,6 +58,7 @@ chatRouter.get("/dm/:uid", async (req, res) => {
     listDmBetween(me, target.id),
     areFriends(me, target.id),
     getBlockState(me, target.id),
+    clearUnreadDm(me, target.uid), // opening the conversation reads it
   ]);
   res.json({
     user: toPublicUser(target),
@@ -72,12 +73,13 @@ chatRouter.get("/dm/:uid", async (req, res) => {
   });
 });
 
-/** Current squad chat — only what this viewer was present for. */
+/** Current squad chat — only what this viewer was present for. A player left
+ *  alone in an open duo/squad is still in the team (the group only dies when
+ *  its last member leaves), so the tab and history survive teammates leaving. */
 chatRouter.get("/team", async (req, res) => {
   const me = req.auth!.userId;
   const lobbyId = await getUserLobby(me);
-  const members = lobbyId ? await getLobbyMembers(lobbyId) : [];
-  if (!lobbyId || members.length < 2) {
+  if (!lobbyId || (await getLobbyMode(lobbyId)) === "solo") {
     res.json({ inTeam: false, messages: [] });
     return;
   }
@@ -102,6 +104,19 @@ chatRouter.get("/team", async (req, res) => {
   });
 });
 
+/** Senders with messages I haven't opened yet — restores the red dots (HUD,
+ *  section tabs, chat rows) when the player comes back online. */
+chatRouter.get("/unread", async (req, res) => {
+  const me = req.auth!.userId;
+  const uids = await getUnreadDmUids(me);
+  if (uids.length === 0) {
+    res.json({ unread: [] });
+    return;
+  }
+  const friendUids = new Set((await getUsersByIds(await getFriendIds(me))).map((u) => u.uid));
+  res.json({ unread: uids.map((uid) => ({ uid, isFriend: friendUids.has(uid) })) });
+});
+
 /** Hide one conversation from MY view (a marker, not a delete — the other
  *  player keeps their copy; real deletion is the 15-day retention sweep). */
 chatRouter.post("/clear", async (req, res) => {
@@ -112,7 +127,7 @@ chatRouter.post("/clear", async (req, res) => {
     res.status(404).json({ error: "Player not found" });
     return;
   }
-  await setDmCleared(me, target.id);
+  await Promise.all([setDmCleared(me, target.id), clearUnreadDm(me, target.uid)]);
   res.json({ ok: true });
 });
 
@@ -122,7 +137,8 @@ chatRouter.post("/clear-recent", async (req, res) => {
   const [latestByPartner, friendIds] = await Promise.all([listDmThreads(me), getFriendIds(me)]);
   const friends = new Set(friendIds);
   const recentPartners = [...latestByPartner.keys()].filter((id) => !friends.has(id));
-  await Promise.all(recentPartners.map((partnerId) => setDmCleared(me, partnerId)));
+  const partnerUids = (await getUsersByIds(recentPartners)).map((u) => u.uid);
+  await Promise.all([...recentPartners.map((partnerId) => setDmCleared(me, partnerId)), clearUnreadDm(me, partnerUids)]);
   res.json({ ok: true, cleared: recentPartners.length });
 });
 
@@ -134,7 +150,7 @@ chatRouter.post("/block", async (req, res) => {
     res.status(404).json({ error: "Player not found" });
     return;
   }
-  await blockUser(me, target.id);
+  await Promise.all([blockUser(me, target.id), clearUnreadDm(me, target.uid)]);
   res.json({ ok: true });
 });
 

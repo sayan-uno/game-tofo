@@ -8,6 +8,7 @@ import {
   getLobbyMembers,
   getLobbyMode,
   setLobbyMode,
+  ensureLobbyModeOnConnect,
   lobbyCapacity,
   joinLobby,
   leaveLobby,
@@ -50,8 +51,9 @@ async function moveToLobby(io: Server, socket: AuthedSocket, lobbyId: string): P
   }
   const ok = await joinLobby(userId, lobbyId);
   if (!ok) {
-    // Lobby full — fall back to own solo lobby.
+    // Lobby full — fall back to own lobby, on your own again → solo.
     const solo = `L${socket.data.auth.uid}`;
+    await setLobbyMode(solo, "solo");
     await joinLobby(userId, solo);
     socket.join(`room:${solo}`);
     await broadcastLobby(io, solo);
@@ -62,6 +64,28 @@ async function moveToLobby(io: Server, socket: AuthedSocket, lobbyId: string): P
   await broadcastLobby(io, lobbyId);
   await syncTeamChatSession(lobbyId);
   return true;
+}
+
+/** Rehome a set of members under a new leader's lobby id: Redis membership
+ *  (join times survive → seniority is kept), the party mode, the team chat
+ *  session and everyone's socket rooms all move together. */
+async function rehomeMembers(
+  io: Server,
+  oldLobbyId: string,
+  newLobbyId: string,
+  memberIds: string[],
+  joinTimes: Map<string, number>
+): Promise<void> {
+  await migrateLobbyMembers(oldLobbyId, newLobbyId, memberIds, joinTimes);
+  await moveTeamSession(oldLobbyId, newLobbyId);
+  for (const memberId of memberIds) {
+    const socketId = await getSocketId(memberId);
+    const memberSocket = socketId ? io.sockets.sockets.get(socketId) : null;
+    memberSocket?.leave(`room:${oldLobbyId}`);
+    memberSocket?.join(`room:${newLobbyId}`);
+  }
+  await broadcastLobby(io, newLobbyId);
+  await syncTeamChatSession(newLobbyId);
 }
 
 /** A leader's lobby id IS their identity (L<uid>), so a leader "leaving" means
@@ -84,19 +108,11 @@ async function migrateGroupOnLeaderLeave(io: Server, socket: AuthedSocket): Prom
   );
   const [newLeader] = await getUsersByIds([newLeaderId]);
   if (!newLeader) return false;
-  const newLobbyId = `L${newLeader.uid}`;
 
-  await migrateLobbyMembers(ownLobby, newLobbyId, remaining, joinTimes);
-  await moveTeamSession(ownLobby, newLobbyId);
-  for (const memberId of remaining) {
-    const socketId = await getSocketId(memberId);
-    const memberSocket = socketId ? io.sockets.sockets.get(socketId) : null;
-    memberSocket?.leave(`room:${ownLobby}`);
-    memberSocket?.join(`room:${newLobbyId}`);
-  }
-  // Old leader stays in their own (now solo) lobby — no membership change needed.
-  await broadcastLobby(io, newLobbyId);
-  await syncTeamChatSession(newLobbyId);
+  await rehomeMembers(io, ownLobby, `L${newLeader.uid}`, remaining, joinTimes);
+  // The departing leader stays in their own (now empty of others) lobby, on
+  // their own again — no membership change needed.
+  await setLobbyMode(ownLobby, "solo");
   await broadcastLobby(io, ownLobby);
   await syncTeamChatSession(ownLobby);
   return true;
@@ -139,8 +155,15 @@ export function registerSockets(io: Server) {
           return ack?.({ error: `${target.name} has Do Not Disturb on` });
         }
         const [members, mode] = await Promise.all([getLobbyMembers(lobbyId), getLobbyMode(lobbyId)]);
-        if (members.length >= lobbyCapacity(mode)) {
-          return ack?.({ error: mode === "duo" ? "Duo is full — switch to Squad for more players" : "Your squad is full" });
+        // Inviting from solo opens a party right away (Free Fire style): the
+        // group exists as soon as the invite goes out, accepted or not.
+        const effectiveMode = mode === "solo" ? "squad" : mode;
+        if (members.length >= lobbyCapacity(effectiveMode)) {
+          return ack?.({ error: effectiveMode === "duo" ? "Duo is full — switch to Squad for more players" : "Your squad is full" });
+        }
+        if (mode === "solo") {
+          await setLobbyMode(lobbyId, "squad");
+          await broadcastLobby(io, lobbyId);
         }
 
         io.to(`user:${target.id}`).emit("lobby:invite", { from: { uid, name }, lobbyId });
@@ -179,8 +202,11 @@ export function registerSockets(io: Server) {
         const targetLobby = (await getUserLobby(target.id)) ?? `L${target.uid}`;
         const myLobby = (await getUserLobby(userId)) ?? soloLobby;
         if (targetLobby === myLobby) return ack?.({ error: "You're already in this group" });
+        // A solo player can always take one joiner — approving forms a squad.
         const [members, mode] = await Promise.all([getLobbyMembers(targetLobby), getLobbyMode(targetLobby)]);
-        if (members.length >= lobbyCapacity(mode)) return ack?.({ error: "That group is full" });
+        if (members.length >= lobbyCapacity(mode === "solo" ? "squad" : mode)) {
+          return ack?.({ error: "That group is full" });
+        }
 
         await createJoinRequest(userId, target.id);
         io.to(`user:${target.id}`).emit("lobby:joinRequest", { from: { uid, name } });
@@ -211,6 +237,8 @@ export function registerSockets(io: Server) {
 
           const myLobby = (await getUserLobby(userId)) ?? soloLobby;
           if ((await getUserLobby(requester.id)) === myLobby) return ack?.({ ok: true });
+          // Approving while solo forms the group.
+          if ((await getLobbyMode(myLobby)) === "solo") await setLobbyMode(myLobby, "squad");
           const joined = await moveToLobby(io, requesterSocket as AuthedSocket, myLobby);
           if (!joined) return ack?.({ error: "Your group is full" });
           io.to(`user:${requester.id}`).emit("lobby:joinApproved", { name });
@@ -233,19 +261,26 @@ export function registerSockets(io: Server) {
       }
     });
 
-    // Change my party mode (Free Fire style Duo/Squad). Leader only, and you
-    // can't shrink to Duo while more than 2 players are in the party.
+    // Change my party mode (Free Fire style Solo/Duo/Squad). Leader only, and
+    // you can't shrink below the number of players already in the party.
     socket.on("lobby:mode", async ({ mode }: { mode?: string }, ack?: (r: object) => void) => {
       try {
-        if (mode !== "duo" && mode !== "squad") return ack?.({ error: "Unknown mode" });
+        if (mode !== "solo" && mode !== "duo" && mode !== "squad") return ack?.({ error: "Unknown mode" });
         const lobbyId = (await getUserLobby(userId)) ?? soloLobby;
         if (lobbyId !== soloLobby) return ack?.({ error: "Only the party leader can change the mode" });
         const members = await getLobbyMembers(lobbyId);
         if (members.length > lobbyCapacity(mode)) {
-          return ack?.({ error: `Duo supports 2 players — your party has ${members.length}` });
+          return ack?.({
+            error:
+              mode === "solo"
+                ? "Solo means playing alone — your party still has teammates"
+                : `Duo supports 2 players — your party has ${members.length}`,
+          });
         }
         await setLobbyMode(lobbyId, mode);
         await broadcastLobby(io, lobbyId);
+        // Picking SOLO dissolves the group like leaving does — drop its chat.
+        await syncTeamChatSession(lobbyId);
         ack?.({ ok: true, mode });
       } catch (err) {
         console.error("lobby:mode error:", err);
@@ -253,12 +288,76 @@ export function registerSockets(io: Server) {
       }
     });
 
-    // Leave the group. Members go back to their own solo lobby; a LEADER
-    // leaving hands the group to the longest-present member instead.
+    // Hand the crown to a teammate (leader only): the whole group — members,
+    // join times, party mode, team chat — moves under the new leader's lobby
+    // id and nobody's spot changes.
+    socket.on("lobby:transferLead", async ({ targetUid }: { targetUid?: string }, ack?: (r: object) => void) => {
+      try {
+        const target = await getUserByUid(String(targetUid || ""));
+        if (!target) return ack?.({ error: "Player not found" });
+        if (target.id === userId) return ack?.({ error: "You're already the leader" });
+        if ((await getUserLobby(userId)) !== soloLobby) {
+          return ack?.({ error: "Only the group leader can transfer leadership" });
+        }
+        const members = await getLobbyMembers(soloLobby);
+        if (!members.includes(target.id)) return ack?.({ error: "That player isn't in your group" });
+
+        const newLobbyId = `L${target.uid}`;
+        const joinTimes = await getLobbyJoinTimes(soloLobby);
+        await rehomeMembers(io, soloLobby, newLobbyId, members, joinTimes);
+        // My old lobby id is empty now — reset it for my next fresh session.
+        await setLobbyMode(soloLobby, "solo");
+        io.to(`room:${newLobbyId}`).emit("lobby:leader", { uid: target.uid, name: target.name });
+        ack?.({ ok: true });
+      } catch (err) {
+        console.error("lobby:transferLead error:", err);
+        ack?.({ error: "Transfer failed" });
+      }
+    });
+
+    // Kick a member out of my group (leader only). They land back in their
+    // own lobby in solo mode; the group lives on for everyone else.
+    socket.on("lobby:kick", async ({ targetUid }: { targetUid?: string }, ack?: (r: object) => void) => {
+      try {
+        const target = await getUserByUid(String(targetUid || ""));
+        if (!target) return ack?.({ error: "Player not found" });
+        if (target.id === userId) return ack?.({ error: "You can't kick yourself — use Leave" });
+        if ((await getUserLobby(userId)) !== soloLobby) {
+          return ack?.({ error: "Only the group leader can kick players" });
+        }
+        if ((await getUserLobby(target.id)) !== soloLobby) {
+          return ack?.({ error: "That player isn't in your group" });
+        }
+
+        await setLobbyMode(`L${target.uid}`, "solo");
+        const targetSocketId = await getSocketId(target.id);
+        const targetSocket = targetSocketId ? io.sockets.sockets.get(targetSocketId) : null;
+        if (targetSocket) {
+          await moveToLobby(io, targetSocket as AuthedSocket, `L${target.uid}`);
+        } else {
+          // They dropped offline mid-kick — just detach their membership.
+          await leaveLobby(target.id);
+          await broadcastLobby(io, soloLobby);
+          await syncTeamChatSession(soloLobby);
+        }
+        io.to(`user:${target.id}`).emit("lobby:kicked", { by: name });
+        ack?.({ ok: true });
+      } catch (err) {
+        console.error("lobby:kick error:", err);
+        ack?.({ error: "Kick failed" });
+      }
+    });
+
+    // Leave the group. Members go back to their own lobby in solo mode; a
+    // LEADER leaving hands the group to the longest-present member instead.
+    // Works even when alone in a duo/squad party — it drops you back to solo.
     socket.on("lobby:leave", async (ack?: (r: object) => void) => {
       try {
         const migrated = await migrateGroupOnLeaderLeave(io, socket);
-        if (!migrated) await moveToLobby(io, socket, soloLobby);
+        if (!migrated) {
+          await setLobbyMode(soloLobby, "solo");
+          await moveToLobby(io, socket, soloLobby);
+        }
         ack?.({ ok: true, lobbyId: soloLobby });
       } catch (err) {
         console.error("lobby:leave error:", err);
@@ -299,7 +398,9 @@ export function registerSockets(io: Server) {
       await setOnline(userId, socket.id);
       socket.join(`user:${userId}`);
 
-      // Everyone sits in their own solo lobby by default (like Free Fire).
+      // Everyone starts a session in their own lobby, in solo mode (like Free
+      // Fire) — unless their squad is still alive and waiting for them.
+      await ensureLobbyModeOnConnect(soloLobby);
       await moveToLobby(io, socket, soloLobby);
 
       // Tell online friends I'm here.
