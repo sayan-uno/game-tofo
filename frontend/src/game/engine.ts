@@ -18,6 +18,19 @@ export function createEngine(canvas: HTMLCanvasElement): Engine {
   const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
   engine.setHardwareScalingLevel(1 / dpr);
 
+  // Phones: a canvas tap must never synthesize "ghost" mouse events. Babylon
+  // input + GUI run on real Pointer Events, so the compat mousedown/mouseup/
+  // click that browsers fire AFTER touchend are pure hazard: any DOM overlay
+  // a GUI tap opens (e.g. the member menu) mounts under the finger first,
+  // catches that late click, and instantly closes ("flickers shut" bug).
+  canvas.addEventListener(
+    "touchend",
+    (e) => {
+      if (e.cancelable) e.preventDefault();
+    },
+    { passive: false }
+  );
+
   window.addEventListener("resize", () => engine.resize());
 
   document.addEventListener("visibilitychange", () => {
