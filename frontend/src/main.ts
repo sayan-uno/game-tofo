@@ -128,7 +128,8 @@ async function enterLobby(user: User) {
           if (res.error) toast(res.error, true);
         });
       },
-      () => {}
+      () => {},
+      7000
     );
   });
 
@@ -142,7 +143,9 @@ async function enterLobby(user: User) {
       },
       () => {
         void emitAck("lobby:joinRespond", { requesterUid: from.uid, accept: false });
-      }
+      },
+      7000,
+      () => {} // expiry vanishes silently — only a pressed Decline notifies
     );
   });
 

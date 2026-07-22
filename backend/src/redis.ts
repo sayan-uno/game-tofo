@@ -138,6 +138,27 @@ export async function isDnd(userId: string): Promise<boolean> {
   return (await redis.get(dndKey(userId))) === "1";
 }
 
+// ---- Send cooldowns: one invite / join-request per target per window, so a
+// ---- player can't be popup-spammed. SET NX EX = atomic check-and-arm in one
+// ---- round trip; the key simply expires when the window ends.
+const SEND_COOLDOWN_SECONDS = 10;
+const sendCooldownKey = (kind: "invite" | "joinreq", fromId: string, toId: string) =>
+  `cooldown:${kind}:${fromId}:${toId}`;
+
+/** Arms the cooldown if clear. Returns 0 when the send is allowed, otherwise
+ *  the seconds left until this sender may target this player again. */
+export async function armSendCooldown(
+  kind: "invite" | "joinreq",
+  fromId: string,
+  toId: string
+): Promise<number> {
+  const key = sendCooldownKey(kind, fromId, toId);
+  const set = await redis.set(key, "1", "EX", SEND_COOLDOWN_SECONDS, "NX");
+  if (set === "OK") return 0;
+  const ttl = await redis.ttl(key); // only on the blocked path
+  return ttl > 0 ? ttl : SEND_COOLDOWN_SECONDS;
+}
+
 // ---- Pending join requests (consent marker so an "approval" can never pull
 // ---- in a friend who didn't actually ask; expires after a minute) ----
 const joinReqKey = (requesterId: string, targetId: string) => `joinreq:${requesterId}:${targetId}`;

@@ -21,12 +21,16 @@ export function toast(message: string, isError = false, durationMs = 3500) {
   }, durationMs);
 }
 
-/** Toast with Accept / Decline buttons (used for lobby invites). */
+/** Toast with Accept / Decline buttons (used for lobby invites). Auto-closes
+ *  after `durationMs`; that timeout runs `onTimeout` — which defaults to
+ *  `onDecline`, so pass an explicit no-op when expiry should stay silent
+ *  (vanish without notifying the sender). */
 export function actionToast(
   message: string,
   onAccept: () => void,
   onDecline: () => void,
-  durationMs = 15000
+  durationMs = 15000,
+  onTimeout: () => void = onDecline
 ) {
   const el = document.createElement("div");
   el.className = "toast toast-action";
@@ -52,7 +56,7 @@ export function actionToast(
   };
   const timer = setTimeout(() => {
     close();
-    onDecline();
+    onTimeout();
   }, durationMs);
   acceptBtn.onclick = () => {
     clearTimeout(timer);

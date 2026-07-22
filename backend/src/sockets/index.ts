@@ -14,6 +14,7 @@ import {
   leaveLobby,
   setDnd,
   isDnd,
+  armSendCooldown,
   createJoinRequest,
   consumeJoinRequest,
   getLobbyJoinTimes,
@@ -161,6 +162,11 @@ export function registerSockets(io: Server) {
         if (members.length >= lobbyCapacity(effectiveMode)) {
           return ack?.({ error: effectiveMode === "duo" ? "Duo is full — switch to Squad for more players" : "Your squad is full" });
         }
+        // Last check, so a failed invite never burns the cooldown window.
+        const wait = await armSendCooldown("invite", userId, target.id);
+        if (wait > 0) {
+          return ack?.({ error: `Wait ${wait}s before inviting ${target.name} again` });
+        }
         if (mode === "solo") {
           await setLobbyMode(lobbyId, "squad");
           await broadcastLobby(io, lobbyId);
@@ -208,6 +214,11 @@ export function registerSockets(io: Server) {
           return ack?.({ error: "That group is full" });
         }
 
+        // Last check, so a failed request never burns the cooldown window.
+        const wait = await armSendCooldown("joinreq", userId, target.id);
+        if (wait > 0) {
+          return ack?.({ error: `Wait ${wait}s before asking ${target.name} again` });
+        }
         await createJoinRequest(userId, target.id);
         io.to(`user:${target.id}`).emit("lobby:joinRequest", { from: { uid, name } });
         ack?.({ ok: true });
