@@ -1,7 +1,37 @@
-import { and, desc, eq, or } from "drizzle-orm";
+import { and, count, desc, eq, or } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { friendships, users } from "../db/schema.js";
 import { getFriendIds, getUsersByIds, type UserRow } from "./users.js";
+
+/** Hard caps enforced on send AND on accept (a list can fill up while a
+ *  request sits pending). Soft-checked — no locking; a race can overshoot by
+ *  one, which is fine for a social cap and keeps the requests cheap. */
+export const MAX_FRIENDS = 500;
+export const MAX_PENDING_REQUESTS = 100;
+
+/** Accepted friendships the user is part of (either side). Index-covered:
+ *  bitmap-OR over idx_friendships_requester + idx_friendships_addressee. */
+export async function countAcceptedFriends(userId: string): Promise<number> {
+  const [row] = await db
+    .select({ n: count() })
+    .from(friendships)
+    .where(
+      and(
+        eq(friendships.status, "accepted"),
+        or(eq(friendships.requesterId, userId), eq(friendships.addresseeId, userId))
+      )
+    );
+  return row?.n ?? 0;
+}
+
+/** Pending requests sitting in the user's inbox (idx_friendships_addressee). */
+export async function countPendingIncoming(userId: string): Promise<number> {
+  const [row] = await db
+    .select({ n: count() })
+    .from(friendships)
+    .where(and(eq(friendships.addresseeId, userId), eq(friendships.status, "pending")));
+  return row?.n ?? 0;
+}
 
 /** Accepted friends of a user, sorted by name. */
 export async function listFriends(userId: string): Promise<UserRow[]> {

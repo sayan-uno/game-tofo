@@ -50,27 +50,19 @@ async function enterLobby(user: User) {
     if (!state || uid === user.uid || state.lobbyId !== `L${user.uid}`) return;
     const member = state.members.find((m) => m.uid === uid);
     if (!member) return;
+    // Menu buttons act immediately — opening the menu is the deliberate step,
+    // a second accept/decline prompt was dropped on purpose.
     showMemberMenu(member.name, {
-      onTransfer: () =>
-        actionToast(
-          `Make ${member.name} the group leader?`,
-          () => {
-            void emitAck("lobby:transferLead", { targetUid: uid }).then((res) => {
-              if (res.error) toast(res.error, true);
-            });
-          },
-          () => {}
-        ),
-      onKick: () =>
-        actionToast(
-          `Remove ${member.name} from the group?`,
-          () => {
-            void emitAck("lobby:kick", { targetUid: uid }).then((res) => {
-              if (res.error) toast(res.error, true);
-            });
-          },
-          () => {}
-        ),
+      onTransfer: () => {
+        void emitAck("lobby:transferLead", { targetUid: uid }).then((res) => {
+          if (res.error) toast(res.error, true);
+        });
+      },
+      onKick: () => {
+        void emitAck("lobby:kick", { targetUid: uid }).then((res) => {
+          if (res.error) toast(res.error, true);
+        });
+      },
     });
   };
 

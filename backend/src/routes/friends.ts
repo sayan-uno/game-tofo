@@ -4,7 +4,11 @@ import { requireAuth } from "../middleware/auth.js";
 import { getLobbyMembers, getOnlineSet, getUserLobby, isDnd } from "../redis.js";
 import { getUserByUid, toPublicUser } from "../services/users.js";
 import {
+  MAX_FRIENDS,
+  MAX_PENDING_REQUESTS,
   acceptFriendRequest,
+  countAcceptedFriends,
+  countPendingIncoming,
   createFriendRequest,
   deleteFriendship,
   findFriendshipBetween,
@@ -85,6 +89,20 @@ export function friendsRouter(io: Server) {
       }
       return;
     }
+    // Caps: the sender needs room in their friend list, the target needs room
+    // in their request inbox. Two parallel index-covered counts.
+    const [senderFriends, targetPending] = await Promise.all([
+      countAcceptedFriends(userId),
+      countPendingIncoming(target.id),
+    ]);
+    if (senderFriends >= MAX_FRIENDS) {
+      res.status(409).json({ error: `You reached the max friend limit (${MAX_FRIENDS})` });
+      return;
+    }
+    if (targetPending >= MAX_PENDING_REQUESTS) {
+      res.status(409).json({ error: "This player's friend request list is full" });
+      return;
+    }
     const requestId = await createFriendRequest(userId, target.id);
     // Realtime ping to the target if they're online.
     io.to(`user:${target.id}`).emit("friend:request", {
@@ -132,6 +150,21 @@ export function friendsRouter(io: Server) {
       return;
     }
     if (accept) {
+      // Both sides need room: the accepter, and the requester — whose list may
+      // have filled up while this request sat pending. The request stays
+      // pending on rejection, so it can be accepted later after an unfriend.
+      const [accepterFriends, requesterFriends] = await Promise.all([
+        countAcceptedFriends(userId),
+        countAcceptedFriends(pending.requesterId),
+      ]);
+      if (accepterFriends >= MAX_FRIENDS) {
+        res.status(409).json({ error: `You reached the max friend limit (${MAX_FRIENDS})` });
+        return;
+      }
+      if (requesterFriends >= MAX_FRIENDS) {
+        res.status(409).json({ error: "This player reached the max friend limit" });
+        return;
+      }
       await acceptFriendRequest(requestId);
       io.to(`user:${pending.requesterId}`).emit("friend:accepted", {
         uid: req.auth!.uid,
