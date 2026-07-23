@@ -58,7 +58,15 @@ async function broadcastLobby(io: Server, lobbyId: string) {
 }
 
 async function moveToLobby(io: Server, socket: AuthedSocket, lobbyId: string): Promise<boolean> {
-  const { userId } = socket.data.auth;
+  const { userId, uid } = socket.data.auth;
+  // Moving into someone ELSE's lobby while leading a live group hands that
+  // group off first (accepting an invite, joining by code, an approved join
+  // request). Otherwise the members stay parked under this user's L<uid> —
+  // and since a later leadership transfer rehomes its group under that same
+  // id, they would silently merge into it, old team code included. Moving to
+  // the OWN lobby must skip this: that's the reconnect path, where a leader
+  // rejoins the squad that waited for them.
+  if (lobbyId !== `L${uid}`) await handOffGroupIfLeading(io, socket);
   const previous = await leaveLobby(userId);
   if (previous && previous !== lobbyId) {
     socket.leave(`room:${previous}`);
@@ -104,12 +112,15 @@ async function rehomeMembers(
   await syncTeamChatSession(newLobbyId);
 }
 
-/** A leader's lobby id IS their identity (L<uid>), so a leader "leaving" means
- *  everyone ELSE moves out: remaining members are rehomed under the new
- *  leader's lobby id — chosen as the longest-present member — carrying the
- *  party mode and the team chat session with them. Returns false when the
- *  departing user isn't a leader with members left behind (normal leave). */
-async function migrateGroupOnLeaderLeave(io: Server, socket: AuthedSocket): Promise<boolean> {
+/** A leader's lobby id IS their identity (L<uid>), so a leader walking out —
+ *  by leaving, or by moving into another group — means everyone ELSE moves
+ *  out: remaining members are rehomed under the new leader's lobby id —
+ *  chosen as the longest-present member — carrying the party mode and the
+ *  team chat session with them. The departing leader's own membership is
+ *  untouched; their lobby id drops back to solo so it's clean for whatever
+ *  lands on it next (a fresh session, or a leadership transfer back). Returns
+ *  false when the user isn't a leader with members left behind. */
+async function handOffGroupIfLeading(io: Server, socket: AuthedSocket): Promise<boolean> {
   const { userId, uid } = socket.data.auth;
   const ownLobby = `L${uid}`;
   if ((await getUserLobby(userId)) !== ownLobby) return false;
@@ -126,9 +137,17 @@ async function migrateGroupOnLeaderLeave(io: Server, socket: AuthedSocket): Prom
   if (!newLeader) return false;
 
   await rehomeMembers(io, ownLobby, `L${newLeader.uid}`, remaining, joinTimes);
-  // The departing leader stays in their own (now empty of others) lobby, on
-  // their own again — no membership change needed.
   await setLobbyMode(ownLobby, "solo");
+  return true;
+}
+
+/** lobby:leave for a leader: hand the group off, then show the departing
+ *  leader their now-solo lobby (they stay in it — no membership change) and
+ *  drop its group-chat leftovers. moveToLobby covers those two steps itself
+ *  through its normal leave/broadcast flow, so it calls the hand-off alone. */
+async function migrateGroupOnLeaderLeave(io: Server, socket: AuthedSocket): Promise<boolean> {
+  if (!(await handOffGroupIfLeading(io, socket))) return false;
+  const ownLobby = `L${socket.data.auth.uid}`;
   await broadcastLobby(io, ownLobby);
   await syncTeamChatSession(ownLobby);
   return true;
