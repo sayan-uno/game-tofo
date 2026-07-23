@@ -1,7 +1,7 @@
 import { Router } from "express";
 import type { Server } from "socket.io";
 import { requireAuth } from "../middleware/auth.js";
-import { getLobbyMembers, getOnlineSet, getUserLobby, isDnd } from "../redis.js";
+import { getLobbyMode, getOnlineSet, getUserLobby, isDnd } from "../redis.js";
 import { getUserByUid, toPublicUser } from "../services/users.js";
 import {
   MAX_FRIENDS,
@@ -23,8 +23,8 @@ export function friendsRouter(io: Server) {
   router.use(requireAuth);
 
   // Accepted friends with live status: online, which lobby they're in (so the
-  // client can tag "Same group"), whether that lobby is a real group, plus the
-  // caller's own Do Not Disturb state.
+  // client can tag "Same group"), whether that lobby is an open party, plus
+  // the caller's own Do Not Disturb state.
   router.get("/", async (req, res) => {
     const userId = req.auth!.userId;
     const friends = await listFriends(userId);
@@ -34,8 +34,12 @@ export function friendsRouter(io: Server) {
         const base = { ...toPublicUser(f), online: online.has(f.id) };
         if (!base.online) return { ...base, lobbyId: null, inGroup: false };
         const lobbyId = await getUserLobby(f.id);
-        const members = lobbyId ? await getLobbyMembers(lobbyId) : [];
-        return { ...base, lobbyId, inGroup: members.length > 1 };
+        if (!lobbyId) return { ...base, lobbyId: null, inGroup: false };
+        // Picking Duo/Squad is what opens a party — a leader waiting alone in
+        // squad mode is already a group, so friends must see "Join" for them.
+        // (Headcount can't stand in for this: 1-member parties are real, and
+        // returning home / reconnecting always resets the mode to solo.)
+        return { ...base, lobbyId, inGroup: (await getLobbyMode(lobbyId)) !== "solo" };
       })
     );
     res.json({ friends: enriched, dnd });
