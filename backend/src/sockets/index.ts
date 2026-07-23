@@ -16,6 +16,11 @@ import {
   isDnd,
   armSendCooldown,
   SEND_COOLDOWN_SECONDS,
+  getOrCreateTeamCode,
+  getTeamCode,
+  getTeamCodeLobby,
+  releaseTeamCode,
+  throttleCodeJoin,
   createJoinRequest,
   consumeJoinRequest,
   getLobbyJoinTimes,
@@ -33,6 +38,15 @@ interface AuthedSocket extends Socket {
 async function broadcastLobby(io: Server, lobbyId: string) {
   const memberIds = await getLobbyMembers(lobbyId);
   const [users, mode] = await Promise.all([getUsersByIds(memberIds), getLobbyMode(lobbyId)]);
+  // Codes are created on demand (lobby:teamCode below), never here — this
+  // broadcast only carries the current one so joiners and re-renders stay in
+  // sync, and releases it when the party dissolves (solo / emptied out).
+  // Leader transfers rehome the group under a new lobby id: the code resets
+  // to unrevealed there while the old mapping dies to the liveness check in
+  // lobby:joinByCode.
+  let teamCode: string | null = null;
+  if (mode !== "solo" && memberIds.length > 0) teamCode = await getTeamCode(lobbyId);
+  else await releaseTeamCode(lobbyId);
   const members = users.map((u) => ({
     id: u.id,
     uid: u.uid,
@@ -40,7 +54,7 @@ async function broadcastLobby(io: Server, lobbyId: string) {
     avatarUrl: u.avatarUrl,
     isLeader: lobbyId === `L${u.uid}`,
   }));
-  io.to(`room:${lobbyId}`).emit("lobby:members", { lobbyId, mode, members });
+  io.to(`room:${lobbyId}`).emit("lobby:members", { lobbyId, mode, members, teamCode });
 }
 
 async function moveToLobby(io: Server, socket: AuthedSocket, lobbyId: string): Promise<boolean> {
@@ -192,6 +206,55 @@ export function registerSockets(io: Server) {
         ack?.(ok ? { ok: true, lobbyId } : { error: "Lobby is full" });
       } catch (err) {
         console.error("lobby:join error:", err);
+        ack?.({ error: "Join failed" });
+      }
+    });
+
+    // Reveal the party's team code (creating it on the first ask), or with
+    // reset=true mint a replacement — leader only, since a reset invalidates
+    // whatever the group already shared. The room event keeps every member's
+    // open TEAM CODE card in sync, clicker included.
+    socket.on("lobby:teamCode", async ({ reset }: { reset?: boolean }, ack?: (r: object) => void) => {
+      try {
+        const lobbyId = (await getUserLobby(userId)) ?? soloLobby;
+        const mode = await getLobbyMode(lobbyId);
+        if (mode === "solo") return ack?.({ error: "Open a Duo or Squad party first" });
+        if (reset) {
+          if (lobbyId !== soloLobby) return ack?.({ error: "Only the party leader can reset the team code" });
+          await releaseTeamCode(lobbyId);
+        }
+        const teamCode = await getOrCreateTeamCode(lobbyId);
+        io.to(`room:${lobbyId}`).emit("lobby:teamCode", { teamCode });
+        ack?.({ ok: true, teamCode });
+      } catch (err) {
+        console.error("lobby:teamCode error:", err);
+        ack?.({ error: "Team code failed" });
+      }
+    });
+
+    // Join a party by its 6-digit team code — no friendship and no approval
+    // round on purpose: knowing the code IS the permission (Free Fire style).
+    socket.on("lobby:joinByCode", async ({ code }: { code?: string }, ack?: (r: object) => void) => {
+      try {
+        const cleaned = String(code ?? "").trim();
+        if (!/^\d{6}$/.test(cleaned)) return ack?.({ error: "Invalid team code" });
+        if (!(await throttleCodeJoin(userId))) return ack?.({ error: "Hold on — try again in a moment" });
+        const lobbyId = await getTeamCodeLobby(cleaned);
+        if (!lobbyId) return ack?.({ error: "Invalid team code" });
+        if ((await getUserLobby(userId)) === lobbyId) return ack?.({ error: "You're already in this group" });
+        const [members, mode] = await Promise.all([getLobbyMembers(lobbyId), getLobbyMode(lobbyId)]);
+        // A code can outlive its party (last member gone, mode back to solo
+        // while nobody was in the room to broadcast) — stale means invalid.
+        if (members.length === 0 || mode === "solo") {
+          await releaseTeamCode(lobbyId);
+          return ack?.({ error: "Invalid team code" });
+        }
+        if (members.length >= lobbyCapacity(mode)) return ack?.({ error: "That group is full" });
+        const joined = await moveToLobby(io, socket, lobbyId);
+        if (!joined) return ack?.({ error: "That group is full" });
+        ack?.({ ok: true, lobbyId });
+      } catch (err) {
+        console.error("lobby:joinByCode error:", err);
         ack?.({ error: "Join failed" });
       }
     });

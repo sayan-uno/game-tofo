@@ -84,6 +84,22 @@ async function enterLobby(user: User) {
         if (res.error) toast(res.error, true);
       });
     },
+    onJoinByCode: async (code) => {
+      try {
+        const res = await emitAck("lobby:joinByCode", { code });
+        if (res.error) toast(res.error, true);
+      } catch (err) {
+        toast(err instanceof Error ? err.message : "Join failed", true);
+      }
+    },
+    onTeamCode: async (reset) => {
+      try {
+        const res = await emitAck("lobby:teamCode", { reset });
+        if (res.error) toast(res.error, true);
+      } catch (err) {
+        toast(err instanceof Error ? err.message : "Team code failed", true);
+      }
+    },
   });
   const chatPanel = new ChatPanel(uiRoot, user, {
     onUnread: (hasUnread) => hud.setChatUnread(hasUnread),
@@ -105,7 +121,7 @@ async function enterLobby(user: User) {
   socket.on("lobby:members", (state: LobbyState) => {
     lobbyState = state;
     lobby.setMembers(state.members);
-    hud.setLobby(state.members.length, state.lobbyId === `L${user.uid}`, state.mode);
+    hud.setLobby(state.members.length, state.lobbyId === `L${user.uid}`, state.mode, state.teamCode ?? null);
     // In the team while the party is open — even alone in it (the group only
     // dies when its last member leaves, not when teammates walk out).
     chatPanel.setTeam(state.mode !== "solo");
@@ -119,6 +135,11 @@ async function enterLobby(user: User) {
   });
 
   socket.on("lobby:error", ({ error }: { error: string }) => toast(error, true));
+
+  // A member revealed or reset the party's code — keep every open card fresh.
+  socket.on("lobby:teamCode", ({ teamCode }: { teamCode: string }) => {
+    hud.setTeamCode(teamCode);
+  });
 
   socket.on("lobby:invite", ({ from, lobbyId }: { from: { uid: string; name: string }; lobbyId: string }) => {
     actionToast(

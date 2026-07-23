@@ -759,6 +759,20 @@ body {
   align-items: flex-start;
   padding: max(12px, env(safe-area-inset-top)) 16px 0;
   gap: 12px;
+  /* The strips span the full screen width and grow with their content — as
+     invisible boxes they must never eat touches meant for the canvas or for
+     panels underneath (the friends panel's tabs sit inside this strip's area
+     since the team-code slot made it taller). Only real controls take input. */
+  pointer-events: none;
+}
+.hud-bottom {
+  pointer-events: none;
+}
+.hud-top button,
+.hud-top input,
+.hud-bottom button,
+.player-chip {
+  pointer-events: auto;
 }
 .player-chip {
   background: rgba(8, 12, 26, 0.75);
@@ -783,6 +797,76 @@ body {
   cursor: pointer;
   font-size: 13px;
   padding: 0 2px;
+}
+/* Team code slot under the player chip: share card when grouped,
+   join-by-code entry when solo. */
+.hud-left {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+.team-code-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  background: rgba(8, 12, 26, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 7px 14px;
+  backdrop-filter: blur(10px);
+  cursor: pointer;
+  font-family: inherit;
+}
+.tc-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  color: #8a94b8;
+}
+.tc-value {
+  font-family: "Archivo Black", system-ui, sans-serif;
+  font-size: 17px;
+  letter-spacing: 3px;
+  color: #fff;
+}
+.tc-btn {
+  background: rgba(8, 12, 26, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #e8ecf8;
+  backdrop-filter: blur(10px);
+  font-size: 13px;
+  padding: 8px 14px;
+}
+.tc-card-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tc-reset {
+  font-size: 16px;
+  padding: 6px 10px;
+}
+.tc-join-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tc-input {
+  width: 118px;
+  background: rgba(8, 12, 26, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  padding: 8px 12px;
+  color: #fff;
+  font-size: 15px;
+  letter-spacing: 2px;
+  font-family: inherit;
+  outline: none;
+}
+.tc-input:focus {
+  border-color: #1a9fff;
 }
 .hud-actions {
   display: flex;

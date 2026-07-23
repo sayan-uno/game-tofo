@@ -159,6 +159,55 @@ export async function armSendCooldown(
   return ttl > 0 ? ttl : SEND_COOLDOWN_SECONDS;
 }
 
+// ---- Team codes: a 6-digit number that lets ANYONE hop into an open party —
+// ---- no friendship, no approval round; knowing the code IS the permission.
+// ---- Two-way mapping so the party can show its code and release it later.
+const codeToLobbyKey = (code: string) => `teamcode:code:${code}`;
+const lobbyToCodeKey = (lobbyId: string) => `teamcode:lobby:${lobbyId}`;
+// Backstop TTL only. Real cleanup is releaseTeamCode on dissolve plus the
+// liveness check at join time; this just stops crash leftovers piling up.
+const TEAM_CODE_TTL_SECONDS = 24 * 60 * 60;
+
+/** The lobby's current code, minting one on first ask. */
+export async function getOrCreateTeamCode(lobbyId: string): Promise<string> {
+  const existing = await redis.get(lobbyToCodeKey(lobbyId));
+  if (existing) return existing;
+  for (;;) {
+    const code = String(100000 + Math.floor(Math.random() * 900000));
+    // NX rejects a code already owned by another lobby (rare in a 900k space).
+    const claimed = await redis.set(codeToLobbyKey(code), lobbyId, "EX", TEAM_CODE_TTL_SECONDS, "NX");
+    if (claimed !== "OK") continue;
+    const linked = await redis.set(lobbyToCodeKey(lobbyId), code, "EX", TEAM_CODE_TTL_SECONDS, "NX");
+    if (linked === "OK") return code;
+    // Lost a race against a concurrent broadcast — keep theirs, drop ours.
+    await redis.del(codeToLobbyKey(code));
+    const winner = await redis.get(lobbyToCodeKey(lobbyId));
+    if (winner) return winner;
+  }
+}
+
+/** The lobby's code if someone revealed one — never mints. */
+export async function getTeamCode(lobbyId: string): Promise<string | null> {
+  return redis.get(lobbyToCodeKey(lobbyId));
+}
+
+export async function getTeamCodeLobby(code: string): Promise<string | null> {
+  return redis.get(codeToLobbyKey(code));
+}
+
+/** Drop a lobby's code (party dissolved, or the mapping turned out stale). */
+export async function releaseTeamCode(lobbyId: string): Promise<void> {
+  const code = await redis.get(lobbyToCodeKey(lobbyId));
+  if (!code) return;
+  await redis.del(codeToLobbyKey(code), lobbyToCodeKey(lobbyId));
+}
+
+/** One join-by-code attempt per 2s per user: quick enough to retry a typo,
+ *  hopeless for brute-forcing the 900k code space. */
+export async function throttleCodeJoin(userId: string): Promise<boolean> {
+  return (await redis.set(`cooldown:codejoin:${userId}`, "1", "EX", 2, "NX")) === "OK";
+}
+
 // ---- Pending join requests (consent marker so an "approval" can never pull
 // ---- in a friend who didn't actually ask; expires after a minute) ----
 const joinReqKey = (requesterId: string, targetId: string) => `joinreq:${requesterId}:${targetId}`;

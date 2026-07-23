@@ -60,4 +60,7 @@ export interface LobbyState {
   lobbyId: string;
   mode: LobbyMode;
   members: LobbyMember[];
+  /** 6-digit share code, once a member revealed one — null in solo AND in a
+   *  fresh party where nobody has asked for the code yet. */
+  teamCode: string | null;
 }

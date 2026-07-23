@@ -8,6 +8,10 @@ export interface HudCallbacks {
   onToggleChat: () => void;
   onLeaveLobby: () => void;
   onChangeMode: (mode: LobbyMode) => void;
+  /** Resolves after the server answered (errors already toasted by the caller). */
+  onJoinByCode: (code: string) => Promise<void>;
+  /** Reveal the party's code (created on first ask); reset=true mints a new one. */
+  onTeamCode: (reset: boolean) => Promise<void>;
 }
 
 /** Free Fire-style lobby HUD: player chip + actions on top, round chat
@@ -21,15 +25,43 @@ export class Hud {
   private modeCount: HTMLElement;
   private modePop: HTMLElement;
   private mode: LobbyMode = "solo";
+  private codeRow: HTMLElement;
+  private codeCard: HTMLButtonElement;
+  private codeLabel: HTMLElement;
+  private codeValue: HTMLElement;
+  private showBtn: HTMLButtonElement;
+  private resetBtn: HTMLButtonElement;
+  private joinBtn: HTMLButtonElement;
+  private joinRow: HTMLElement;
+  private codeInput: HTMLInputElement;
+  private goBtn: HTMLButtonElement;
+  private teamCode: string | null = null;
+  private isLeader = false;
 
   constructor(user: User, callbacks: HudCallbacks) {
     this.root = document.createElement("div");
     this.root.className = "hud";
     this.root.innerHTML = `
       <div class="hud-top">
-        <div class="player-chip">
-          <div class="player-name"></div>
-          <div class="player-uid">UID <span></span> <button class="copy-uid" title="Copy UID">⧉</button></div>
+        <div class="hud-left">
+          <div class="player-chip">
+            <div class="player-name"></div>
+            <div class="player-uid">UID <span></span> <button class="copy-uid" title="Copy UID">⧉</button></div>
+          </div>
+          <div class="tc-card-row hidden">
+            <button class="team-code-card" title="Tap to copy">
+              <span class="tc-label">TEAM CODE</span>
+              <span class="tc-value"></span>
+            </button>
+            <button class="btn btn-ghost btn-small tc-reset hidden" title="Reset team code">↻</button>
+          </div>
+          <button class="btn tc-btn tc-show-btn hidden">🎟 Show team code</button>
+          <button class="btn tc-btn tc-join-btn hidden">🎟 Join with team code</button>
+          <div class="tc-join-row hidden">
+            <input class="tc-input" type="text" inputmode="numeric" maxlength="6" placeholder="6-digit code" />
+            <button class="btn btn-primary btn-small tc-go" disabled>Join</button>
+            <button class="btn btn-ghost btn-small tc-cancel">✕</button>
+          </div>
         </div>
         <div class="hud-actions">
           <button class="btn btn-ghost mic-btn" title="Toggle microphone">🎙 On</button>
@@ -64,6 +96,66 @@ export class Hud {
 
     this.root.querySelector<HTMLButtonElement>(".copy-uid")!.onclick = () => {
       void navigator.clipboard.writeText(user.uid);
+    };
+
+    // Team code slot, under the player chip. One place, three states: a
+    // join-by-code flow while solo, a "Show team code" reveal while grouped
+    // (codes are minted on first ask, not on group creation), and the
+    // shareable card once revealed — with a leader-only reset beside it.
+    this.codeRow = this.root.querySelector<HTMLElement>(".tc-card-row")!;
+    this.codeCard = this.root.querySelector<HTMLButtonElement>(".team-code-card")!;
+    this.codeLabel = this.codeCard.querySelector<HTMLElement>(".tc-label")!;
+    this.codeValue = this.codeCard.querySelector<HTMLElement>(".tc-value")!;
+    this.showBtn = this.root.querySelector<HTMLButtonElement>(".tc-show-btn")!;
+    this.resetBtn = this.root.querySelector<HTMLButtonElement>(".tc-reset")!;
+    this.joinBtn = this.root.querySelector<HTMLButtonElement>(".tc-join-btn")!;
+    this.joinRow = this.root.querySelector<HTMLElement>(".tc-join-row")!;
+    this.codeInput = this.joinRow.querySelector<HTMLInputElement>(".tc-input")!;
+    this.goBtn = this.joinRow.querySelector<HTMLButtonElement>(".tc-go")!;
+
+    const requestCode = async (btn: HTMLButtonElement, reset: boolean) => {
+      btn.disabled = true; // no double-fire while the server thinks
+      try {
+        await callbacks.onTeamCode(reset);
+      } finally {
+        btn.disabled = false;
+      }
+    };
+    this.showBtn.onclick = () => void requestCode(this.showBtn, false);
+    this.resetBtn.onclick = () => void requestCode(this.resetBtn, true);
+    this.codeCard.onclick = () => {
+      if (!this.teamCode) return;
+      void navigator.clipboard.writeText(this.teamCode);
+      this.codeLabel.textContent = "COPIED ✓";
+      setTimeout(() => (this.codeLabel.textContent = "TEAM CODE"), 1200);
+    };
+    this.joinBtn.onclick = () => {
+      this.joinBtn.classList.add("hidden");
+      this.joinRow.classList.remove("hidden");
+      this.codeInput.focus();
+    };
+    this.joinRow.querySelector<HTMLButtonElement>(".tc-cancel")!.onclick = () => {
+      this.closeJoinRow();
+      if (this.mode === "solo") this.joinBtn.classList.remove("hidden");
+    };
+    // Digits only, and Join only lights up on a complete code — bad input is
+    // impossible to submit instead of being an error to explain.
+    this.codeInput.oninput = () => {
+      this.codeInput.value = this.codeInput.value.replace(/\D/g, "").slice(0, 6);
+      this.goBtn.disabled = this.codeInput.value.length !== 6;
+    };
+    const submit = async () => {
+      if (this.goBtn.disabled) return;
+      this.goBtn.disabled = true; // no double-fire while the server thinks
+      try {
+        await callbacks.onJoinByCode(this.codeInput.value);
+      } finally {
+        this.goBtn.disabled = this.codeInput.value.length !== 6;
+      }
+    };
+    this.goBtn.onclick = () => void submit();
+    this.codeInput.onkeydown = (e) => {
+      if (e.key === "Enter") void submit();
     };
     this.root.querySelector<HTMLButtonElement>(".friends-btn")!.onclick = callbacks.onToggleFriends;
     this.root.querySelector<HTMLButtonElement>(".chat-fab")!.onclick = callbacks.onToggleChat;
@@ -106,8 +198,40 @@ export class Hud {
     this.chatDot.classList.toggle("hidden", !show);
   }
 
-  setLobby(memberCount: number, _isOwnLobby: boolean, mode: LobbyMode) {
+  private closeJoinRow() {
+    this.joinRow.classList.add("hidden");
+    this.codeInput.value = "";
+    this.goBtn.disabled = true;
+  }
+
+  /** Sync the team-code slot to (mode, teamCode, leadership). */
+  private applyCodeSlot() {
+    const grouped = this.mode !== "solo";
+    const revealed = grouped && this.teamCode !== null;
+    this.codeRow.classList.toggle("hidden", !revealed);
+    if (this.teamCode) this.codeValue.textContent = this.teamCode;
+    this.resetBtn.classList.toggle("hidden", !this.isLeader);
+    this.showBtn.classList.toggle("hidden", !grouped || revealed);
+    if (grouped) {
+      this.joinBtn.classList.add("hidden");
+      this.closeJoinRow();
+    } else if (this.joinRow.classList.contains("hidden")) {
+      // Show the join entry unless the input is already open mid-typing.
+      this.joinBtn.classList.remove("hidden");
+    }
+  }
+
+  /** Live update from the room when any member reveals or resets the code. */
+  setTeamCode(code: string) {
+    this.teamCode = code;
+    this.applyCodeSlot();
+  }
+
+  setLobby(memberCount: number, isOwnLobby: boolean, mode: LobbyMode, teamCode: string | null) {
     this.mode = mode;
+    this.teamCode = teamCode;
+    this.isLeader = isOwnLobby;
+    this.applyCodeSlot();
     const capacity = mode === "solo" ? 1 : mode === "duo" ? 2 : 4;
     this.modeName.textContent = mode.toUpperCase();
     this.modeCount.textContent = `${memberCount}/${capacity}`;
