@@ -17,6 +17,10 @@ export class FriendsPanel {
   private requests: FriendRequest[] = [];
   private myLobbyId: string | null = null;
   private dnd = false;
+  /** Per-friend send-cooldown deadlines (epoch ms), keyed "invite:<uid>" /
+   *  "join:<uid>". Lives here, not on the buttons, because rows are rebuilt
+   *  on every render and the countdown must survive that. */
+  private cooldownUntil = new Map<string, number>();
 
   constructor(private container: HTMLElement) {
     this.panel = document.createElement("div");
@@ -168,36 +172,14 @@ export class FriendsPanel {
         const inviteBtn = document.createElement("button");
         inviteBtn.className = "btn btn-primary btn-small";
         inviteBtn.textContent = "Invite";
-        inviteBtn.onclick = async () => {
-          inviteBtn.disabled = true;
-          try {
-            const res = await emitAck("lobby:invite", { friendUid: friend.uid });
-            if (res.error) toast(res.error, true);
-            else toast(`Invite sent to ${friend.name}`);
-          } catch (err) {
-            toast(err instanceof Error ? err.message : "Invite failed", true);
-          } finally {
-            inviteBtn.disabled = false;
-          }
-        };
+        this.wireSend(inviteBtn, "invite", friend);
         row.appendChild(inviteBtn);
         if (friend.inGroup) {
           const joinBtn = document.createElement("button");
           joinBtn.className = "btn btn-ghost btn-small";
           joinBtn.textContent = "Join";
           joinBtn.title = `Ask to join ${friend.name}'s group`;
-          joinBtn.onclick = async () => {
-            joinBtn.disabled = true;
-            try {
-              const res = await emitAck("lobby:joinRequest", { friendUid: friend.uid });
-              if (res.error) toast(res.error, true);
-              else toast(`Join request sent to ${friend.name}`);
-            } catch (err) {
-              toast(err instanceof Error ? err.message : "Request failed", true);
-            } finally {
-              joinBtn.disabled = false;
-            }
-          };
+          this.wireSend(joinBtn, "join", friend);
           row.appendChild(joinBtn);
         }
       }
@@ -225,6 +207,71 @@ export class FriendsPanel {
       row.appendChild(unfriendBtn);
       this.body.appendChild(row);
     }
+  }
+
+  /** Wire an Invite/Join button: send on click, then hold the button in a
+   *  blurred in-place countdown while the server's per-friend cooldown runs,
+   *  so it can't be re-clicked and a dead click can't be mistaken for "sent". */
+  private wireSend(btn: HTMLButtonElement, kind: "invite" | "join", friend: Friend) {
+    const invite = kind === "invite";
+    const key = `${kind}:${friend.uid}`;
+    const label = btn.textContent!;
+    btn.onclick = async () => {
+      btn.disabled = true;
+      let wait = 0;
+      try {
+        const res = await emitAck<{ ok?: boolean; wait?: number; error?: string }>(
+          invite ? "lobby:invite" : "lobby:joinRequest",
+          { friendUid: friend.uid }
+        );
+        if (res.error) toast(res.error, true);
+        else toast(invite ? `Invite sent to ${friend.name}` : `Join request sent to ${friend.name}`);
+        // Server-reported seconds: the full window on success, the remainder
+        // if a stale row raced it. Other rejections leave the button live.
+        wait = res.wait ?? 0;
+      } catch (err) {
+        toast(err instanceof Error ? err.message : invite ? "Invite failed" : "Request failed", true);
+      }
+      if (wait > 0) {
+        this.cooldownUntil.set(key, Date.now() + wait * 1000);
+        this.showCooldown(btn, key, label);
+      } else {
+        btn.disabled = false;
+      }
+    };
+    // This row may be a rebuild mid-cooldown — pick the countdown back up.
+    if (this.cooldownLeft(key) > 0) this.showCooldown(btn, key, label);
+  }
+
+  /** Seconds left on a send cooldown; expired entries are dropped on read. */
+  private cooldownLeft(key: string): number {
+    const until = this.cooldownUntil.get(key);
+    if (!until) return 0;
+    const left = Math.ceil((until - Date.now()) / 1000);
+    if (left > 0) return left;
+    this.cooldownUntil.delete(key);
+    return 0;
+  }
+
+  private showCooldown(btn: HTMLButtonElement, key: string, label: string) {
+    btn.disabled = true;
+    btn.classList.add("btn-cooldown");
+    const tick = () => {
+      // Row got rebuilt: this button is gone and its replacement runs its own
+      // countdown, so just stop — never resurrect state for a detached node.
+      if (!btn.isConnected) return clearInterval(timer);
+      const left = this.cooldownLeft(key);
+      if (left > 0) {
+        btn.textContent = `${left}s`;
+        return;
+      }
+      clearInterval(timer);
+      btn.textContent = label;
+      btn.classList.remove("btn-cooldown");
+      btn.disabled = false;
+    };
+    const timer = window.setInterval(tick, 500);
+    tick();
   }
 
   private renderRequests() {

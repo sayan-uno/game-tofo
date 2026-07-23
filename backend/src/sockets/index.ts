@@ -15,6 +15,7 @@ import {
   setDnd,
   isDnd,
   armSendCooldown,
+  SEND_COOLDOWN_SECONDS,
   createJoinRequest,
   consumeJoinRequest,
   getLobbyJoinTimes,
@@ -165,7 +166,7 @@ export function registerSockets(io: Server) {
         // Last check, so a failed invite never burns the cooldown window.
         const wait = await armSendCooldown("invite", userId, target.id);
         if (wait > 0) {
-          return ack?.({ error: `Wait ${wait}s before inviting ${target.name} again` });
+          return ack?.({ error: `Wait ${wait}s before inviting ${target.name} again`, wait });
         }
         if (mode === "solo") {
           await setLobbyMode(lobbyId, "squad");
@@ -173,7 +174,8 @@ export function registerSockets(io: Server) {
         }
 
         io.to(`user:${target.id}`).emit("lobby:invite", { from: { uid, name }, lobbyId });
-        ack?.({ ok: true });
+        // wait tells the UI how long to hold this friend's button disabled.
+        ack?.({ ok: true, wait: SEND_COOLDOWN_SECONDS });
       } catch (err) {
         console.error("lobby:invite error:", err);
         ack?.({ error: "Invite failed" });
@@ -217,11 +219,11 @@ export function registerSockets(io: Server) {
         // Last check, so a failed request never burns the cooldown window.
         const wait = await armSendCooldown("joinreq", userId, target.id);
         if (wait > 0) {
-          return ack?.({ error: `Wait ${wait}s before asking ${target.name} again` });
+          return ack?.({ error: `Wait ${wait}s before asking ${target.name} again`, wait });
         }
         await createJoinRequest(userId, target.id);
         io.to(`user:${target.id}`).emit("lobby:joinRequest", { from: { uid, name } });
-        ack?.({ ok: true });
+        ack?.({ ok: true, wait: SEND_COOLDOWN_SECONDS });
       } catch (err) {
         console.error("lobby:joinRequest error:", err);
         ack?.({ error: "Request failed" });

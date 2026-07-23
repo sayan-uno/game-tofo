@@ -97,6 +97,11 @@ body {
   font-size: 13px;
   border-radius: 8px;
 }
+/* Invite/Join riding out the per-friend send cooldown: blurred + greyed while
+   the seconds count down in place (blur is mild so the number stays legible). */
+.btn-cooldown {
+  filter: blur(1.5px) saturate(0.4);
+}
 .hidden {
   display: none !important;
 }

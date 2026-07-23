@@ -141,7 +141,7 @@ export async function isDnd(userId: string): Promise<boolean> {
 // ---- Send cooldowns: one invite / join-request per target per window, so a
 // ---- player can't be popup-spammed. SET NX EX = atomic check-and-arm in one
 // ---- round trip; the key simply expires when the window ends.
-const SEND_COOLDOWN_SECONDS = 10;
+export const SEND_COOLDOWN_SECONDS = 10;
 const sendCooldownKey = (kind: "invite" | "joinreq", fromId: string, toId: string) =>
   `cooldown:${kind}:${fromId}:${toId}`;
 
