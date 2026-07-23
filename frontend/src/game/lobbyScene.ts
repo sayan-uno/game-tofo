@@ -228,7 +228,10 @@ export class LobbyScene {
   showChatBubble(uid: string, text: string) {
     const character = this.characters.get(uid);
     if (!character) return;
-    character.bubbleText.text = text.length > 64 ? `${text.slice(0, 63)}…` : text;
+    // Truncate by code point, not UTF-16 unit, so an emoji at the cut never
+    // ends the preview on a broken half-character ("�").
+    const chars = [...text];
+    character.bubbleText.text = chars.length > 64 ? `${chars.slice(0, 63).join("")}…` : text;
     character.bubble.isVisible = true;
     clearTimeout(character.bubbleTimer);
     character.bubbleTimer = window.setTimeout(() => {

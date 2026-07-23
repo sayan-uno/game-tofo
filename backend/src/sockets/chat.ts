@@ -52,8 +52,9 @@ export function registerChatHandlers(io: Server, socket: AuthedSocket): void {
   // depending on the relationship (isFriend travels with the event).
   socket.on(
     "chat:dm",
-    async ({ toUid, body }: { toUid?: string; body?: string }, ack?: (r: object) => void) => {
+    async (payload: { toUid?: string; body?: string } | null, ack?: (r: object) => void) => {
       try {
+        const { toUid, body } = payload ?? {};
         const text = cleanBody(body);
         if (!text) return ack?.({ error: "Message must be 1–500 characters" });
         const target = await getUserByUid(String(toUid || ""));
@@ -87,8 +88,9 @@ export function registerChatHandlers(io: Server, socket: AuthedSocket): void {
 
   // Squad message — snapshots the current member list as the visibility set,
   // so players who join later never see it.
-  socket.on("chat:team", async ({ body }: { body?: string }, ack?: (r: object) => void) => {
+  socket.on("chat:team", async (payload: { body?: string } | null, ack?: (r: object) => void) => {
     try {
+      const { body } = payload ?? {};
       const text = cleanBody(body);
       if (!text) return ack?.({ error: "Message must be 1–500 characters" });
       const lobbyId = await getUserLobby(userId);
@@ -115,8 +117,9 @@ export function registerChatHandlers(io: Server, socket: AuthedSocket): void {
 
   // The client had this sender's thread open when a message arrived — the
   // persistent unread marker can go (opening a thread clears via the DM GET).
-  socket.on("chat:read", async ({ uid: senderUid }: { uid?: string }) => {
+  socket.on("chat:read", async (payload: { uid?: string } | null) => {
     try {
+      const { uid: senderUid } = payload ?? {};
       if (typeof senderUid === "string" && senderUid) await clearUnreadDm(userId, senderUid);
     } catch (err) {
       console.error("chat:read error:", err);

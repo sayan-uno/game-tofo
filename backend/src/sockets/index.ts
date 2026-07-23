@@ -154,8 +154,9 @@ export function registerSockets(io: Server) {
     registerChatHandlers(io, socket);
 
     // Invite a friend to my CURRENT lobby.
-    socket.on("lobby:invite", async ({ friendUid }: { friendUid: string }, ack?: (r: object) => void) => {
+    socket.on("lobby:invite", async (payload: { friendUid?: string } | null, ack?: (r: object) => void) => {
       try {
+        const { friendUid } = payload ?? {};
         const target = await getUserByUid(String(friendUid || ""));
         if (!target) return ack?.({ error: "Player not found" });
         if (!(await areFriends(userId, target.id))) return ack?.({ error: "You can only invite friends" });
@@ -197,8 +198,9 @@ export function registerSockets(io: Server) {
     });
 
     // Accept an invite (or otherwise switch lobby).
-    socket.on("lobby:join", async ({ lobbyId }: { lobbyId: string }, ack?: (r: object) => void) => {
+    socket.on("lobby:join", async (payload: { lobbyId?: string } | null, ack?: (r: object) => void) => {
       try {
+        const { lobbyId } = payload ?? {};
         if (typeof lobbyId !== "string" || !lobbyId.startsWith("L")) return ack?.({ error: "Bad lobby id" });
         const members = await getLobbyMembers(lobbyId);
         if (lobbyId !== soloLobby && members.length === 0) return ack?.({ error: "That lobby no longer exists" });
@@ -214,8 +216,9 @@ export function registerSockets(io: Server) {
     // reset=true mint a replacement — leader only, since a reset invalidates
     // whatever the group already shared. The room event keeps every member's
     // open TEAM CODE card in sync, clicker included.
-    socket.on("lobby:teamCode", async ({ reset }: { reset?: boolean }, ack?: (r: object) => void) => {
+    socket.on("lobby:teamCode", async (payload: { reset?: boolean } | null, ack?: (r: object) => void) => {
       try {
+        const { reset } = payload ?? {};
         const lobbyId = (await getUserLobby(userId)) ?? soloLobby;
         const mode = await getLobbyMode(lobbyId);
         if (mode === "solo") return ack?.({ error: "Open a Duo or Squad party first" });
@@ -234,8 +237,9 @@ export function registerSockets(io: Server) {
 
     // Join a party by its 6-digit team code — no friendship and no approval
     // round on purpose: knowing the code IS the permission (Free Fire style).
-    socket.on("lobby:joinByCode", async ({ code }: { code?: string }, ack?: (r: object) => void) => {
+    socket.on("lobby:joinByCode", async (payload: { code?: string } | null, ack?: (r: object) => void) => {
       try {
+        const { code } = payload ?? {};
         const cleaned = String(code ?? "").trim();
         if (!/^\d{6}$/.test(cleaned)) return ack?.({ error: "Invalid team code" });
         if (!(await throttleCodeJoin(userId))) return ack?.({ error: "Hold on — try again in a moment" });
@@ -261,8 +265,9 @@ export function registerSockets(io: Server) {
 
     // Ask a friend to let me into their group. The friend approves/declines;
     // approval moves ME into THEIR current lobby.
-    socket.on("lobby:joinRequest", async ({ friendUid }: { friendUid?: string }, ack?: (r: object) => void) => {
+    socket.on("lobby:joinRequest", async (payload: { friendUid?: string } | null, ack?: (r: object) => void) => {
       try {
+        const { friendUid } = payload ?? {};
         const target = await getUserByUid(String(friendUid || ""));
         if (!target) return ack?.({ error: "Player not found" });
         if (!(await areFriends(userId, target.id))) return ack?.({ error: "You can only join a friend's group" });
@@ -295,8 +300,9 @@ export function registerSockets(io: Server) {
 
     socket.on(
       "lobby:joinRespond",
-      async ({ requesterUid, accept }: { requesterUid?: string; accept?: boolean }, ack?: (r: object) => void) => {
+      async (payload: { requesterUid?: string; accept?: boolean } | null, ack?: (r: object) => void) => {
         try {
+          const { requesterUid, accept } = payload ?? {};
           const requester = await getUserByUid(String(requesterUid || ""));
           if (!requester) return ack?.({ error: "Player not found" });
           // Consent marker: only a real, recent request can be approved.
@@ -327,8 +333,9 @@ export function registerSockets(io: Server) {
     );
 
     // Do Not Disturb: block invites + join requests, never messages.
-    socket.on("user:dnd", async ({ on }: { on?: boolean }, ack?: (r: object) => void) => {
+    socket.on("user:dnd", async (payload: { on?: boolean } | null, ack?: (r: object) => void) => {
       try {
+        const { on } = payload ?? {};
         await setDnd(userId, !!on);
         ack?.({ ok: true, on: !!on });
       } catch (err) {
@@ -339,8 +346,9 @@ export function registerSockets(io: Server) {
 
     // Change my party mode (Free Fire style Solo/Duo/Squad). Leader only, and
     // you can't shrink below the number of players already in the party.
-    socket.on("lobby:mode", async ({ mode }: { mode?: string }, ack?: (r: object) => void) => {
+    socket.on("lobby:mode", async (payload: { mode?: string } | null, ack?: (r: object) => void) => {
       try {
+        const { mode } = payload ?? {};
         if (mode !== "solo" && mode !== "duo" && mode !== "squad") return ack?.({ error: "Unknown mode" });
         const lobbyId = (await getUserLobby(userId)) ?? soloLobby;
         if (lobbyId !== soloLobby) return ack?.({ error: "Only the party leader can change the mode" });
@@ -367,8 +375,9 @@ export function registerSockets(io: Server) {
     // Hand the crown to a teammate (leader only): the whole group — members,
     // join times, party mode, team chat — moves under the new leader's lobby
     // id and nobody's spot changes.
-    socket.on("lobby:transferLead", async ({ targetUid }: { targetUid?: string }, ack?: (r: object) => void) => {
+    socket.on("lobby:transferLead", async (payload: { targetUid?: string } | null, ack?: (r: object) => void) => {
       try {
+        const { targetUid } = payload ?? {};
         const target = await getUserByUid(String(targetUid || ""));
         if (!target) return ack?.({ error: "Player not found" });
         if (target.id === userId) return ack?.({ error: "You're already the leader" });
@@ -393,8 +402,9 @@ export function registerSockets(io: Server) {
 
     // Kick a member out of my group (leader only). They land back in their
     // own lobby in solo mode; the group lives on for everyone else.
-    socket.on("lobby:kick", async ({ targetUid }: { targetUid?: string }, ack?: (r: object) => void) => {
+    socket.on("lobby:kick", async (payload: { targetUid?: string } | null, ack?: (r: object) => void) => {
       try {
+        const { targetUid } = payload ?? {};
         const target = await getUserByUid(String(targetUid || ""));
         if (!target) return ack?.({ error: "Player not found" });
         if (target.id === userId) return ack?.({ error: "You can't kick yourself — use Leave" });

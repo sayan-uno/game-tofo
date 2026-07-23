@@ -76,16 +76,41 @@ export async function getLobbyMembers(lobbyId: string): Promise<string[]> {
   return redis.smembers(lobbyKey(lobbyId));
 }
 
+// Check-capacity-then-add as ONE atomic step. A plain SCARD-then-MULTI let two
+// players racing into the last slot both pass the check and overfill the party
+// (very reachable now a team code can be pasted to several people at once). An
+// existing member re-joins idempotently (never the reachable path — leaveLobby
+// always runs first — but it keeps seniority instead of resetting it). Returns
+// "1" on success, "0" when the party was already full.
+const JOIN_LOBBY_LUA = `
+if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 0 then
+  if redis.call('SCARD', KEYS[1]) >= tonumber(ARGV[3]) then
+    return 0
+  end
+  redis.call('SADD', KEYS[1], ARGV[1])
+  redis.call('HSET', KEYS[3], ARGV[1], ARGV[4])
+end
+redis.call('SET', KEYS[2], ARGV[2])
+return 1
+`;
+
 export async function joinLobby(userId: string, lobbyId: string): Promise<boolean> {
-  const [size, mode] = await Promise.all([redis.scard(lobbyKey(lobbyId)), getLobbyMode(lobbyId)]);
-  if (size >= lobbyCapacity(mode)) return false;
-  await redis
-    .multi()
-    .sadd(lobbyKey(lobbyId), userId)
-    .set(userLobbyKey(userId), lobbyId)
-    .hset(lobbyJoinedKey(lobbyId), userId, String(Date.now()))
-    .exec();
-  return true;
+  // Mode is read outside the script; it only changes via the leader-only
+  // lobby:mode (which itself can't shrink below current members), so the
+  // atomic guard below is the count race that actually needed closing.
+  const capacity = lobbyCapacity(await getLobbyMode(lobbyId));
+  const res = await redis.eval(
+    JOIN_LOBBY_LUA,
+    3,
+    lobbyKey(lobbyId),
+    userLobbyKey(userId),
+    lobbyJoinedKey(lobbyId),
+    userId,
+    lobbyId,
+    String(capacity),
+    String(Date.now())
+  );
+  return Number(res) === 1;
 }
 
 export async function leaveLobby(userId: string): Promise<string | null> {
