@@ -58,6 +58,10 @@ interface CharacterInstance {
   root: TransformNode;
   /** Name line of the base plate — updated in place when leadership moves. */
   label: TextBlock;
+  /** Free Fire-style chat bubble over the head; hidden until a team message. */
+  bubble: Rectangle;
+  bubbleText: TextBlock;
+  bubbleTimer: number;
   isLeader: boolean;
   disposables: { dispose: () => void }[];
 }
@@ -193,6 +197,7 @@ export class LobbyScene {
     const keep = new Set(ordered.map((m) => m.uid));
     for (const [uid, character] of this.characters) {
       if (!keep.has(uid)) {
+        clearTimeout(character.bubbleTimer);
         character.anchor.dispose();
         character.disposables.forEach((d) => d.dispose());
         this.characters.delete(uid);
@@ -213,6 +218,22 @@ export class LobbyScene {
       }
       this.characters.set(member.uid, this.createCharacter(member, x, z));
     });
+  }
+
+  /** Free Fire-style team chat callout: a truncated preview of the message in
+   *  a bubble over the sender's head, so teammates notice who is talking even
+   *  with the chat panel closed. Repeat messages replace the text and restart
+   *  the clock. Costs nothing while idle — the bubble is a hidden GUI control
+   *  linked to a static mesh, repainted only on show/hide/text change. */
+  showChatBubble(uid: string, text: string) {
+    const character = this.characters.get(uid);
+    if (!character) return;
+    character.bubbleText.text = text.length > 64 ? `${text.slice(0, 63)}…` : text;
+    character.bubble.isVisible = true;
+    clearTimeout(character.bubbleTimer);
+    character.bubbleTimer = window.setTimeout(() => {
+      character.bubble.isVisible = false;
+    }, 4500);
   }
 
   /** Placeholder stylized character (primitives). Swap for a GLB model later —
@@ -308,10 +329,46 @@ export class LobbyScene {
     plate.addControl(label);
     disposables.push(plate);
 
+    // Chat bubble over the head. Linked to a tiny STATIC invisible mesh at
+    // head height (parented to the anchor, not the bobbing root) so the
+    // projection tracks zoom correctly without forcing a GUI repaint every
+    // animation frame — same trick as the base plate.
+    const bubbleAnchor = MeshBuilder.CreateBox(`bubbleAnchor_${member.uid}`, { size: 0.01 }, scene);
+    bubbleAnchor.isVisible = false;
+    bubbleAnchor.isPickable = false;
+    bubbleAnchor.position.y = 2.6;
+    bubbleAnchor.parent = anchor;
+
+    const bubble = new Rectangle(`bubble_${member.uid}`);
+    bubble.width = "150px";
+    bubble.adaptHeightToChildren = true;
+    bubble.cornerRadius = 8;
+    bubble.thickness = 1.5;
+    bubble.color = accent.toHexString();
+    bubble.background = "rgba(8, 12, 26, 0.9)";
+    bubble.isVisible = false;
+    bubble.isHitTestVisible = false; // never steal character taps
+    this.gui.addControl(bubble);
+    bubble.linkWithMesh(bubbleAnchor);
+    bubble.linkOffsetY = -22;
+
+    const bubbleText = new TextBlock(`bubbleText_${member.uid}`);
+    bubbleText.textWrapping = true; // word-wrap (TextWrapping is a const enum — unusable under isolatedModules)
+    bubbleText.resizeToFit = true; // grows the bubble's height with the text
+    bubbleText.color = "#f2f5ff";
+    bubbleText.fontSize = 12;
+    bubbleText.fontFamily = "system-ui, sans-serif";
+    bubbleText.paddingTop = "6px";
+    bubbleText.paddingBottom = "6px";
+    bubbleText.paddingLeft = "8px";
+    bubbleText.paddingRight = "8px";
+    bubble.addControl(bubbleText);
+    disposables.push(bubble);
+
     // Characters face the camera side
     anchor.rotation.y = Math.PI;
 
-    return { anchor, root, label, isLeader: member.isLeader, disposables };
+    return { anchor, root, label, bubble, bubbleText, bubbleTimer: 0, isLeader: member.isLeader, disposables };
   }
 
   dispose() {

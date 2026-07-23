@@ -210,6 +210,9 @@ async function enterLobby(user: User) {
 
   socket.on("chat:team", (msg: { id: string; from: { uid: string; name: string }; body: string; at: string }) => {
     chatPanel.onTeamReceived(msg);
+    // Free Fire-style: the message also pops up over the sender's head (the
+    // server echoes team chat to the whole room, so own messages show too).
+    lobby.showChatBubble(msg.from.uid, msg.body);
   });
 
   socket.on("friend:online", ({ uid, name }: { uid: string; name: string }) => {
