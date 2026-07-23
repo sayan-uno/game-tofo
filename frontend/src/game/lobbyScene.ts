@@ -3,7 +3,8 @@
 //  - tree-shaken imports (only what we use ships in the bundle)
 //  - static meshes get frozen world matrices, materials get frozen after setup
 //  - pointer-move picking disabled (big win on mobile)
-//  - one fullscreen GUI texture for all name plates
+//  - one fullscreen GUI texture for all name plates, linked to static meshes
+//    (pedestals) so idle-animation frames never force a GUI repaint
 import { Scene } from "@babylonjs/core/scene";
 import type { Engine } from "@babylonjs/core/Engines/engine";
 import { ArcRotateCamera } from "@babylonjs/core/Cameras/arcRotateCamera";
@@ -36,8 +37,11 @@ const SLOTS: [number, number][] = [
   [-4.6, -1.4],
 ];
 
-function plateText(member: LobbyMember): string {
-  return `${member.name}${member.isLeader ? " ★" : ""}\nUID ${member.uid}`;
+/** Name line of the base plate: leader gets the star and the gold. Reused
+ *  in place when leadership moves so the plate never gets rebuilt. */
+function applyNameStyle(label: TextBlock, member: LobbyMember) {
+  label.text = `${member.name}${member.isLeader ? " ★" : ""}`;
+  label.color = member.isLeader ? "#ffd45e" : "#f2f5ff";
 }
 
 function colorFromUid(uid: string): Color3 {
@@ -52,7 +56,7 @@ interface CharacterInstance {
   anchor: TransformNode;
   /** Animated (bobbing) child holding the body meshes. */
   root: TransformNode;
-  /** Name plate text — updated in place when leadership moves. */
+  /** Name line of the base plate — updated in place when leadership moves. */
   label: TextBlock;
   isLeader: boolean;
   disposables: { dispose: () => void }[];
@@ -203,7 +207,7 @@ export class LobbyScene {
         if (existing.isLeader !== member.isLeader) {
           // Leadership moved (transfer / old leader left) — restar the plate.
           existing.isLeader = member.isLeader;
-          existing.label.text = plateText(member);
+          applyNameStyle(existing.label, member);
         }
         return;
       }
@@ -282,22 +286,25 @@ export class LobbyScene {
     pedestal.material = accentMat;
     pedestal.parent = anchor;
 
-    // Name plate (GUI linked to the head)
+    // Name plate at the character's base (Free Fire/PUBG style: a banner on
+    // the podium, not floating over the head). Linked to the STATIC pedestal
+    // rather than the bobbing body — a link target that never moves means the
+    // fullscreen GUI texture stops repainting every animation frame.
     const plate = new Rectangle(`plate_${member.uid}`);
-    plate.width = "180px";
-    plate.height = "44px";
-    plate.cornerRadius = 10;
-    plate.thickness = 0;
-    plate.background = "rgba(8, 12, 26, 0.75)";
+    plate.width = "160px";
+    plate.height = "30px";
+    plate.cornerRadius = 6;
+    plate.thickness = 1.5;
+    plate.color = accent.toHexString(); // border ties the plate to the pedestal glow
+    plate.background = "rgba(8, 12, 26, 0.85)";
     this.gui.addControl(plate);
-    plate.linkWithMesh(head);
-    plate.linkOffsetY = -70;
+    plate.linkWithMesh(pedestal);
+    plate.linkOffsetY = 30; // px below the pedestal → sits on the floor in front
 
     const label = new TextBlock(`label_${member.uid}`);
-    label.text = plateText(member);
-    label.color = "#e8ecf8";
-    label.fontSize = 13;
-    label.fontFamily = "system-ui, sans-serif";
+    applyNameStyle(label, member);
+    label.fontSize = 14;
+    label.fontFamily = '"Archivo Black", system-ui, sans-serif';
     plate.addControl(label);
     disposables.push(plate);
 
