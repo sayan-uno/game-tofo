@@ -106,8 +106,44 @@ body {
   display: none !important;
 }
 
-/* ---------- Login ---------- */
-.login-screen {
+/* ---------- Nameview (overflow-proof names) ---------- */
+/* Every player name lives in a fixed window (see ui/nameview.ts). A name that
+   fits renders normally; one that overflows loops a slow reveal — hold the
+   start, glide left, hold the end, fade, snap back. transform/opacity only:
+   the loop runs on the compositor and never touches layout or main-thread
+   paint, so a screen full of names costs the same as static text. */
+.nameview {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.nv-track {
+  display: inline-block;
+  white-space: nowrap;
+  vertical-align: top;
+}
+.nameview.nv-anim .nv-track {
+  animation: nv-reveal var(--nv-dur, 8s) linear infinite;
+}
+@keyframes nv-reveal {
+  0%, 18% { transform: translateX(0); opacity: 1; }
+  62%, 86% { transform: translateX(var(--nv-x, 0)); opacity: 1; }
+  92% { transform: translateX(var(--nv-x, 0)); opacity: 0; }
+  93% { transform: translateX(0); opacity: 0; }
+  100% { transform: translateX(0); opacity: 1; }
+}
+/* Motion-sensitive users get a plain clipped name; the full name stays one
+   hover away in the tooltip. */
+@media (prefers-reduced-motion: reduce) {
+  .nameview.nv-anim .nv-track {
+    animation: none;
+  }
+}
+
+/* ---------- Login (base shared with the username claim screen) ---------- */
+.login-screen,
+.username-screen {
   position: absolute;
   inset: 0;
   display: flex;
@@ -612,6 +648,249 @@ body {
   }
 }
 
+/* ---------- Username claim screen (first impression after signup) ---------- */
+/* Shares the login scenography (.lg-bg/.lg-header) and its media queries. */
+.un-main {
+  position: relative;
+  z-index: 2;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  width: min(520px, 100%);
+  margin: 0 auto;
+  padding: 16px 0;
+}
+.un-kicker {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.34em;
+  text-transform: uppercase;
+  color: var(--red-hot);
+  opacity: 0.9;
+}
+.un-title {
+  margin-top: 10px;
+  font-family: var(--display-font);
+  font-weight: 400;
+  text-transform: uppercase;
+  color: #fff;
+  font-size: clamp(28px, 4.4vw, 48px);
+  line-height: 1.06;
+}
+.un-title .accent {
+  color: var(--red);
+  text-shadow: 0 0 30px rgba(229, 24, 46, 0.45);
+}
+.un-sub {
+  margin-top: 12px;
+  color: #a7abb4;
+  font-size: clamp(14px, 1.25vw, 15.5px);
+  line-height: 1.55;
+  max-width: 40ch;
+}
+.un-card {
+  margin-top: 24px;
+  width: min(440px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  padding: 20px 20px 16px;
+  background: rgba(13, 6, 8, 0.72);
+  border: 1px solid rgba(229, 24, 46, 0.38);
+  border-radius: 18px;
+  backdrop-filter: blur(14px);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5), 0 0 28px rgba(229, 24, 46, 0.12);
+}
+.username-screen.busy .un-card {
+  opacity: 0.85;
+}
+/* live "how it looks in game" plate — including the overflow reveal */
+.un-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+}
+.un-preview-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: #8a94b8;
+}
+.un-plate {
+  width: 230px;
+  max-width: 100%;
+  padding: 8px 14px 7px;
+  background: rgba(8, 12, 26, 0.85);
+  border: 1.5px solid var(--red);
+  border-radius: 8px;
+  box-shadow: 0 0 18px rgba(229, 24, 46, 0.22), inset 0 0 14px rgba(229, 24, 46, 0.06);
+}
+.un-plate-name {
+  font-family: var(--display-font);
+  font-size: 16px;
+  color: #f2f5ff;
+}
+.un-plate-uid {
+  margin-top: 3px;
+  font-size: 10.5px;
+  letter-spacing: 1px;
+  color: #8a94b8;
+}
+.un-field {
+  position: relative;
+  display: block;
+}
+.un-input {
+  width: 100%;
+  padding: 14px 72px 14px 16px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1.5px solid rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
+  color: #fff;
+  font-size: 17px;
+  font-weight: 700;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.un-input::placeholder {
+  color: #5a6076;
+  font-weight: 600;
+}
+.un-input:focus {
+  border-color: var(--red);
+  box-shadow: 0 0 0 3px rgba(229, 24, 46, 0.16), 0 0 22px rgba(229, 24, 46, 0.18);
+}
+.un-count {
+  position: absolute;
+  right: 14px;
+  top: 50%;
+  translate: 0 -50%;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: #8a94b8;
+  pointer-events: none;
+}
+.un-count.full {
+  color: var(--red-hot);
+}
+/* fixed-height status line: availability states swap without layout jumps */
+.un-status {
+  min-height: 18px;
+  margin: -3px 2px 0;
+  text-align: left;
+  font-size: 13px;
+  color: #8a94b8;
+}
+.un-status.ok {
+  color: #7ee2a0;
+}
+.un-status.ok::before {
+  content: "✓ ";
+}
+.un-status.bad {
+  color: #ff8493;
+}
+.un-status.bad::before {
+  content: "✕ ";
+}
+.un-claim {
+  padding: 15px;
+  font-family: var(--display-font);
+  font-weight: 400;
+  font-size: 15px;
+  letter-spacing: 0.08em;
+  border-radius: 12px;
+}
+.un-skip {
+  align-self: center;
+  background: none;
+  border: none;
+  padding: 4px 8px;
+  color: #8a94b8;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.un-skip span {
+  color: #7d828c;
+  font-size: 11.5px;
+}
+.un-skip:hover:not(:disabled) {
+  color: #e8ecf8;
+  text-decoration: underline;
+}
+.un-skip:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.un-rules {
+  margin-top: 18px;
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+.un-rules li {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #c7cbd1;
+  padding: 5px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+}
+.un-note {
+  margin-top: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #7d828c;
+  font-size: 12.5px;
+  max-width: 46ch;
+}
+.un-note svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  color: #a7abb4;
+}
+/* short viewports (landscape phones): trade decoration for fit + scrolling */
+@media (max-height: 620px) {
+  .username-screen {
+    overflow-y: auto;
+  }
+  .un-main {
+    justify-content: flex-start;
+    padding: 10px 0 16px;
+  }
+  .un-title {
+    font-size: clamp(24px, 4vw, 34px);
+  }
+  .un-sub {
+    margin-top: 8px;
+  }
+  .un-card {
+    margin-top: 16px;
+  }
+  .un-preview {
+    display: none;
+  }
+  .un-rules {
+    margin-top: 12px;
+  }
+  .un-note {
+    display: none;
+  }
+}
+
 /* ---------- Mobile entry gate (fullscreen + landscape, PUBG-style) ---------- */
 .entry-gate {
   position: absolute;
@@ -741,6 +1020,8 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .login-screen *,
   .login-screen *::after,
+  .username-screen *,
+  .username-screen *::after,
   .entry-gate *,
   #rotate-overlay svg {
     animation: none !important;
@@ -784,6 +1065,9 @@ body {
 .player-name {
   font-weight: 700;
   font-size: 15px;
+  /* Hard cap — the chip must never grow (and shove the team-code slot or
+     shrink the actions row) because of a wide name; nameview reveals the rest. */
+  max-width: min(176px, 38vw);
 }
 .player-uid {
   font-size: 12px;
@@ -1004,9 +1288,7 @@ body {
   font-size: 15px;
   text-align: center;
   padding: 2px 0 6px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* clipping/reveal handled by nameview */
 }
 .member-menu .btn {
   width: 100%;
@@ -1089,9 +1371,7 @@ body {
 .friend-name {
   font-weight: 600;
   font-size: 14px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* clipping/reveal handled by nameview — ellipsis would fight the animation */
 }
 .friend-uid {
   font-size: 12px;
@@ -1233,9 +1513,8 @@ body {
   font-size: 14px;
 }
 .chat-row-title {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  min-width: 0; /* let the name window shrink instead of pushing the Blocked tag out */
+  /* clipping/reveal handled by nameview */
 }
 .chat-row-preview {
   font-size: 12.5px;

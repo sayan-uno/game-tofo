@@ -2,7 +2,7 @@ import { Router } from "express";
 import type { Server } from "socket.io";
 import { requireAuth } from "../middleware/auth.js";
 import { getLobbyMode, getOnlineSet, getUserLobby, isDnd } from "../redis.js";
-import { getUserByUid, toPublicUser } from "../services/users.js";
+import { displayName, getUserById, getUserByUid, toPublicUser } from "../services/users.js";
 import {
   MAX_FRIENDS,
   MAX_PENDING_REQUESTS,
@@ -21,6 +21,14 @@ import { getBlockState } from "../services/chat.js";
 export function friendsRouter(io: Server) {
   const router = Router();
   router.use(requireAuth);
+
+  // Name for the realtime pings below. The JWT's copy can be stale (signed
+  // before the username claim on another device), so read the live row —
+  // one PK lookup on rare, user-clicked actions.
+  const senderName = async (userId: string, fallback: string) => {
+    const me = await getUserById(userId);
+    return me ? displayName(me) : fallback;
+  };
 
   // Accepted friends with live status: online, which lobby they're in (so the
   // client can tag "Same group"), whether that lobby is an open party, plus
@@ -112,7 +120,7 @@ export function friendsRouter(io: Server) {
     io.to(`user:${target.id}`).emit("friend:request", {
       requestId,
       uid: req.auth!.uid,
-      name: req.auth!.name,
+      name: await senderName(userId, req.auth!.name),
     });
     res.json({ ok: true });
   });
@@ -135,7 +143,7 @@ export function friendsRouter(io: Server) {
     await deleteFriendship(existing.id);
     io.to(`user:${target.id}`).emit("friend:removed", {
       uid: req.auth!.uid,
-      name: req.auth!.name,
+      name: await senderName(userId, req.auth!.name),
     });
     res.json({ ok: true });
   });
@@ -172,7 +180,7 @@ export function friendsRouter(io: Server) {
       await acceptFriendRequest(requestId);
       io.to(`user:${pending.requesterId}`).emit("friend:accepted", {
         uid: req.auth!.uid,
-        name: req.auth!.name,
+        name: await senderName(userId, req.auth!.name),
       });
     } else {
       await deleteFriendship(requestId);

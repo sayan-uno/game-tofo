@@ -1,7 +1,7 @@
-import { and, count, desc, eq, or } from "drizzle-orm";
+import { and, count, desc, eq, or, sql } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { friendships, users } from "../db/schema.js";
-import { getFriendIds, getUsersByIds, type UserRow } from "./users.js";
+import { displayName, getFriendIds, getUsersByIds, type UserRow } from "./users.js";
 
 /** Hard caps enforced on send AND on accept (a list can fill up while a
  *  request sits pending). Soft-checked — no locking; a race can overshoot by
@@ -33,11 +33,11 @@ export async function countPendingIncoming(userId: string): Promise<number> {
   return row?.n ?? 0;
 }
 
-/** Accepted friends of a user, sorted by name. */
+/** Accepted friends of a user, sorted by display name. */
 export async function listFriends(userId: string): Promise<UserRow[]> {
   const ids = await getFriendIds(userId);
   const rows = await getUsersByIds(ids);
-  return rows.sort((a, b) => a.name.localeCompare(b.name));
+  return rows.sort((a, b) => displayName(a).localeCompare(displayName(b)));
 }
 
 /** Incoming pending requests with the requester's profile. */
@@ -46,7 +46,8 @@ export async function listIncomingRequests(userId: string) {
     .select({
       requestId: friendships.id,
       uid: users.uid,
-      name: users.name,
+      // Same rule as displayName(): the username once claimed, never Google's.
+      name: sql<string>`coalesce(${users.username}, ${users.name})`,
       avatarUrl: users.avatarUrl,
     })
     .from(friendships)

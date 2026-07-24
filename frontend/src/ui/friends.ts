@@ -1,5 +1,6 @@
 import { api } from "../api/http";
 import { emitAck } from "../api/socket";
+import { setNameView } from "./nameview";
 import { actionToast, toast } from "./toast";
 import type { Friend, FriendRequest } from "../types";
 
@@ -161,7 +162,7 @@ export class FriendsPanel {
           <div class="friend-uid">UID ${friend.uid}</div>
         </div>
       `;
-      row.querySelector(".friend-name")!.textContent = friend.name;
+      setNameView(row.querySelector<HTMLElement>(".friend-name")!, friend.name);
       const sameGroup = friend.online && friend.lobbyId !== null && friend.lobbyId === this.myLobbyId;
       if (sameGroup) {
         const tag = document.createElement("span");
@@ -288,7 +289,7 @@ export class FriendsPanel {
           <div class="friend-uid">UID ${request.uid}</div>
         </div>
       `;
-      row.querySelector(".friend-name")!.textContent = request.name;
+      setNameView(row.querySelector<HTMLElement>(".friend-name")!, request.name);
       const respond = async (accept: boolean) => {
         try {
           await api.post("/api/friends/respond", { requestId: request.requestId, accept });
@@ -340,7 +341,7 @@ export class FriendsPanel {
             <div class="friend-uid">UID ${user.uid}</div>
           </div>
         `;
-        row.querySelector(".friend-name")!.textContent = user.name;
+        setNameView(row.querySelector<HTMLElement>(".friend-name")!, user.name);
         const addBtn = document.createElement("button");
         addBtn.className = "btn btn-primary btn-small";
         addBtn.textContent = "Add Friend";

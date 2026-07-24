@@ -1,3 +1,5 @@
+import { setNameView } from "./nameview";
+
 /** Action sheet shown when the group leader taps a teammate's character:
  *  transfer leadership or kick. Built on demand and removed on any action —
  *  no persistent DOM or listeners while closed. */
@@ -14,7 +16,7 @@ export function showMemberMenu(
 
   const title = document.createElement("div");
   title.className = "member-menu-title";
-  title.textContent = memberName;
+  setNameView(title, memberName);
 
   const close = () => backdrop.remove();
   const makeBtn = (label: string, className: string, onClick?: () => void) => {

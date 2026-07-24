@@ -37,10 +37,32 @@ const SLOTS: [number, number][] = [
   [-4.6, -1.4],
 ];
 
+// Shared 2D context for name-plate text measurement — a few µs per member
+// change, never per frame. (A DOM-style scrolling reveal is out here on
+// purpose: animating a GUI TextBlock would repaint the fullscreen GUI texture
+// every frame, exactly what this scene is built to avoid.)
+let measureCtx: CanvasRenderingContext2D | null = null;
+
+/** Largest font size (14 down to 9) at which the plate text fits the 160px
+ *  banner. Usernames cap at 15 chars, so 9px covers even all-wide-glyph
+ *  names; anything still wider just clips inside the plate — the plate
+ *  itself never grows or shifts. */
+function fitPlateFontSize(text: string): number {
+  measureCtx ??= document.createElement("canvas").getContext("2d");
+  if (!measureCtx) return 14;
+  for (let size = 14; size > 9; size--) {
+    measureCtx.font = `${size}px "Archivo Black", system-ui, sans-serif`;
+    if (measureCtx.measureText(text).width <= 142) return size;
+  }
+  return 9;
+}
+
 /** Name line of the base plate: leader gets the star and the gold. Reused
  *  in place when leadership moves so the plate never gets rebuilt. */
 function applyNameStyle(label: TextBlock, member: LobbyMember) {
-  label.text = `${member.name}${member.isLeader ? " ★" : ""}`;
+  const text = `${member.name}${member.isLeader ? " ★" : ""}`;
+  label.text = text;
+  label.fontSize = fitPlateFontSize(text);
   label.color = member.isLeader ? "#ffd45e" : "#f2f5ff";
 }
 
@@ -326,9 +348,8 @@ export class LobbyScene {
     plate.linkOffsetY = 30; // px below the pedestal → sits on the floor in front
 
     const label = new TextBlock(`label_${member.uid}`);
-    applyNameStyle(label, member);
-    label.fontSize = 14;
     label.fontFamily = '"Archivo Black", system-ui, sans-serif';
+    applyNameStyle(label, member); // sets text, color AND the fitted fontSize
     plate.addControl(label);
     disposables.push(plate);
 

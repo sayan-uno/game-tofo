@@ -27,7 +27,7 @@ import {
   migrateLobbyMembers,
   moveTeamSession,
 } from "../redis.js";
-import { areFriends, getFriendIds, getUserByUid, getUsersByIds } from "../services/users.js";
+import { areFriends, displayName, getFriendIds, getUserById, getUserByUid, getUsersByIds } from "../services/users.js";
 import { registerChatHandlers, syncTeamChatSession } from "./chat.js";
 
 interface AuthedSocket extends Socket {
@@ -50,7 +50,7 @@ async function broadcastLobby(io: Server, lobbyId: string) {
   const members = users.map((u) => ({
     id: u.id,
     uid: u.uid,
-    name: u.name,
+    name: displayName(u),
     avatarUrl: u.avatarUrl,
     isLeader: lobbyId === `L${u.uid}`,
   }));
@@ -154,13 +154,28 @@ async function migrateGroupOnLeaderLeave(io: Server, socket: AuthedSocket): Prom
 }
 
 export function registerSockets(io: Server) {
-  // Handshake auth: the frontend passes its JWT in socket.io auth.
+  // Handshake auth: the frontend passes its JWT in socket.io auth. The JWT's
+  // name can be stale (signed before the username claim, or on an old
+  // device), so the live row is loaded once per CONNECTION — one PK lookup,
+  // nothing per event — and every handler/emit closes over the fresh
+  // username. No username yet → no lobby: the client bounces to the claim
+  // screen on this error.
   io.use((socket, next) => {
-    const token = socket.handshake.auth?.token as string | undefined;
-    const payload = token ? verifyToken(token) : null;
-    if (!payload) return next(new Error("Unauthorized"));
-    (socket as AuthedSocket).data.auth = payload;
-    next();
+    void (async () => {
+      try {
+        const token = socket.handshake.auth?.token as string | undefined;
+        const payload = token ? verifyToken(token) : null;
+        if (!payload) return next(new Error("Unauthorized"));
+        const user = await getUserById(payload.userId);
+        if (!user) return next(new Error("Unauthorized"));
+        if (!user.username) return next(new Error("USERNAME_REQUIRED"));
+        (socket as AuthedSocket).data.auth = { ...payload, name: user.username };
+        next();
+      } catch (err) {
+        console.error("Socket auth error:", err);
+        next(new Error("Unauthorized"));
+      }
+    })();
   });
 
   io.on("connection", async (rawSocket) => {
@@ -178,17 +193,18 @@ export function registerSockets(io: Server) {
         const { friendUid } = payload ?? {};
         const target = await getUserByUid(String(friendUid || ""));
         if (!target) return ack?.({ error: "Player not found" });
+        const targetName = displayName(target);
         if (!(await areFriends(userId, target.id))) return ack?.({ error: "You can only invite friends" });
 
         const targetSocketId = await getSocketId(target.id);
-        if (!targetSocketId) return ack?.({ error: `${target.name} is offline` });
+        if (!targetSocketId) return ack?.({ error: `${targetName} is offline` });
 
         const lobbyId = (await getUserLobby(userId)) ?? soloLobby;
         if ((await getUserLobby(target.id)) === lobbyId) {
-          return ack?.({ error: `${target.name} is already in your group` });
+          return ack?.({ error: `${targetName} is already in your group` });
         }
         if (await isDnd(target.id)) {
-          return ack?.({ error: `${target.name} has Do Not Disturb on` });
+          return ack?.({ error: `${targetName} has Do Not Disturb on` });
         }
         const [members, mode] = await Promise.all([getLobbyMembers(lobbyId), getLobbyMode(lobbyId)]);
         // Inviting from solo opens a party right away (Free Fire style): the
@@ -200,7 +216,7 @@ export function registerSockets(io: Server) {
         // Last check, so a failed invite never burns the cooldown window.
         const wait = await armSendCooldown("invite", userId, target.id);
         if (wait > 0) {
-          return ack?.({ error: `Wait ${wait}s before inviting ${target.name} again`, wait });
+          return ack?.({ error: `Wait ${wait}s before inviting ${targetName} again`, wait });
         }
         if (mode === "solo") {
           await setLobbyMode(lobbyId, "squad");
@@ -289,10 +305,11 @@ export function registerSockets(io: Server) {
         const { friendUid } = payload ?? {};
         const target = await getUserByUid(String(friendUid || ""));
         if (!target) return ack?.({ error: "Player not found" });
+        const targetName = displayName(target);
         if (!(await areFriends(userId, target.id))) return ack?.({ error: "You can only join a friend's group" });
         const targetSocketId = await getSocketId(target.id);
-        if (!targetSocketId) return ack?.({ error: `${target.name} is offline` });
-        if (await isDnd(target.id)) return ack?.({ error: `${target.name} has Do Not Disturb on` });
+        if (!targetSocketId) return ack?.({ error: `${targetName} is offline` });
+        if (await isDnd(target.id)) return ack?.({ error: `${targetName} has Do Not Disturb on` });
 
         const targetLobby = (await getUserLobby(target.id)) ?? `L${target.uid}`;
         const myLobby = (await getUserLobby(userId)) ?? soloLobby;
@@ -306,7 +323,7 @@ export function registerSockets(io: Server) {
         // Last check, so a failed request never burns the cooldown window.
         const wait = await armSendCooldown("joinreq", userId, target.id);
         if (wait > 0) {
-          return ack?.({ error: `Wait ${wait}s before asking ${target.name} again`, wait });
+          return ack?.({ error: `Wait ${wait}s before asking ${targetName} again`, wait });
         }
         await createJoinRequest(userId, target.id);
         io.to(`user:${target.id}`).emit("lobby:joinRequest", { from: { uid, name } });
@@ -334,7 +351,7 @@ export function registerSockets(io: Server) {
           }
           const requesterSocketId = await getSocketId(requester.id);
           const requesterSocket = requesterSocketId ? io.sockets.sockets.get(requesterSocketId) : null;
-          if (!requesterSocket) return ack?.({ error: `${requester.name} went offline` });
+          if (!requesterSocket) return ack?.({ error: `${displayName(requester)} went offline` });
 
           const myLobby = (await getUserLobby(userId)) ?? soloLobby;
           if ((await getUserLobby(requester.id)) === myLobby) return ack?.({ ok: true });
@@ -411,7 +428,7 @@ export function registerSockets(io: Server) {
         await rehomeMembers(io, soloLobby, newLobbyId, members, joinTimes);
         // My old lobby id is empty now — reset it for my next fresh session.
         await setLobbyMode(soloLobby, "solo");
-        io.to(`room:${newLobbyId}`).emit("lobby:leader", { uid: target.uid, name: target.name });
+        io.to(`room:${newLobbyId}`).emit("lobby:leader", { uid: target.uid, name: displayName(target) });
         ack?.({ ok: true });
       } catch (err) {
         console.error("lobby:transferLead error:", err);

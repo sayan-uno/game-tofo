@@ -2,6 +2,7 @@ import "./style.css";
 import { api, getToken, clearSession } from "./api/http";
 import { connectSocket, emitAck } from "./api/socket";
 import { showLogin } from "./ui/login";
+import { showUsernameSetup } from "./ui/username";
 import { passEntryGate } from "./ui/entryGate";
 import { Hud } from "./ui/hud";
 import { FriendsPanel } from "./ui/friends";
@@ -15,14 +16,23 @@ async function boot() {
   // Try to resume an existing session; otherwise show the login screen.
   if (getToken()) {
     try {
-      const { user } = await api.get<{ user: User }>("/api/auth/me");
-      await enterLobby(user);
+      const { user, needsUsername } = await api.get<{ user: User; needsUsername?: boolean }>("/api/auth/me");
+      afterAuth(user, needsUsername === true);
       return;
     } catch {
       clearSession();
     }
   }
-  showLogin((user) => void enterLobby(user));
+  showLogin(afterAuth);
+}
+
+/** Accounts without a claimed gamer tag (brand-new OR from before usernames
+ *  existed) go through the one-time claim screen first; everyone else drops
+ *  straight into the lobby. The server enforces the same gate at the socket
+ *  handshake, so this isn't just cosmetic routing. */
+function afterAuth(user: User, needsUsername: boolean) {
+  if (needsUsername) showUsernameSetup(user, (claimed) => void enterLobby(claimed));
+  else void enterLobby(user);
 }
 
 async function enterLobby(user: User) {
@@ -115,6 +125,12 @@ async function enterLobby(user: User) {
   const socket = connectSocket();
 
   socket.on("connect_error", (err) => {
+    // A session that slipped past the claim screen (stale token from another
+    // tab/device) gets bounced back to boot, which lands on that screen.
+    if (err.message === "USERNAME_REQUIRED") {
+      location.reload();
+      return;
+    }
     toast(`Connection error: ${err.message}`, true);
   });
 

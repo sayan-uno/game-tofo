@@ -29,10 +29,12 @@ function waitForGis(timeoutMs = 10000): Promise<void> {
 
 /** Renders the official Google button into `container`.
  *  On success the backend verifies the token, stores the user in Postgres,
- *  and returns our JWT + user (with their unique UID). */
+ *  and returns our JWT + user (with their unique UID). `needsUsername` is
+ *  true until the account has claimed its in-game tag — the caller routes
+ *  those players to the claim screen instead of the lobby. */
 export async function mountGoogleSignIn(
   container: HTMLElement,
-  onSuccess: (user: User) => void,
+  onSuccess: (user: User, needsUsername: boolean) => void,
   onError: (message: string) => void
 ): Promise<void> {
   if (!GOOGLE_CLIENT_ID) {
@@ -44,11 +46,11 @@ export async function mountGoogleSignIn(
     client_id: GOOGLE_CLIENT_ID,
     callback: async (response: { credential: string }) => {
       try {
-        const data = await api.post<{ token: string; user: User }>("/api/auth/google", {
+        const data = await api.post<{ token: string; user: User; needsUsername?: boolean }>("/api/auth/google", {
           credential: response.credential,
         });
         saveSession(data.token, data.user);
-        onSuccess(data.user);
+        onSuccess(data.user, data.needsUsername === true);
       } catch (err) {
         onError(err instanceof Error ? err.message : "Sign-in failed");
       }

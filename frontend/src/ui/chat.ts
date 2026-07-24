@@ -1,5 +1,6 @@
 import { api } from "../api/http";
 import { emitAck, getSocket } from "../api/socket";
+import { setNameView } from "./nameview";
 import { actionToast, toast } from "./toast";
 import type { ChatMessage, ChatThread, DmHistory, Friend, TeamHistory, User } from "../types";
 
@@ -317,7 +318,7 @@ export class ChatPanel {
       ${this.unreadFrom.has(user.uid) ? '<span class="chat-row-dot"></span>' : ""}
       <span class="chat-chevron">›</span>
     `;
-    row.querySelector(".chat-row-title")!.textContent = user.name;
+    setNameView(row.querySelector<HTMLElement>(".chat-row-title")!, user.name);
     row.querySelector(".chat-row-preview")!.textContent = thread
       ? `${thread.lastFromMe ? "You: " : ""}${thread.lastBody}`
       : `UID ${user.uid}`;
@@ -376,7 +377,7 @@ export class ChatPanel {
         <div class="chat-row-preview">UID ${data.user.uid}</div>
       </div>
     `;
-    head.querySelector(".chat-row-title")!.textContent = data.user.name;
+    setNameView(head.querySelector<HTMLElement>(".chat-row-title")!, data.user.name);
     head.querySelector<HTMLButtonElement>(".chat-back")!.onclick = () => this.renderTab();
     if (!data.isFriend) {
       const blockBtn = document.createElement("button");
@@ -525,7 +526,7 @@ export class ChatPanel {
     if (!m.fromMe && m.fromName) {
       const sender = document.createElement("span");
       sender.className = "msg-sender";
-      sender.textContent = m.fromName;
+      setNameView(sender, m.fromName);
       el.appendChild(sender);
     }
     const body = document.createElement("span");

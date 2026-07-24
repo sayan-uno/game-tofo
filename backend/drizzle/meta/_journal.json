@@ -22,6 +22,13 @@
       "when": 1784460626008,
       "tag": "0002_puzzling_vulture",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1784879841972,
+      "tag": "0003_lowly_fenris",
+      "breakpoints": true
     }
   ]
 }

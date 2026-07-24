@@ -1,6 +1,7 @@
 import { clearSession } from "../api/http";
 import { disconnectSocket } from "../api/socket";
 import { isMicEnabled, toggleMic } from "../voice/livekit";
+import { setNameView } from "./nameview";
 import type { LobbyMode, User } from "../types";
 
 export interface HudCallbacks {
@@ -85,7 +86,7 @@ export class Hud {
     `;
     document.getElementById("ui-root")!.appendChild(this.root);
 
-    this.root.querySelector(".player-name")!.textContent = user.name;
+    setNameView(this.root.querySelector<HTMLElement>(".player-name")!, user.name);
     this.root.querySelector(".player-uid span")!.textContent = user.uid;
     this.leaveBtn = this.root.querySelector(".leave-btn")!;
     this.micBtn = this.root.querySelector(".mic-btn")!;

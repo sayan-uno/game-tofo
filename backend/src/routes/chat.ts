@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth.js";
 import { clearUnreadDm, getLobbyMode, getTeamSession, getUnreadDmUids, getUserLobby } from "../redis.js";
-import { areFriends, getFriendIds, getUserByUid, getUsersByIds, toPublicUser } from "../services/users.js";
+import { areFriends, displayName, getFriendIds, getUserByUid, getUsersByIds, toPublicUser } from "../services/users.js";
 import {
   getBlockState,
   listBlockedIds,
@@ -93,14 +93,17 @@ chatRouter.get("/team", async (req, res) => {
   const senderById = new Map(senders.map((u) => [u.id, u]));
   res.json({
     inTeam: true,
-    messages: rows.map((m) => ({
-      id: m.id,
-      fromMe: m.senderId === me,
-      fromUid: senderById.get(m.senderId)?.uid ?? "",
-      fromName: senderById.get(m.senderId)?.name ?? "Player",
-      body: m.body,
-      at: m.createdAt.toISOString(),
-    })),
+    messages: rows.map((m) => {
+      const sender = senderById.get(m.senderId);
+      return {
+        id: m.id,
+        fromMe: m.senderId === me,
+        fromUid: sender?.uid ?? "",
+        fromName: sender ? displayName(sender) : "Player",
+        body: m.body,
+        at: m.createdAt.toISOString(),
+      };
+    }),
   });
 });
 

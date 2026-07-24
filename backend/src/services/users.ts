@@ -4,8 +4,17 @@ import { friendships, users } from "../db/schema.js";
 
 export type UserRow = typeof users.$inferSelect;
 
+/** The ONLY name the game may show. The Google profile name stays stored for
+ *  account matching and Skip-generation, but once a username is claimed it
+ *  never leaves the backend; the fallback exists solely for accounts that
+ *  haven't been through the claim screen yet (they show up in old friends'
+ *  lists but can't actually play until they claim). */
+export function displayName(u: Pick<UserRow, "username" | "name">): string {
+  return u.username ?? u.name;
+}
+
 export function toPublicUser(u: UserRow) {
-  return { id: u.id, uid: u.uid, name: u.name, avatarUrl: u.avatarUrl };
+  return { id: u.id, uid: u.uid, name: displayName(u), avatarUrl: u.avatarUrl };
 }
 
 /** Free-Fire style numeric UID, 10 digits, guaranteed unique. */

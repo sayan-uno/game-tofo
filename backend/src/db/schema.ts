@@ -4,7 +4,7 @@
 //   2. review the generated SQL (especially anything that drops/renames with data)
 //   3. `npm run db:migrate` — applies pending migrations to the database
 import { sql } from "drizzle-orm";
-import { pgTable, primaryKey, uuid, varchar, text, timestamp, index, unique, check } from "drizzle-orm/pg-core";
+import { pgTable, primaryKey, uuid, varchar, text, timestamp, index, uniqueIndex, unique, check } from "drizzle-orm/pg-core";
 
 export const users = pgTable(
   "users",
@@ -14,11 +14,23 @@ export const users = pgTable(
     googleId: text("google_id").notNull().unique("users_google_id_key"),
     email: text("email").notNull().unique("users_email_key"),
     name: text("name").notNull(),
+    // The in-game identity, claimed once on the post-signup screen (or
+    // auto-generated on Skip). Everything player-facing shows THIS, never the
+    // Google name. varchar(15) counts code points — same unit the app-side
+    // validation uses. NULL = hasn't passed the claim screen yet; those
+    // accounts are turned away at the socket handshake until they do.
+    username: varchar("username", { length: 15 }),
     avatarUrl: text("avatar_url"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     lastLoginAt: timestamp("last_login_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("idx_users_uid").on(t.uid)]
+  (t) => [
+    index("idx_users_uid").on(t.uid),
+    // Case-insensitive uniqueness: "Titan" also blocks "TITAN". The index is
+    // the referee for claim races — the loser gets a 23505 and a clean
+    // "taken" answer. Also serves the availability probe's lower() lookup.
+    uniqueIndex("users_username_lower_key").on(sql`lower(${t.username})`),
+  ]
 );
 
 // Direct messages between two players. One thread per pair — whether it shows
