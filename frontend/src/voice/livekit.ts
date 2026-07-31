@@ -68,7 +68,8 @@ export async function joinVoice(
     await newRoom.localParticipant.setMicrophoneEnabled(micEnabled);
     room = newRoom;
     currentRoomName = lobbyId;
-    onStatus("Voice chat connected");
+    // No success toast — squadding up fires this on every join and the popup
+    // got noisy. Failures below still surface.
   } catch (err) {
     onStatus(err instanceof Error ? err.message : "Could not connect voice", true);
   }
