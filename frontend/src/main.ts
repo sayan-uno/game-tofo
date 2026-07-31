@@ -35,6 +35,13 @@ function afterAuth(user: User, needsUsername: boolean) {
   else void enterLobby(user);
 }
 
+/** Run once the device has a spare moment (Safari only shipped
+ *  requestIdleCallback recently, hence the timeout fallback). */
+function whenIdle(fn: () => void) {
+  if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(() => fn());
+  else window.setTimeout(fn, 1500);
+}
+
 async function enterLobby(user: User) {
   document.body.classList.add("in-game");
 
@@ -47,7 +54,7 @@ async function enterLobby(user: User) {
   // Phones: one-tap gate → fullscreen + landscape (PUBG-style). No-op on desktop.
   const closeGate = await passEntryGate();
 
-  const [{ createEngine, startRenderLoop }, { LobbyScene }] = await heavyChunks;
+  const [{ createEngine, startRenderLoop, setRenderPaused }, { LobbyScene }] = await heavyChunks;
 
   const canvas = document.getElementById("game-canvas") as HTMLCanvasElement;
   const engine = createEngine(canvas);
@@ -79,11 +86,33 @@ async function enterLobby(user: User) {
   const lobby = new LobbyScene(engine, user.uid, onMemberTap);
   startRenderLoop(engine, () => lobby.scene.render());
 
+  // The profile page is its own chunk: off the lobby's critical path, but
+  // warmed while the device is idle so the first tap on the chip is instant.
+  let profileChunk: Promise<typeof import("./ui/profile")> | null = null;
+  const loadProfile = () =>
+    (profileChunk ??= import("./ui/profile").catch((err: unknown) => {
+      profileChunk = null; // a chunk that failed to download must not poison the next tap
+      throw err;
+    }));
+  whenIdle(() => void loadProfile().catch(() => {}));
+
   const uiRoot = document.getElementById("ui-root")!;
   const friendsPanel = new FriendsPanel(uiRoot);
   const hud = new Hud(user, {
     onToggleFriends: () => friendsPanel.toggle(),
     onToggleChat: () => chatPanel.toggle(),
+    onOpenProfile: () => {
+      void loadProfile()
+        .then(({ openProfile }) =>
+          openProfile(user, {
+            // Nothing of the lobby is visible behind an opaque full-screen
+            // page — stop drawing it until the player comes back.
+            onShow: () => setRenderPaused(engine, true),
+            onHide: () => setRenderPaused(engine, false),
+          })
+        )
+        .catch(() => toast("Couldn't open your profile", true));
+    },
     onLeaveLobby: () => {
       void emitAck("lobby:leave").then((res) => {
         if (res.error) toast(res.error, true);

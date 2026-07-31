@@ -54,6 +54,54 @@ export interface TeamHistory {
   messages: ChatMessage[];
 }
 
+/** Career card behind the top-left player chip. Mirrors the payload built in
+ *  backend/src/services/profile.ts — everything match-related is zero/null
+ *  until the first TOFO game ships. */
+export interface ProfileStats {
+  matches: number;
+  wins: number;
+  losses: number;
+  /** Percent, 0–100. null until there's a match — rendered as "—". */
+  winRate: number | null;
+  kills: number;
+  deaths: number;
+  kd: number | null;
+  playtimeMinutes: number;
+  bestPlacement: number | null;
+}
+
+export interface ProfileRank {
+  tier: string;
+  label: string;
+  note: string;
+  placementsDone: number;
+  placementsNeeded: number;
+}
+
+export interface ProfileAchievement {
+  id: string;
+  name: string;
+  desc: string;
+  icon: string;
+  unlocked: boolean;
+  /** Countable goals show a progress bar while still locked. */
+  progress?: { have: number; need: number };
+}
+
+export interface Profile {
+  user: User;
+  level: number;
+  xpInLevel: number;
+  xpForLevel: number;
+  totalXp: number;
+  rank: ProfileRank;
+  stats: ProfileStats;
+  achievements: ProfileAchievement[];
+  friends: number;
+  memberSince: string;
+  lastLoginAt: string;
+}
+
 export type LobbyMode = "solo" | "duo" | "squad";
 
 export interface LobbyState {

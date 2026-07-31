@@ -1,12 +1,15 @@
 import { clearSession } from "../api/http";
 import { disconnectSocket } from "../api/socket";
 import { isMicEnabled, toggleMic } from "../voice/livekit";
+import { setAvatar } from "./avatar";
 import { setNameView } from "./nameview";
 import type { LobbyMode, User } from "../types";
 
 export interface HudCallbacks {
   onToggleFriends: () => void;
   onToggleChat: () => void;
+  /** Tapping the player chip opens the career page. */
+  onOpenProfile: () => void;
   onLeaveLobby: () => void;
   onChangeMode: (mode: LobbyMode) => void;
   /** Resolves after the server answered (errors already toasted by the caller). */
@@ -45,9 +48,13 @@ export class Hud {
     this.root.innerHTML = `
       <div class="hud-top">
         <div class="hud-left">
-          <div class="player-chip">
-            <div class="player-name"></div>
-            <div class="player-uid">UID <span></span> <button class="copy-uid" title="Copy UID">⧉</button></div>
+          <div class="player-chip" role="button" tabindex="0" title="View your profile">
+            <span class="chip-av"></span>
+            <div class="chip-body">
+              <div class="player-name"></div>
+              <div class="player-uid">UID <span></span> <button class="copy-uid" title="Copy UID">⧉</button></div>
+            </div>
+            <span class="chip-caret" aria-hidden="true">›</span>
           </div>
           <div class="tc-card-row hidden">
             <button class="team-code-card" title="Tap to copy">
@@ -95,7 +102,20 @@ export class Hud {
     this.modeCount = this.root.querySelector(".mode-count")!;
     this.modePop = this.root.querySelector(".mode-pop")!;
 
-    this.root.querySelector<HTMLButtonElement>(".copy-uid")!.onclick = () => {
+    // The whole chip is the door to the profile; the copy button inside it
+    // keeps its own job (a nested <button> would be invalid markup, hence
+    // role/tabindex on the chip and a stopped click on the copy).
+    const chip = this.root.querySelector<HTMLElement>(".player-chip")!;
+    setAvatar(chip.querySelector<HTMLElement>(".chip-av")!, user.name, user.avatarUrl);
+    chip.onclick = callbacks.onOpenProfile;
+    chip.onkeydown = (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        callbacks.onOpenProfile();
+      }
+    };
+    this.root.querySelector<HTMLButtonElement>(".copy-uid")!.onclick = (e) => {
+      e.stopPropagation();
       void navigator.clipboard.writeText(user.uid);
     };
 

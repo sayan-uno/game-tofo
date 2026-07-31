@@ -35,15 +35,28 @@ export function createEngine(canvas: HTMLCanvasElement): Engine {
 
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) engine.stopRenderLoop();
-    else if (activeLoop) engine.runRenderLoop(activeLoop);
+    else if (activeLoop && !covered) engine.runRenderLoop(activeLoop);
   });
 
   return engine;
 }
 
 let activeLoop: (() => void) | null = null;
+/** True while a full-screen page (the profile) hides the canvas completely. */
+let covered = false;
 
 export function startRenderLoop(engine: Engine, loop: () => void) {
   activeLoop = loop;
   engine.runRenderLoop(loop);
+}
+
+/** Park the lobby while an opaque full-screen page covers it — drawing frames
+ *  nobody can see is pure wasted GPU and battery, and on a phone that shows up
+ *  as heat and drain. Same rule as the tab-hidden pause above: the loop runs
+ *  only when nothing is hiding it. */
+export function setRenderPaused(engine: Engine, paused: boolean) {
+  if (covered === paused) return;
+  covered = paused;
+  if (paused) engine.stopRenderLoop();
+  else if (activeLoop && !document.hidden) engine.runRenderLoop(activeLoop);
 }

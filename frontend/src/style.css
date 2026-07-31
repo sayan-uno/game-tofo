@@ -141,6 +141,35 @@ body {
   }
 }
 
+/* ---------- Avatar (monogram tile + optional photo, see ui/avatar.ts) ---------- */
+/* Base sizing lives on the users (.chip-av, .pf-av) — this only defines the
+   look, so it must stay ABOVE them in the cascade. */
+.avatar {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: none;
+  overflow: hidden;
+  border-radius: 12px;
+  background: linear-gradient(140deg, rgba(229, 24, 46, 0.4), rgba(229, 24, 46, 0.08));
+  border: 1px solid rgba(229, 24, 46, 0.45);
+  color: #fff;
+  font-family: var(--display-font);
+  line-height: 1;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.avatar-mono {
+  font-style: normal;
+}
+.avatar-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
 /* ---------- Login (base shared with the username claim screen) ---------- */
 .login-screen,
 .username-screen {
@@ -1055,12 +1084,48 @@ body {
 .player-chip {
   pointer-events: auto;
 }
+/* The chip is the door to the profile page: avatar, tag, UID, caret. */
 .player-chip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   background: rgba(8, 12, 26, 0.75);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 14px;
-  padding: 10px 16px;
+  padding: 8px 12px;
   backdrop-filter: blur(10px);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.1s ease;
+}
+.player-chip:hover {
+  border-color: rgba(229, 24, 46, 0.5);
+  background: rgba(13, 6, 8, 0.85);
+}
+.player-chip:active {
+  transform: scale(0.97);
+}
+.player-chip:focus-visible {
+  outline: 2px solid var(--red);
+  outline-offset: 2px;
+}
+.chip-av {
+  width: 36px;
+  height: 36px;
+  border-radius: 11px;
+  font-size: 16px;
+}
+.chip-body {
+  min-width: 0;
+}
+.chip-caret {
+  flex: none;
+  color: #5c6480;
+  font-size: 19px;
+  line-height: 1;
+  transition: color 0.15s ease;
+}
+.player-chip:hover .chip-caret {
+  color: var(--red);
 }
 .player-name {
   font-weight: 700;
@@ -1817,5 +1882,843 @@ body {
   .hud-actions .btn {
     padding: 9px 12px;
     font-size: 13px;
+  }
+  .chip-av {
+    width: 30px;
+    height: 30px;
+    border-radius: 9px;
+    font-size: 14px;
+  }
+  .chip-caret {
+    display: none;
+  }
+}
+
+/* ---------- Profile: the player's career page ---------- */
+/* Fully opaque and full-screen on purpose — the lobby behind it stops
+   rendering while it's up (see setRenderPaused in game/engine.ts), so this
+   page costs the GPU nothing and gets the whole screen to itself. */
+.pf-screen {
+  --pf-x: clamp(14px, 3vw, 28px);
+  --pf-gap: clamp(12px, 1.8vw, 18px);
+  position: absolute;
+  inset: 0;
+  z-index: 90; /* above panels and menus, below toasts */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--ink);
+  animation: pf-in 0.22s ease-out;
+}
+@keyframes pf-in {
+  from { opacity: 0; transform: scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+
+/* --- decorative backdrop (paints once, animates nothing) --- */
+.pf-bg {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.pf-glow {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(58vw 62vh at 16% -6%, rgba(229, 24, 46, 0.2), transparent 62%),
+    radial-gradient(50vw 55vh at 96% 104%, rgba(229, 24, 46, 0.13), transparent 64%);
+}
+.pf-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+  background-size: 46px 46px;
+  -webkit-mask-image: radial-gradient(125% 95% at 50% 0%, #000 18%, transparent 76%);
+  mask-image: radial-gradient(125% 95% at 50% 0%, #000 18%, transparent 76%);
+}
+.pf-vignette {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(130% 120% at 50% 38%, transparent 54%, rgba(0, 0, 0, 0.72) 100%);
+}
+
+/* --- header --- */
+.pf-head {
+  position: relative;
+  z-index: 2;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: max(10px, env(safe-area-inset-top)) 0 10px;
+  padding-inline: max(var(--pf-x), env(safe-area-inset-left), env(safe-area-inset-right));
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+.pf-back {
+  flex: none;
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  border: 1px solid rgba(229, 24, 46, 0.4);
+  background: rgba(229, 24, 46, 0.1);
+  color: #fff;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+.pf-back svg {
+  width: 22px;
+  height: 22px;
+}
+.pf-back:hover {
+  background: rgba(229, 24, 46, 0.22);
+}
+.pf-back:active {
+  transform: scale(0.94);
+}
+.pf-head-text {
+  flex: 1;
+  min-width: 0;
+}
+.pf-kicker {
+  display: block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--red-hot);
+  opacity: 0.9;
+}
+.pf-head-title {
+  margin-top: 2px;
+  font-family: var(--display-font);
+  font-weight: 400;
+  font-size: clamp(18px, 2.4vw, 24px);
+  letter-spacing: 0.06em;
+  line-height: 1.1;
+  color: #fff;
+}
+.pf-head-logo {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  opacity: 0.9;
+  filter: drop-shadow(0 0 10px rgba(229, 24, 46, 0.45));
+}
+
+/* --- scroll body --- */
+.pf-scroll {
+  position: relative;
+  z-index: 2;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--pf-gap);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--pf-gap) 0 calc(26px + env(safe-area-inset-bottom));
+  padding-inline: max(var(--pf-x), env(safe-area-inset-left), env(safe-area-inset-right));
+}
+/* Centred column: on a wide monitor the card stops sprawling instead of
+   stretching a handful of stats across 1600px. */
+.pf-scroll > * {
+  width: 100%;
+  max-width: 1180px;
+  margin-inline: auto;
+}
+
+/* --- shared card shell --- */
+.pf-card {
+  position: relative;
+  padding: clamp(14px, 2vw, 20px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 18px;
+  background: linear-gradient(150deg, rgba(26, 10, 14, 0.9), rgba(11, 5, 7, 0.9));
+  overflow: hidden;
+}
+.pf-card::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--red), transparent 68%);
+}
+
+/* --- hero: identity + rank --- */
+.pf-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(268px, 340px);
+  gap: var(--pf-gap);
+}
+.pf-id {
+  display: flex;
+  align-items: center;
+  gap: clamp(14px, 2vw, 22px);
+  border-color: rgba(229, 24, 46, 0.3);
+}
+.pf-av-wrap {
+  position: relative;
+  flex: none;
+  width: clamp(70px, 11vw, 108px);
+  aspect-ratio: 1;
+}
+.pf-ring {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+.pf-ring-bg {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.1);
+  stroke-width: 6;
+}
+.pf-ring-fill {
+  fill: none;
+  stroke: var(--red-hot);
+  stroke-width: 6;
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 6px rgba(229, 24, 46, 0.65));
+  transition: stroke-dashoffset 0.9s cubic-bezier(0.22, 0.8, 0.28, 1);
+}
+.pf-av {
+  position: absolute;
+  inset: 9px;
+  border-radius: 50%;
+  font-size: clamp(26px, 4vw, 38px);
+}
+.pf-lvl {
+  position: absolute;
+  left: 50%;
+  bottom: -9px;
+  translate: -50% 0;
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+  background: linear-gradient(135deg, #ff2f43, #a30f1d);
+  box-shadow: 0 3px 12px rgba(229, 24, 46, 0.45);
+}
+.pf-lvl i {
+  font-style: normal;
+  font-size: 8.5px;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  color: rgba(255, 255, 255, 0.78);
+}
+.pf-lvl b {
+  font-family: var(--display-font);
+  font-weight: 400;
+  font-size: 13px;
+  color: #fff;
+}
+.pf-id-text {
+  flex: 1;
+  min-width: 0;
+}
+.pf-name {
+  font-family: var(--display-font);
+  font-weight: 400;
+  font-size: clamp(21px, 3.2vw, 34px);
+  line-height: 1.1;
+  color: #fff;
+  /* clipping/reveal handled by nameview */
+}
+.pf-uid {
+  margin-top: 7px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  letter-spacing: 0.04em;
+  color: #8a94b8;
+}
+.pf-uid b {
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #dfe2e6;
+}
+.pf-copy {
+  border: none;
+  border-radius: 6px;
+  padding: 4px 8px;
+  background: rgba(255, 255, 255, 0.07);
+  color: #a7abb4;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.pf-copy:hover {
+  background: rgba(229, 24, 46, 0.2);
+  color: #fff;
+}
+.pf-copy.done {
+  background: rgba(46, 213, 115, 0.18);
+  color: #7ee2a0;
+}
+.pf-tags {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.pf-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+  color: #c7cbd1;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+.pf-tag-live {
+  color: #7ee2a0;
+  border-color: rgba(46, 213, 115, 0.35);
+  background: rgba(46, 213, 115, 0.08);
+}
+.pf-tag-live i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #2ed573;
+  box-shadow: 0 0 8px rgba(46, 213, 115, 0.8);
+}
+.pf-xp {
+  margin-top: 13px;
+  max-width: 400px;
+}
+.pf-xp-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.09);
+  overflow: hidden;
+}
+.pf-xp-bar i,
+.pf-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--red), #ff7a4d);
+  /* scaleX, never width: the fill animates on the compositor and can't
+     trigger a layout pass behind the page */
+  transform: scaleX(var(--p, 0));
+  transform-origin: left center;
+  transition: transform 0.9s cubic-bezier(0.22, 0.8, 0.28, 1);
+}
+.pf-xp-bar i {
+  box-shadow: 0 0 12px rgba(229, 24, 46, 0.55);
+}
+.pf-xp-text {
+  display: block;
+  margin-top: 6px;
+  font-size: 11.5px;
+  letter-spacing: 0.03em;
+  color: #8a94b8;
+}
+.pf-bar {
+  margin-top: 9px;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.09);
+  overflow: hidden;
+}
+.pf-bar-sm {
+  margin-top: 7px;
+  height: 4px;
+}
+
+/* --- rank card --- */
+.pf-rank-slot {
+  display: flex;
+}
+.pf-rank-slot > * {
+  flex: 1;
+}
+.pf-rank {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+/* Placement counter + season sit on one wrapping footer line, so neither can
+   ever collide with the labels above however narrow the card gets. */
+.pf-rank-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 3px 10px;
+  margin-top: 7px;
+}
+.pf-season {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #7d828c;
+}
+.pf-shield {
+  flex: none;
+  width: clamp(54px, 7vw, 72px);
+}
+.pf-shield-body {
+  fill: rgba(255, 255, 255, 0.05);
+  stroke: rgba(255, 255, 255, 0.22);
+  stroke-width: 2;
+}
+.pf-rank[data-tier="unranked"] .pf-shield-body {
+  stroke-dasharray: 5 4;
+}
+/* Ready for the day the ladder turns on: any real tier lights the emblem up. */
+.pf-rank:not([data-tier="unranked"]) .pf-shield-body {
+  fill: rgba(229, 24, 46, 0.12);
+  stroke: var(--red);
+  filter: drop-shadow(0 0 8px rgba(229, 24, 46, 0.5));
+}
+.pf-shield-mark {
+  fill: none;
+  stroke: var(--red-hot);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.pf-shield-q {
+  fill: #6b7390;
+  font-family: var(--display-font);
+  font-size: 26px;
+}
+.pf-rank-text {
+  min-width: 0;
+}
+.pf-rank-label {
+  display: block;
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #8a94b8;
+}
+.pf-rank-tier {
+  display: block;
+  margin-top: 3px;
+  font-family: var(--display-font);
+  font-weight: 400;
+  font-size: clamp(17px, 2.4vw, 23px);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #fff;
+}
+.pf-rank-note {
+  margin-top: 5px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: #8a94b8;
+}
+.pf-rank-count {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: #a7abb4;
+}
+
+/* --- tabs --- */
+.pf-tabs {
+  display: flex;
+  flex: none;
+  gap: 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.pf-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 14px 12px;
+  border: none;
+  background: none;
+  color: #8a94b8;
+  font-family: inherit;
+  font-size: 13.5px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+}
+.pf-tab:hover {
+  color: #c7cbd1;
+}
+.pf-tab.active {
+  color: #fff;
+}
+.pf-tab.active::after {
+  content: "";
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 0;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--red);
+  box-shadow: 0 0 10px rgba(229, 24, 46, 0.7);
+}
+.pf-tab-count {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 10.5px;
+  font-weight: 800;
+  color: #a7abb4;
+}
+.pf-tab.active .pf-tab-count {
+  background: rgba(229, 24, 46, 0.28);
+  color: #fff;
+}
+
+/* --- panes --- */
+.pf-panes,
+.pf-pane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--pf-gap);
+}
+.pf-stats,
+.pf-skel-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+.pf-tile {
+  position: relative;
+  padding: 14px 12px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.035);
+  text-align: center;
+  overflow: hidden;
+}
+.pf-tile::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 34px;
+  height: 2px;
+  background: var(--red);
+  opacity: 0.55;
+}
+.pf-tile-value {
+  display: block;
+  font-family: var(--display-font);
+  font-weight: 400;
+  font-size: clamp(19px, 2.7vw, 27px);
+  line-height: 1.05;
+  color: #fff;
+}
+.pf-tile-label {
+  display: block;
+  margin-top: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #8a94b8;
+}
+
+/* --- empty / error card --- */
+.pf-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: clamp(20px, 3vw, 30px);
+  text-align: center;
+}
+.pf-empty-icon {
+  width: 34px;
+  height: 34px;
+  color: var(--red);
+  filter: drop-shadow(0 0 10px rgba(229, 24, 46, 0.45));
+}
+.pf-empty strong {
+  font-family: var(--display-font);
+  font-weight: 400;
+  font-size: 16px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #fff;
+}
+.pf-empty p {
+  max-width: 52ch;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: #8a94b8;
+}
+.pf-empty .btn {
+  margin-top: 6px;
+}
+
+/* --- achievements --- */
+.pf-awards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 10px;
+}
+.pf-badge {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 13px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.035);
+}
+.pf-badge.off {
+  opacity: 0.75;
+}
+.pf-badge.on {
+  border-color: rgba(229, 24, 46, 0.42);
+  background: linear-gradient(135deg, rgba(229, 24, 46, 0.13), rgba(255, 255, 255, 0.03));
+}
+.pf-badge-icon {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.06);
+  color: #6b7390;
+}
+.pf-badge-icon svg {
+  width: 21px;
+  height: 21px;
+}
+.pf-badge.on .pf-badge-icon {
+  border-color: rgba(229, 24, 46, 0.5);
+  background: rgba(229, 24, 46, 0.2);
+  color: #fff;
+  box-shadow: 0 0 16px rgba(229, 24, 46, 0.25);
+}
+.pf-badge-text {
+  flex: 1;
+  min-width: 0;
+}
+.pf-badge-text strong {
+  display: block;
+  font-size: 13.5px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  color: #e8ecf8;
+}
+.pf-badge.on .pf-badge-text strong {
+  color: #fff;
+}
+.pf-badge-desc {
+  display: block;
+  margin-top: 2px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: #8a94b8;
+}
+.pf-badge-count {
+  display: block;
+  margin-top: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: #7d828c;
+}
+.pf-badge-state {
+  flex: none;
+  color: #4a5370;
+}
+.pf-badge-state svg {
+  width: 16px;
+  height: 16px;
+}
+.pf-badge.on .pf-badge-state {
+  color: #7ee2a0;
+}
+
+/* --- account rows --- */
+.pf-rows {
+  padding: 2px clamp(14px, 2vw, 20px);
+}
+.pf-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 13px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.pf-row:last-child {
+  border-bottom: none;
+}
+.pf-row span {
+  font-size: 12.5px;
+  color: #8a94b8;
+}
+.pf-row b {
+  max-width: 60%;
+  font-size: 13.5px;
+  font-weight: 700;
+  text-align: right;
+  color: #e8ecf8;
+}
+.pf-fineprint {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: #7d828c;
+}
+
+/* --- loading placeholders --- */
+.pf-skel {
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.05);
+  animation: pf-pulse 1.15s ease-in-out infinite;
+}
+.pf-skel-grid {
+  background: none;
+  animation: none;
+}
+.pf-skel-tile {
+  height: 74px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.05);
+  animation: pf-pulse 1.15s ease-in-out infinite;
+}
+.pf-skel-block {
+  height: 126px;
+}
+.pf-skel-rank {
+  min-height: 116px;
+}
+.pf-wait {
+  animation: pf-pulse 1.15s ease-in-out infinite;
+  opacity: 0.5;
+}
+@keyframes pf-pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+/* --- responsive --- */
+@media (max-width: 900px) {
+  .pf-hero {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 620px) {
+  .pf-stats,
+  .pf-skel-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .pf-awards {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .pf-head-logo {
+    display: none;
+  }
+  /* Three tabs have to fit a 360px phone; they scroll rather than clip if a
+     translation or a wider system font ever pushes them past the edge. */
+  .pf-tabs {
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .pf-tabs::-webkit-scrollbar {
+    display: none;
+  }
+  .pf-tab {
+    flex: none;
+    padding: 10px 10px 12px;
+    font-size: 13px;
+  }
+}
+/* landscape phones — the in-game orientation: same page, tighter everything.
+   Short and wide: vertical room is the scarce one, so the hero goes back to
+   two columns and the stats stay one short scroll away. */
+@media (max-height: 520px) {
+  .pf-screen {
+    --pf-gap: 10px;
+  }
+  .pf-hero {
+    grid-template-columns: minmax(0, 1fr) minmax(210px, 262px);
+  }
+  .pf-card {
+    padding: 12px 14px;
+  }
+  .pf-id {
+    gap: 14px;
+  }
+  .pf-uid {
+    margin-top: 5px;
+  }
+  .pf-tags {
+    margin-top: 7px;
+  }
+  .pf-tab {
+    padding: 8px 12px 10px;
+    font-size: 12.5px;
+  }
+  .pf-head {
+    padding-top: max(6px, env(safe-area-inset-top));
+    padding-bottom: 6px;
+  }
+  .pf-back {
+    width: 36px;
+    height: 36px;
+  }
+  .pf-back svg {
+    width: 19px;
+    height: 19px;
+  }
+  .pf-av-wrap {
+    width: 68px;
+  }
+  .pf-name {
+    font-size: 20px;
+  }
+  .pf-xp {
+    margin-top: 9px;
+  }
+  .pf-tile {
+    padding: 10px 8px 9px;
+  }
+  .pf-tile-value {
+    font-size: 19px;
+  }
+  .pf-skel-tile {
+    height: 60px;
+  }
+  .pf-empty {
+    padding: 16px;
+  }
+  .pf-badge {
+    padding: 10px 11px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pf-screen,
+  .pf-screen *,
+  .pf-screen *::before,
+  .pf-screen *::after {
+    animation: none !important;
+    transition: none !important;
   }
 }
