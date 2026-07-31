@@ -90,6 +90,9 @@ export interface ProfileAchievement {
 
 export interface Profile {
   user: User;
+  /** False when looking at a squadmate's card — owner-only rows are dropped. */
+  isSelf: boolean;
+  online: boolean;
   level: number;
   xpInLevel: number;
   xpForLevel: number;
@@ -99,7 +102,8 @@ export interface Profile {
   achievements: ProfileAchievement[];
   friends: number;
   memberSince: string;
-  lastLoginAt: string;
+  /** Owner-only — null on someone else's profile. */
+  lastLoginAt: string | null;
 }
 
 export type LobbyMode = "solo" | "duo" | "squad";

@@ -1,3 +1,4 @@
+import { getSocketId } from "../redis.js";
 import { countAcceptedFriends } from "./friends.js";
 import { toPublicUser, type UserRow } from "./users.js";
 
@@ -176,11 +177,20 @@ function achievementsFor(user: UserRow, friends: number, stats: CareerStats): Ac
  *  Assembly
  * ------------------------------------------------------------------------- */
 
-export async function buildProfile(user: UserRow) {
-  const [friends, stats] = await Promise.all([countAcceptedFriends(user.id), careerStats(user.id)]);
+/** `viewerId` is whoever is looking: the same card serves a player's own page
+ *  and a squadmate's, with the owner-only fields blanked for everyone else. */
+export async function buildProfile(user: UserRow, viewerId: string) {
+  const isSelf = user.id === viewerId;
+  const [friends, stats, socketId] = await Promise.all([
+    countAcceptedFriends(user.id),
+    careerStats(user.id),
+    getSocketId(user.id),
+  ]);
   const xp = progression(careerXp(stats));
   return {
     user: toPublicUser(user),
+    isSelf,
+    online: socketId !== null,
     level: xp.level,
     xpInLevel: xp.xpInLevel,
     xpForLevel: xp.xpForLevel,
@@ -190,6 +200,7 @@ export async function buildProfile(user: UserRow) {
     achievements: achievementsFor(user, friends, stats),
     friends,
     memberSince: user.createdAt.toISOString(),
-    lastLoginAt: user.lastLoginAt.toISOString(),
+    // Account detail, not a public stat — nobody else gets to see it.
+    lastLoginAt: isSelf ? user.lastLoginAt.toISOString() : null,
   };
 }

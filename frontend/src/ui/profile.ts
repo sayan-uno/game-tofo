@@ -23,9 +23,34 @@ export interface ProfileHooks {
   onHide?: () => void;
 }
 
-/** Session cache. Nothing in the payload can change without the player doing
- *  something that reopens (and therefore revalidates) the page. */
-let cached: Profile | null = null;
+export interface OpenProfileOptions extends ProfileHooks {
+  /** True for the signed-in player's own card (owner-only rows, /me route). */
+  self?: boolean;
+}
+
+/** Per-player cache, shared with the lobby's member card: tapping a squadmate
+ *  fetches their card once, and "View full profile" then opens on data that's
+ *  already in hand. Entries younger than FRESH_MS are served as-is, so the
+ *  two views never fire the same request twice in a row. */
+const cache = new Map<string, { profile: Profile; at: number }>();
+const FRESH_MS = 30_000;
+const CACHE_MAX = 20;
+
+/** The cached payload for a player, however old — for painting before the
+ *  network answers. */
+export function peekProfile(uid: string): Profile | null {
+  return cache.get(uid)?.profile ?? null;
+}
+
+export async function fetchProfile(uid: string, self: boolean): Promise<Profile> {
+  const hit = cache.get(uid);
+  if (hit && Date.now() - hit.at < FRESH_MS) return hit.profile;
+  const profile = await api.get<Profile>(self ? "/api/profile/me" : `/api/profile/${encodeURIComponent(uid)}`);
+  cache.set(uid, { profile, at: Date.now() });
+  if (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value!); // oldest out
+  return profile;
+}
+
 /** The mounted page, if any — a double tap must never stack two. */
 let screen: HTMLElement | null = null;
 
@@ -86,8 +111,10 @@ function playtime(minutes: number): string {
 
 /** ------------------------------------------------------------------ open */
 
-export function openProfile(user: User, hooks: ProfileHooks = {}) {
+export function openProfile(user: User, opts: OpenProfileOptions = {}) {
   if (screen) return;
+  const self = opts.self === true;
+  const hooks: ProfileHooks = opts;
 
   const page = document.createElement("div");
   page.className = "pf-screen";
@@ -101,7 +128,7 @@ export function openProfile(user: User, hooks: ProfileHooks = {}) {
     <header class="pf-head">
       <button class="pf-back" type="button" aria-label="Close profile">${icon("back")}</button>
       <div class="pf-head-text">
-        <span class="pf-kicker">// Player card</span>
+        <span class="pf-kicker">// ${self ? "Player card" : "Squadmate"}</span>
         <h2 class="pf-head-title">PROFILE</h2>
       </div>
       <img class="pf-head-logo" src="/logo-red.png" alt="" width="36" height="36" />
@@ -123,7 +150,7 @@ export function openProfile(user: User, hooks: ProfileHooks = {}) {
             <div class="pf-name"></div>
             <div class="pf-uid">UID <b></b><button class="pf-copy" type="button">COPY</button></div>
             <div class="pf-tags">
-              <span class="pf-tag pf-tag-live"><i></i>Online</span>
+              <span class="pf-tag pf-tag-live pf-wait"><i></i>Online</span>
               <span class="pf-tag pf-wait pf-tag-friends">— Friends</span>
             </div>
             <div class="pf-xp">
@@ -138,7 +165,7 @@ export function openProfile(user: User, hooks: ProfileHooks = {}) {
       <nav class="pf-tabs">
         <button class="pf-tab active" type="button" data-pane="overview">Overview</button>
         <button class="pf-tab" type="button" data-pane="awards">Achievements<span class="pf-tab-count hidden"></span></button>
-        <button class="pf-tab" type="button" data-pane="account">Account</button>
+        <button class="pf-tab" type="button" data-pane="account">${self ? "Account" : "Info"}</button>
       </nav>
 
       <div class="pf-panes">${SKELETON}</div>
@@ -233,21 +260,20 @@ export function openProfile(user: User, hooks: ProfileHooks = {}) {
 
   // Stale-while-revalidate: a cached payload paints now, the fresh one only
   // repaints if something actually moved (no flicker on every open).
+  const shown = peekProfile(user.uid);
   const load = () => {
-    void api
-      .get<Profile>("/api/profile/me")
+    void fetchProfile(user.uid, self)
       .then((profile) => {
-        const changed = !cached || JSON.stringify(cached) !== JSON.stringify(profile);
-        cached = profile;
-        if (screen === page && changed) paint(profile);
+        if (screen !== page) return;
+        if (!shown || JSON.stringify(shown) !== JSON.stringify(profile)) paint(profile);
       })
       .catch((err: unknown) => {
-        if (screen !== page || cached) return; // already showing something usable
+        if (screen !== page || shown) return; // already showing something usable
         failed(err instanceof Error ? err.message : "Something went wrong.");
       });
   };
 
-  if (cached) paint(cached);
+  if (shown) paint(shown);
   load();
 }
 
@@ -263,6 +289,10 @@ function fillHero(page: HTMLElement, p: Profile) {
   const friendTag = page.querySelector<HTMLElement>(".pf-tag-friends")!;
   friendTag.textContent = `${num(p.friends)} ${p.friends === 1 ? "Friend" : "Friends"}`;
   friendTag.classList.remove("pf-wait");
+
+  const liveTag = page.querySelector<HTMLElement>(".pf-tag-live")!;
+  liveTag.className = `pf-tag pf-tag-live${p.online ? "" : " off"}`;
+  liveTag.replaceChildren(document.createElement("i"), document.createTextNode(p.online ? "Online" : "Offline"));
 
   const pct = p.xpForLevel > 0 ? Math.min(1, p.xpInLevel / p.xpForLevel) : 0;
   const xpText = page.querySelector<HTMLElement>(".pf-xp-text")!;
@@ -350,11 +380,23 @@ function buildPanes(page: HTMLElement, panes: HTMLElement, p: Profile) {
           <div class="pf-row"><span>Gamer tag</span><b class="pf-row-name"></b></div>
           <div class="pf-row"><span>Player UID</span><b>${esc(p.user.uid)}</b></div>
           <div class="pf-row"><span>Member since</span><b>${esc(date(p.memberSince))}</b></div>
-          <div class="pf-row"><span>Last sign-in</span><b>${esc(date(p.lastLoginAt))}</b></div>
+          ${
+            p.isSelf && p.lastLoginAt
+              ? `<div class="pf-row"><span>Last sign-in</span><b>${esc(date(p.lastLoginAt))}</b></div>`
+              : ""
+          }
           <div class="pf-row"><span>Friends</span><b>${num(p.friends)}</b></div>
-          <div class="pf-row"><span>Sign-in method</span><b>Google</b></div>
+          ${
+            p.isSelf
+              ? `<div class="pf-row"><span>Sign-in method</span><b>Google</b></div>`
+              : `<div class="pf-row"><span>Status</span><b>${p.online ? "Online" : "Offline"}</b></div>`
+          }
         </div>
-        <p class="pf-fineprint">Your gamer tag is what every rival and squadmate sees — your Google name and email never leave your account.</p>
+        ${
+          p.isSelf
+            ? `<p class="pf-fineprint">Your gamer tag is what every rival and squadmate sees — your Google name and email never leave your account.</p>`
+            : `<p class="pf-fineprint">Add them with their UID from Friends → Add to squad up any time.</p>`
+        }
       </div>
     `)
   );

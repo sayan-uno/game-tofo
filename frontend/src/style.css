@@ -1327,36 +1327,214 @@ body {
   color: #a7abb4;
 }
 
-/* ---------- Member menu (leader taps a teammate's character) ---------- */
-.member-menu-backdrop {
+/* ---------- Member card (tap any squadmate's character) ---------- */
+.mc-backdrop {
   position: absolute;
   inset: 0;
+  z-index: 40;
   display: grid;
   place-items: center;
-  background: rgba(4, 2, 3, 0.55);
-  z-index: 40;
+  padding: 16px;
+  background: rgba(4, 2, 3, 0.62);
+  animation: mc-fade 0.15s ease-out;
 }
-.member-menu {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  width: min(260px, calc(100vw - 48px));
-  padding: 14px;
-  background: rgba(13, 6, 8, 0.97);
+@keyframes mc-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.mc-card {
+  position: relative;
+  width: min(340px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 18px;
+  border-radius: 18px;
   border: 1px solid rgba(229, 24, 46, 0.4);
-  border-radius: 16px;
+  background: linear-gradient(150deg, rgba(28, 10, 14, 0.97), rgba(11, 5, 7, 0.97));
   backdrop-filter: blur(14px);
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6), 0 0 24px rgba(229, 24, 46, 0.12);
+  box-shadow: 0 18px 52px rgba(0, 0, 0, 0.62), 0 0 26px rgba(229, 24, 46, 0.14);
+  animation: mc-pop 0.18s cubic-bezier(0.22, 0.8, 0.28, 1);
 }
-.member-menu-title {
-  font-weight: 800;
-  font-size: 15px;
-  text-align: center;
-  padding: 2px 0 6px;
+@keyframes mc-pop {
+  from { opacity: 0; transform: translateY(8px) scale(0.97); }
+  to { opacity: 1; transform: none; }
+}
+.mc-card::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  border-radius: 18px 18px 0 0;
+  background: linear-gradient(90deg, var(--red), transparent 68%);
+}
+.mc-close {
+  position: absolute;
+  top: 11px;
+  right: 11px;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #8a94b8;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.mc-close:hover {
+  background: rgba(229, 24, 46, 0.2);
+  color: #fff;
+}
+.mc-top {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding-right: 38px; /* keeps a max-length tag clear of the close button */
+}
+.mc-av {
+  width: 58px;
+  height: 58px;
+  border-radius: 16px;
+  font-size: 24px;
+}
+.mc-id {
+  flex: 1;
+  min-width: 0;
+}
+.mc-name {
+  font-family: var(--display-font);
+  font-size: 19px;
+  line-height: 1.15;
+  color: #fff;
   /* clipping/reveal handled by nameview */
 }
-.member-menu .btn {
+.mc-uid {
+  margin-top: 3px;
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+  color: #8a94b8;
+}
+.mc-uid b {
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  color: #dfe2e6;
+}
+.mc-chips {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.mc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: #c7cbd1;
+}
+.mc-lvl {
+  border-color: rgba(229, 24, 46, 0.45);
+  background: rgba(229, 24, 46, 0.14);
+  color: #fff;
+}
+.mc-leader {
+  border-color: rgba(255, 196, 60, 0.45);
+  background: rgba(255, 196, 60, 0.12);
+  color: #ffc43c;
+}
+.mc-leader svg {
+  width: 11px;
+  height: 11px;
+}
+.mc-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  margin-top: 15px;
+}
+.mc-stat {
+  padding: 9px 6px;
+  border-radius: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.04);
+  text-align: center;
+}
+.mc-stat b {
+  display: block;
+  font-family: var(--display-font);
+  font-weight: 400;
+  font-size: 17px;
+  color: #fff;
+}
+.mc-stat span {
+  display: block;
+  margin-top: 3px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #8a94b8;
+}
+.mc-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 15px;
+}
+.mc-actions .btn {
   width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+.mc-actions .btn svg {
+  width: 15px;
+  height: 15px;
+}
+.mc-go {
+  font-family: var(--display-font);
+  font-weight: 400;
+  letter-spacing: 0.05em;
+}
+/* landscape phones — the in-game orientation */
+@media (max-height: 520px) {
+  .mc-card {
+    padding: 14px;
+  }
+  .mc-av {
+    width: 48px;
+    height: 48px;
+    border-radius: 13px;
+    font-size: 20px;
+  }
+  .mc-stats,
+  .mc-actions {
+    margin-top: 10px;
+  }
+  .mc-actions {
+    gap: 6px;
+  }
+  .mc-actions .btn {
+    padding: 8px 14px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mc-backdrop,
+  .mc-card {
+    animation: none;
+  }
 }
 
 /* ---------- Friends panel ---------- */
@@ -2198,6 +2376,15 @@ body {
   background: #2ed573;
   box-shadow: 0 0 8px rgba(46, 213, 115, 0.8);
 }
+.pf-tag-live.off {
+  color: #8a94b8;
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+}
+.pf-tag-live.off i {
+  background: #4a5370;
+  box-shadow: none;
+}
 .pf-xp {
   margin-top: 13px;
   max-width: 400px;
@@ -2608,6 +2795,7 @@ body {
 .pf-skel-rank {
   min-height: 116px;
 }
+/* "waiting on the request" marker — also used by the lobby's member card. */
 .pf-wait {
   animation: pf-pulse 1.15s ease-in-out infinite;
   opacity: 0.5;

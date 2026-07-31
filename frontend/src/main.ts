@@ -7,7 +7,6 @@ import { passEntryGate } from "./ui/entryGate";
 import { Hud } from "./ui/hud";
 import { FriendsPanel } from "./ui/friends";
 import { ChatPanel } from "./ui/chat";
-import { showMemberMenu } from "./ui/memberMenu";
 import { toast, actionToast } from "./ui/toast";
 import { joinVoice, leaveVoice } from "./voice/livekit";
 import type { LobbyState, User } from "./types";
@@ -59,42 +58,63 @@ async function enterLobby(user: User) {
   const canvas = document.getElementById("game-canvas") as HTMLCanvasElement;
   const engine = createEngine(canvas);
 
-  // Tapping a teammate's character opens the leader's manage menu
-  // (transfer leadership / kick). Non-leaders and self-taps do nothing.
+  // Nothing of the lobby is visible behind an opaque full-screen page — stop
+  // drawing it until the player comes back.
+  const profileHooks = {
+    onShow: () => setRenderPaused(engine, true),
+    onHide: () => setRenderPaused(engine, false),
+  };
+
+  // Profile page + player card are their own chunk: off the lobby's critical
+  // path, but warmed while the device is idle so the first tap is instant.
+  let profileChunk: Promise<{
+    profile: typeof import("./ui/profile");
+    card: typeof import("./ui/memberCard");
+  }> | null = null;
+  const loadProfileUi = () =>
+    (profileChunk ??= Promise.all([import("./ui/profile"), import("./ui/memberCard")])
+      .then(([profile, card]) => ({ profile, card }))
+      .catch((err: unknown) => {
+        profileChunk = null; // a chunk that failed to download must not poison the next tap
+        throw err;
+      }));
+  whenIdle(() => void loadProfileUi().catch(() => {}));
+
+  // Tapping any teammate's character opens their player card. Everyone sees
+  // the snapshot and the way through to the full profile; only the leader also
+  // gets the group controls on it.
   let lobbyState: LobbyState | null = null;
   const onMemberTap = (uid: string) => {
     const state = lobbyState;
-    if (!state || uid === user.uid || state.lobbyId !== `L${user.uid}`) return;
+    if (!state || uid === user.uid) return;
     const member = state.members.find((m) => m.uid === uid);
     if (!member) return;
-    // Menu buttons act immediately — opening the menu is the deliberate step,
-    // a second accept/decline prompt was dropped on purpose.
-    showMemberMenu(member.name, {
-      onTransfer: () => {
-        void emitAck("lobby:transferLead", { targetUid: uid }).then((res) => {
-          if (res.error) toast(res.error, true);
-        });
-      },
-      onKick: () => {
-        void emitAck("lobby:kick", { targetUid: uid }).then((res) => {
-          if (res.error) toast(res.error, true);
-        });
-      },
-    });
+    const isLeader = state.lobbyId === `L${user.uid}`;
+    void loadProfileUi()
+      .then(({ card }) =>
+        card.showMemberCard(member, {
+          profileHooks,
+          manage: isLeader
+            ? {
+                onTransfer: () => {
+                  void emitAck("lobby:transferLead", { targetUid: uid }).then((res) => {
+                    if (res.error) toast(res.error, true);
+                  });
+                },
+                onKick: () => {
+                  void emitAck("lobby:kick", { targetUid: uid }).then((res) => {
+                    if (res.error) toast(res.error, true);
+                  });
+                },
+              }
+            : undefined,
+        })
+      )
+      .catch(() => toast("Couldn't open that player's card", true));
   };
 
   const lobby = new LobbyScene(engine, user.uid, onMemberTap);
   startRenderLoop(engine, () => lobby.scene.render());
-
-  // The profile page is its own chunk: off the lobby's critical path, but
-  // warmed while the device is idle so the first tap on the chip is instant.
-  let profileChunk: Promise<typeof import("./ui/profile")> | null = null;
-  const loadProfile = () =>
-    (profileChunk ??= import("./ui/profile").catch((err: unknown) => {
-      profileChunk = null; // a chunk that failed to download must not poison the next tap
-      throw err;
-    }));
-  whenIdle(() => void loadProfile().catch(() => {}));
 
   const uiRoot = document.getElementById("ui-root")!;
   const friendsPanel = new FriendsPanel(uiRoot);
@@ -102,15 +122,8 @@ async function enterLobby(user: User) {
     onToggleFriends: () => friendsPanel.toggle(),
     onToggleChat: () => chatPanel.toggle(),
     onOpenProfile: () => {
-      void loadProfile()
-        .then(({ openProfile }) =>
-          openProfile(user, {
-            // Nothing of the lobby is visible behind an opaque full-screen
-            // page — stop drawing it until the player comes back.
-            onShow: () => setRenderPaused(engine, true),
-            onHide: () => setRenderPaused(engine, false),
-          })
-        )
+      void loadProfileUi()
+        .then(({ profile }) => profile.openProfile(user, { self: true, ...profileHooks }))
         .catch(() => toast("Couldn't open your profile", true));
     },
     onLeaveLobby: () => {
