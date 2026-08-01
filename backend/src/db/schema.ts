@@ -21,6 +21,12 @@ export const users = pgTable(
     // accounts are turned away at the socket handshake until they do.
     username: varchar("username", { length: 15 }),
     avatarUrl: text("avatar_url"),
+    // Catalog id of the character the player wears in the lobby. NULL means
+    // "never chose one" and reads as the catalog's default, so existing rows
+    // need no backfill and a retired character can't leave anyone invisible.
+    // Ownership lives in the catalog for now (both starters are free); when
+    // paid characters ship this gets checked against a user_items table.
+    equippedCharacter: varchar("equipped_character", { length: 40 }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     lastLoginAt: timestamp("last_login_at", { withTimezone: true }).notNull().defaultNow(),
   },

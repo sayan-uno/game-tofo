@@ -29,6 +29,13 @@
       "when": 1784879841972,
       "tag": "0003_lowly_fenris",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1785606292504,
+      "tag": "0004_pale_warlock",
+      "breakpoints": true
     }
   ]
 }

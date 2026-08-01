@@ -12,6 +12,12 @@ export const config = {
     .map((s) => s.trim())
     .filter(Boolean),
   jwtSecret: process.env.JWT_SECRET || "",
+  // Where the 3D assets live (Cloudflare R2 today). The database and the
+  // catalog only ever store PATHS — "characters/male/v1/model.glb" — and this
+  // is the one value that turns them into URLs. Moving CDN or putting a custom
+  // domain in front is this line and nothing else. Trailing slashes are
+  // stripped so joins stay predictable.
+  cdnBaseUrl: (process.env.CDN_BASE_URL || "").replace(/\/+$/, ""),
   livekit: {
     url: process.env.LIVEKIT_URL || "",
     apiKey: process.env.LIVEKIT_API_KEY || "",

@@ -80,6 +80,13 @@ async function enterLobby(user: User) {
       }));
   whenIdle(() => void loadProfileUi().catch(() => {}));
 
+  // The collection page is its own chunk too. Its module also owns the asset
+  // catalog, which the LOBBY needs — squadmates' character models are resolved
+  // through it — so the chunk is pulled now and the catalog request starts
+  // immediately, in parallel with everything below.
+  const collectionChunk = import("./ui/collection");
+  const catalogReady = collectionChunk.then((m) => m.primeCollection()).catch(() => null);
+
   // Tapping any teammate's character opens their player card. Everyone sees
   // the snapshot and the way through to the full profile; only the leader also
   // gets the group controls on it.
@@ -114,7 +121,8 @@ async function enterLobby(user: User) {
   };
 
   const lobby = new LobbyScene(engine, user.uid, onMemberTap);
-  startRenderLoop(engine, () => lobby.scene.render());
+  const renderLobby = () => lobby.scene.render();
+  startRenderLoop(engine, renderLobby);
 
   const uiRoot = document.getElementById("ui-root")!;
   const friendsPanel = new FriendsPanel(uiRoot);
@@ -125,6 +133,19 @@ async function enterLobby(user: User) {
       void loadProfileUi()
         .then(({ profile }) => profile.openProfile(user, { self: true, ...profileHooks }))
         .catch(() => toast("Couldn't open your profile", true));
+    },
+    onOpenCollection: () => {
+      // The page takes the canvas for its own preview scene; restoreLobby hands
+      // it straight back. The lobby is never disposed, so returning is instant.
+      void collectionChunk
+        .then((m) =>
+          m.openCollection({
+            engine,
+            lobbyScene: lobby.scene,
+            restoreLobby: () => startRenderLoop(engine, renderLobby),
+          })
+        )
+        .catch(() => toast("Couldn't open your collection", true));
     },
     onLeaveLobby: () => {
       void emitAck("lobby:leave").then((res) => {
@@ -163,6 +184,13 @@ async function enterLobby(user: User) {
     .then(({ unread }) => chatPanel.seedUnread(unread))
     .catch(() => {});
   closeGate();
+
+  // Settle the catalog before the socket can deliver a member list. It has
+  // been in flight since the top of this function, so by now it costs nothing —
+  // and it removes the race where members arrive first and everyone is stuck
+  // as a placeholder until the next roster change. A failed fetch resolves to
+  // null and the lobby simply keeps its built-in characters.
+  await catalogReady;
 
   const socket = connectSocket();
 

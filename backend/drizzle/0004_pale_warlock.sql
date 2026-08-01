@@ -1,0 +1,1 @@
+ALTER TABLE "users" ADD COLUMN "equipped_character" varchar(40);

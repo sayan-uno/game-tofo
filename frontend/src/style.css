@@ -2910,3 +2910,314 @@ body {
     transition: none !important;
   }
 }
+
+/* ============================================================
+   Collection — characters + emotes
+   The screen itself is TRANSPARENT: the canvas behind it is drawing the
+   preview scene, and .cl-stage is the hole left for it. Only the header and
+   the panel take pointer events, so drags over the stage reach the camera.
+   ============================================================ */
+.cl-screen {
+  --cl-x: clamp(14px, 3vw, 28px);
+  position: absolute;
+  inset: 0;
+  z-index: 90; /* same band as the profile page: above panels, below toasts */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  pointer-events: none;
+  animation: cl-in 0.2s ease-out;
+}
+@keyframes cl-in {
+  from { opacity: 0; transform: scale(0.99); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ---------- header ---------- */
+.cl-head {
+  pointer-events: auto;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: max(10px, env(safe-area-inset-top)) 0 10px;
+  padding-inline: max(var(--cl-x), env(safe-area-inset-left), env(safe-area-inset-right));
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  background: linear-gradient(180deg, rgba(11, 5, 7, 0.97), rgba(11, 5, 7, 0.86));
+  backdrop-filter: blur(6px);
+}
+.cl-back {
+  flex: none;
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  border: 1px solid rgba(229, 24, 46, 0.4);
+  background: rgba(229, 24, 46, 0.1);
+  color: #fff;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+.cl-back svg { width: 22px; height: 22px; }
+.cl-back:hover { background: rgba(229, 24, 46, 0.22); }
+.cl-back:active { transform: scale(0.94); }
+.cl-head-text { flex: 1; min-width: 0; }
+.cl-kicker {
+  display: block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--red-hot);
+  opacity: 0.9;
+}
+.cl-head-title {
+  margin-top: 2px;
+  font-family: var(--display-font);
+  font-weight: 400;
+  font-size: clamp(18px, 2.4vw, 24px);
+  letter-spacing: 0.06em;
+  line-height: 1.1;
+  color: #fff;
+}
+.cl-head-logo {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  opacity: 0.9;
+  filter: drop-shadow(0 0 10px rgba(229, 24, 46, 0.45));
+}
+
+/* ---------- body ---------- */
+.cl-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+}
+
+/* The hole. No background and no pointer events — the preview scene renders
+   here and the camera receives the drags. */
+.cl-stage {
+  flex: 1 1 42%;
+  min-width: 0;
+  position: relative;
+  pointer-events: none;
+}
+.cl-stage-status {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  font-size: 11px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.5);
+  background: rgba(11, 5, 7, 0.7);
+  padding: 5px 12px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.cl-panel {
+  pointer-events: auto;
+  flex: 1 1 58%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(180deg, rgba(14, 7, 10, 0.93), rgba(11, 5, 7, 0.97));
+  border-left: 1px solid rgba(255, 255, 255, 0.07);
+  backdrop-filter: blur(8px);
+}
+
+/* ---------- tabs ---------- */
+.cl-tabs {
+  flex: none;
+  display: flex;
+  gap: 6px;
+  padding: 12px var(--cl-x) 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.cl-tab {
+  flex: 1;
+  padding: 9px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+.cl-tab:hover { color: #fff; border-color: rgba(229, 24, 46, 0.4); }
+.cl-tab.active {
+  color: #fff;
+  background: rgba(229, 24, 46, 0.16);
+  border-color: var(--red);
+  box-shadow: 0 0 14px rgba(229, 24, 46, 0.22) inset;
+}
+
+/* ---------- grid ---------- */
+.cl-grid {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  padding: 12px var(--cl-x);
+}
+.cl-grid-char { grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); }
+.cl-grid-emote { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); }
+
+.cl-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.035);
+  color: #fff;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.1s ease;
+}
+.cl-card:hover { border-color: rgba(229, 24, 46, 0.55); background: rgba(229, 24, 46, 0.09); }
+.cl-card:active { transform: scale(0.97); }
+.cl-card.sel {
+  border-color: var(--red);
+  background: rgba(229, 24, 46, 0.15);
+  box-shadow: 0 0 0 1px rgba(229, 24, 46, 0.45), 0 6px 18px rgba(229, 24, 46, 0.18);
+}
+
+/* Placeholder art: a deterministic tint per item id + its initials. Swapped
+   for real thumbnails later by replacing .cl-thumb's contents only. */
+.cl-thumb {
+  position: relative;
+  display: grid;
+  place-items: center;
+  aspect-ratio: 1 / 1;
+  width: 100%;
+  border-radius: 9px;
+  overflow: hidden;
+  background:
+    radial-gradient(80% 70% at 50% 18%, hsl(var(--h) 62% 34% / 0.75), transparent 70%),
+    linear-gradient(160deg, hsl(var(--h) 45% 16%), #140a0d);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+.cl-thumb-icon {
+  position: absolute;
+  width: 44%;
+  height: 44%;
+  color: #fff;
+  opacity: 0.16;
+  fill: none;
+  stroke: currentColor;
+}
+.cl-thumb-txt {
+  position: relative;
+  font-family: var(--display-font);
+  font-size: clamp(15px, 2.4vw, 21px);
+  letter-spacing: 0.04em;
+  color: rgba(255, 255, 255, 0.9);
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.6);
+}
+.cl-card-name {
+  margin-top: 5px;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cl-card-meta {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.42);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cl-badge {
+  position: absolute;
+  top: 13px;
+  right: 13px;
+  width: 21px;
+  height: 21px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--red);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+.cl-badge svg { width: 13px; height: 13px; color: #fff; }
+.cl-play {
+  position: absolute;
+  top: 13px;
+  right: 13px;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(11, 5, 7, 0.66);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.cl-play svg { width: 11px; height: 11px; color: #fff; fill: #fff; }
+.cl-card-emote:hover .cl-play,
+.cl-card-emote.sel .cl-play { opacity: 1; }
+.cl-card-emote.sel .cl-play { background: var(--red); }
+
+/* ---------- footer ---------- */
+.cl-foot {
+  flex: none;
+  padding: 10px var(--cl-x) calc(12px + env(safe-area-inset-bottom));
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+.cl-equip {
+  width: 100%;
+  padding: 11px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+.cl-equip-ic { width: 15px; height: 15px; }
+.cl-hint {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.45);
+  text-align: center;
+}
+
+/* Narrow / portrait: stack the stage above the grid instead of beside it.
+   The preview camera re-aims itself from the element box, so nothing else
+   has to know this happened. */
+@media (max-aspect-ratio: 1/1) {
+  .cl-body { flex-direction: column; }
+  .cl-stage { flex: 0 0 38%; }
+  .cl-panel {
+    flex: 1 1 auto;
+    border-left: none;
+    border-top: 1px solid rgba(255, 255, 255, 0.07);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cl-screen { animation: none; }
+}

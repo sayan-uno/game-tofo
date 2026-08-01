@@ -27,6 +27,8 @@ import type { Mesh } from "@babylonjs/core/Meshes/mesh";
 import { AdvancedDynamicTexture } from "@babylonjs/gui/2D/advancedDynamicTexture";
 import { TextBlock } from "@babylonjs/gui/2D/controls/textBlock";
 import { Rectangle } from "@babylonjs/gui/2D/controls/rectangle";
+import { getLobbyIdleClip, hasAssets } from "./assets";
+import type { CharacterRig } from "./characterRig";
 import type { LobbyMember } from "../types";
 
 // Fixed pedestal positions for up to 4 lobby members, local player centered.
@@ -76,7 +78,8 @@ function colorFromUid(uid: string): Color3 {
 interface CharacterInstance {
   /** Fixed slot node — parent of everything, including the pedestal disc. */
   anchor: TransformNode;
-  /** Animated (bobbing) child holding the body meshes. */
+  /** Animated (bobbing) child holding the PLACEHOLDER body meshes. Real models
+   *  hang off the anchor instead and bob through their own idle clip. */
   root: TransformNode;
   /** Name line of the base plate — updated in place when leadership moves. */
   label: TextBlock;
@@ -86,6 +89,14 @@ interface CharacterInstance {
   bubbleTimer: number;
   isLeader: boolean;
   disposables: { dispose: () => void }[];
+  /** Catalog id currently shown, so an equip elsewhere swaps just this model. */
+  characterId: string;
+  /** The loaded model, once it arrives. Null while loading, and for good if
+   *  the CDN is unreachable — the placeholder simply stays. */
+  rig: CharacterRig | null;
+  /** Rises on every character change; a load that finishes after a newer one
+   *  started sees a stale token and throws its result away. */
+  loadToken: number;
 }
 
 export class LobbyScene {
@@ -149,12 +160,14 @@ export class LobbyScene {
     this.gui = AdvancedDynamicTexture.CreateFullscreenUI("ui", true, scene);
     this.gui.renderScale = 1;
 
-    // Idle "breathing" animation for characters — one observer for all.
+    // Idle "breathing" for PLACEHOLDER bodies only — one observer for all.
+    // A loaded character animates through its own idle clip; bobbing it too
+    // would fight that clip and read as a jitter, so rigged slots are skipped.
     scene.onBeforeRenderObservable.add(() => {
       this.time += engine.getDeltaTime() / 1000;
       let i = 0;
       for (const character of this.characters.values()) {
-        character.root.position.y = Math.sin(this.time * 1.6 + i * 1.3) * 0.04;
+        if (!character.rig) character.root.position.y = Math.sin(this.time * 1.6 + i * 1.3) * 0.04;
         i++;
       }
     });
@@ -220,6 +233,8 @@ export class LobbyScene {
     for (const [uid, character] of this.characters) {
       if (!keep.has(uid)) {
         clearTimeout(character.bubbleTimer);
+        character.loadToken++; // strand any load still in flight for this slot
+        character.rig?.dispose();
         character.anchor.dispose();
         character.disposables.forEach((d) => d.dispose());
         this.characters.delete(uid);
@@ -236,10 +251,52 @@ export class LobbyScene {
           existing.isLeader = member.isLeader;
           applyNameStyle(existing.label, member);
         }
+        // Someone equipped a different character — swap just that model, keep
+        // the pedestal, plate and any bubble exactly as they are.
+        if (existing.characterId !== member.character) {
+          existing.characterId = member.character;
+          void this.attachModel(existing, member.character);
+        }
         return;
       }
       this.characters.set(member.uid, this.createCharacter(member, x, z));
     });
+  }
+
+  /** Load a character model into a slot and retire its placeholder. Failure is
+   *  survivable by design: the placeholder body stays and the lobby keeps
+   *  working exactly as it did before models existed. */
+  private async attachModel(character: CharacterInstance, characterId: string): Promise<void> {
+    if (!hasAssets()) return;
+    const mine = ++character.loadToken;
+    const idle = getLobbyIdleClip();
+
+    // Dynamic: Babylon's skinning + animation machinery is ~550 kB and the
+    // lobby has already painted placeholders by now. Downloading it here means
+    // the first frame never waited for it.
+    const { CharacterRig } = await import("./characterRig");
+    const rig = await CharacterRig.create(characterId, this.scene, `rig_${character.anchor.name}`);
+    // Slot was removed, or a newer character was picked, while this loaded.
+    if (mine !== character.loadToken) {
+      rig?.dispose();
+      return;
+    }
+    if (!rig) return; // keep the placeholder
+
+    character.rig?.dispose();
+    character.rig = rig;
+    // Parented to the anchor, not the bobbing root: the model's own idle clip
+    // provides the motion, and the plate/bubble links stay rock steady.
+    // No scaling here: the rig measures the model and sizes itself to
+    // CHARACTER_HEIGHT with its feet on the pedestal.
+    rig.root.parent = character.anchor;
+
+    // Placeholder primitives are no longer needed. Their meshes hang off the
+    // bobbing root, so emptying it also parks the bob at zero.
+    for (const child of character.root.getChildren()) child.dispose();
+    character.root.position.y = 0;
+
+    if (idle) await rig.play(idle, { loop: true });
   }
 
   /** Free Fire-style team chat callout: a truncated preview of the message in
@@ -392,10 +449,34 @@ export class LobbyScene {
     // Characters face the camera side
     anchor.rotation.y = Math.PI;
 
-    return { anchor, root, label, bubble, bubbleText, bubbleTimer: 0, isLeader: member.isLeader, disposables };
+    const instance: CharacterInstance = {
+      anchor,
+      root,
+      label,
+      bubble,
+      bubbleText,
+      bubbleTimer: 0,
+      isLeader: member.isLeader,
+      disposables,
+      characterId: member.character,
+      rig: null,
+      loadToken: 0,
+    };
+    // The primitives above are already on screen; the real model replaces them
+    // whenever it finishes downloading. Nobody waits on a network round trip to
+    // see their squad. Tap-picking keeps working throughout — it walks up to
+    // the anchor, which both the placeholder and the model hang off.
+    void this.attachModel(instance, member.character);
+    return instance;
   }
 
   dispose() {
+    for (const character of this.characters.values()) {
+      clearTimeout(character.bubbleTimer);
+      character.loadToken++;
+      character.rig?.dispose();
+    }
+    this.characters.clear();
     this.scene.dispose();
   }
 }

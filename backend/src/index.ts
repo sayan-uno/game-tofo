@@ -9,6 +9,7 @@ import { friendsRouter } from "./routes/friends.js";
 import { voiceRouter } from "./routes/voice.js";
 import { chatRouter } from "./routes/chat.js";
 import { profileRouter } from "./routes/profile.js";
+import { collectionRouter } from "./routes/collection.js";
 import { registerSockets } from "./sockets/index.js";
 import { startChatRetention } from "./services/chat.js";
 
@@ -44,6 +45,7 @@ app.use("/api/friends", friendsRouter(io));
 app.use("/api/voice", voiceRouter);
 app.use("/api/chat", chatRouter);
 app.use("/api/profile", profileRouter);
+app.use("/api/collection", collectionRouter(io));
 
 registerSockets(io);
 

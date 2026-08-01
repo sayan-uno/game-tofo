@@ -10,6 +10,8 @@ export interface HudCallbacks {
   onToggleChat: () => void;
   /** Tapping the player chip opens the career page. */
   onOpenProfile: () => void;
+  /** Characters and emotes the player owns. */
+  onOpenCollection: () => void;
   onLeaveLobby: () => void;
   onChangeMode: (mode: LobbyMode) => void;
   /** Resolves after the server answered (errors already toasted by the caller). */
@@ -73,6 +75,7 @@ export class Hud {
         </div>
         <div class="hud-actions">
           <button class="btn btn-ghost mic-btn" title="Toggle microphone">🎙 On</button>
+          <button class="btn btn-ghost collection-btn">Collection</button>
           <button class="btn btn-ghost friends-btn">Friends</button>
           <button class="btn btn-ghost logout-btn" title="Log out">⎋</button>
         </div>
@@ -178,6 +181,7 @@ export class Hud {
     this.codeInput.onkeydown = (e) => {
       if (e.key === "Enter") void submit();
     };
+    this.root.querySelector<HTMLButtonElement>(".collection-btn")!.onclick = callbacks.onOpenCollection;
     this.root.querySelector<HTMLButtonElement>(".friends-btn")!.onclick = callbacks.onToggleFriends;
     this.root.querySelector<HTMLButtonElement>(".chat-fab")!.onclick = callbacks.onToggleChat;
     this.leaveBtn.onclick = callbacks.onLeaveLobby;

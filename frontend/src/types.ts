@@ -22,6 +22,49 @@ export interface FriendRequest {
 
 export interface LobbyMember extends User {
   isLeader: boolean;
+  /** Catalog id of the character this player is wearing. Always a valid id —
+   *  the server resolves unset/retired values before broadcasting. */
+  character: string;
+}
+
+/** ---------------------------------------------------------------------------
+ *  Collection — mirrors backend/src/services/catalog.ts. Every `url` is built
+ *  server-side from CDN_BASE_URL; null means the CDN isn't configured, and the
+ *  lobby falls back to its built-in placeholder character.
+ * ------------------------------------------------------------------------- */
+export interface CatalogCharacter {
+  id: string;
+  kind: "character";
+  name: string;
+  rarity: "starter" | "rare" | "epic" | "legendary";
+  url: string | null;
+  owned: boolean;
+}
+
+export interface CatalogEmote {
+  id: string;
+  kind: "emote";
+  name: string;
+  /** Only "emote" clips are meant to be performed on purpose; the rest are
+   *  movement. All are previewable, but the future squad-showcase uses this. */
+  category: "emote" | "locomotion" | "traversal";
+  duration: number;
+  loop: boolean;
+  /** Travels across the floor — wrong on a fixed pedestal, fine in a preview. */
+  rootMotion: boolean;
+  url: string | null;
+  owned: boolean;
+}
+
+export interface Catalog {
+  characters: CatalogCharacter[];
+  emotes: CatalogEmote[];
+  defaultCharacter: string;
+  lobbyIdleClip: string;
+}
+
+export interface CollectionData extends Catalog {
+  equippedCharacter: string;
 }
 
 export interface ChatMessage {

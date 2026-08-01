@@ -29,13 +29,16 @@ import {
 } from "../redis.js";
 import { areFriends, displayName, getFriendIds, getUserById, getUserByUid, getUsersByIds } from "../services/users.js";
 import { registerChatHandlers, syncTeamChatSession } from "./chat.js";
+import { resolveCharacter } from "../services/catalog.js";
 
 interface AuthedSocket extends Socket {
   data: { auth: AuthPayload };
 }
 
-/** Push the current member list (and party mode) of a lobby to everyone in it. */
-async function broadcastLobby(io: Server, lobbyId: string) {
+/** Push the current member list (and party mode) of a lobby to everyone in it.
+ *  Exported because equipping a character changes what squadmates see, so the
+ *  collection route re-broadcasts through this same path. */
+export async function broadcastLobby(io: Server, lobbyId: string) {
   const memberIds = await getLobbyMembers(lobbyId);
   const [users, mode] = await Promise.all([getUsersByIds(memberIds), getLobbyMode(lobbyId)]);
   // Codes are created on demand (lobby:teamCode below), never here — this
@@ -53,6 +56,10 @@ async function broadcastLobby(io: Server, lobbyId: string) {
     name: displayName(u),
     avatarUrl: u.avatarUrl,
     isLeader: lobbyId === `L${u.uid}`,
+    // Which character model to draw on this player's pedestal. Resolved here
+    // (not on the client) so a retired or never-chosen id can never reach the
+    // scene as a broken model URL.
+    character: resolveCharacter(u.equippedCharacter),
   }));
   io.to(`room:${lobbyId}`).emit("lobby:members", { lobbyId, mode, members, teamCode });
 }

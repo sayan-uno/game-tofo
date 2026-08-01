@@ -45,9 +45,13 @@ let activeLoop: (() => void) | null = null;
 /** True while a full-screen page (the profile) hides the canvas completely. */
 let covered = false;
 
+/** Install THE render loop. Calling it again swaps the loop rather than adding
+ *  a second one — that's how the collection page hands the canvas to its
+ *  preview scene and hands it back on close. Exactly one scene ever draws. */
 export function startRenderLoop(engine: Engine, loop: () => void) {
+  if (activeLoop) engine.stopRenderLoop(activeLoop);
   activeLoop = loop;
-  engine.runRenderLoop(loop);
+  if (!covered && !document.hidden) engine.runRenderLoop(loop);
 }
 
 /** Park the lobby while an opaque full-screen page covers it — drawing frames
