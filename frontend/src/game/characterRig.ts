@@ -23,7 +23,7 @@ import type { AssetContainer } from "@babylonjs/core/assetContainer";
 import type { AnimationGroup } from "@babylonjs/core/Animations/animationGroup";
 import type { Scene } from "@babylonjs/core/scene";
 import type { Node } from "@babylonjs/core/node";
-import { CHARACTER_HEIGHT, getCharacter, getEmote } from "./assets";
+import { CHARACTER_HEIGHT, getCharacter, getEmote, getLobbyIdleClip } from "./assets";
 
 /** The glTF loader, pulled in on first use and never before.
  *
@@ -104,6 +104,24 @@ function load(url: string, scene: Scene): Promise<AssetContainer> {
     perScene.set(url, pending);
   }
   return pending;
+}
+
+/** Pull a character and the lobby's idle clip into cache without building
+ *  anything. Called as soon as the catalog lands, so the download overlaps the
+ *  socket handshake instead of starting after the member list arrives — by the
+ *  time the lobby knows who is standing where, the model is usually ready and
+ *  the pedestal is never visibly empty.
+ *
+ *  Failures are swallowed: this is a head start, not a requirement. */
+export async function prefetchCharacter(id: string, scene: Scene): Promise<void> {
+  const character = getCharacter(id);
+  if (!character?.url) return;
+  const idleId = getLobbyIdleClip();
+  const idle = idleId ? getEmote(idleId) : undefined;
+  await Promise.all([
+    load(character.url, scene).catch(() => {}),
+    idle?.url ? load(idle.url, scene).catch(() => {}) : Promise.resolve(),
+  ]);
 }
 
 /** One posed, animatable character in a scene.

@@ -190,7 +190,17 @@ async function enterLobby(user: User) {
   // and it removes the race where members arrive first and everyone is stuck
   // as a placeholder until the next roster change. A failed fetch resolves to
   // null and the lobby simply keeps its built-in characters.
-  await catalogReady;
+  const collection = await catalogReady;
+
+  // Head start: begin fetching the player's own character (and the idle clip)
+  // right now, so it downloads alongside the socket handshake rather than after
+  // the member list arrives. Fire-and-forget — the lobby loads it properly
+  // either way, this just usually gets there first.
+  if (collection?.equippedCharacter) {
+    void import("./game/characterRig")
+      .then((m) => m.prefetchCharacter(collection.equippedCharacter, lobby.scene))
+      .catch(() => {});
+  }
 
   const socket = connectSocket();
 

@@ -78,8 +78,8 @@ function colorFromUid(uid: string): Color3 {
 interface CharacterInstance {
   /** Fixed slot node — parent of everything, including the pedestal disc. */
   anchor: TransformNode;
-  /** Animated (bobbing) child holding the PLACEHOLDER body meshes. Real models
-   *  hang off the anchor instead and bob through their own idle clip. */
+  /** Animated (bobbing) child. Holds the primitive fallback body when one is
+   *  needed; real models hang off the anchor and bob via their own idle clip. */
   root: TransformNode;
   /** Name line of the base plate — updated in place when leadership moves. */
   label: TextBlock;
@@ -89,10 +89,11 @@ interface CharacterInstance {
   bubbleTimer: number;
   isLeader: boolean;
   disposables: { dispose: () => void }[];
+  uid: string;
   /** Catalog id currently shown, so an equip elsewhere swaps just this model. */
   characterId: string;
   /** The loaded model, once it arrives. Null while loading, and for good if
-   *  the CDN is unreachable — the placeholder simply stays. */
+   *  the CDN is unreachable — in which case the fallback body is built. */
   rig: CharacterRig | null;
   /** Rises on every character change; a load that finishes after a newer one
    *  started sees a stale token and throws its result away. */
@@ -160,7 +161,7 @@ export class LobbyScene {
     this.gui = AdvancedDynamicTexture.CreateFullscreenUI("ui", true, scene);
     this.gui.renderScale = 1;
 
-    // Idle "breathing" for PLACEHOLDER bodies only — one observer for all.
+    // Idle "breathing" for FALLBACK bodies only — one observer for all.
     // A loaded character animates through its own idle clip; bobbing it too
     // would fight that clip and read as a jitter, so rigged slots are skipped.
     scene.onBeforeRenderObservable.add(() => {
@@ -263,17 +264,25 @@ export class LobbyScene {
     });
   }
 
-  /** Load a character model into a slot and retire its placeholder. Failure is
-   *  survivable by design: the placeholder body stays and the lobby keeps
-   *  working exactly as it did before models existed. */
+  /** Load a character model into a slot.
+   *
+   *  Nothing stands on the pedestal until the real model arrives. An earlier
+   *  version drew primitive stand-ins immediately and swapped them out, but a
+   *  capsule-robot turning into a character every time you open the lobby reads
+   *  as a glitch — a briefly empty pedestal reads as loading. The stand-in is
+   *  now only built when the model genuinely cannot be shown, so the lobby is
+   *  never empty for a reason the player can't recover from. */
   private async attachModel(character: CharacterInstance, characterId: string): Promise<void> {
-    if (!hasAssets()) return;
     const mine = ++character.loadToken;
+    if (!hasAssets()) {
+      this.buildFallbackBody(character);
+      return;
+    }
     const idle = getLobbyIdleClip();
 
-    // Dynamic: Babylon's skinning + animation machinery is ~550 kB and the
-    // lobby has already painted placeholders by now. Downloading it here means
-    // the first frame never waited for it.
+    // Dynamic: Babylon's skinning + animation machinery is ~550 kB, and the
+    // pedestals and plates are already painted by now, so none of that weight
+    // sits on the lobby's first frame.
     const { CharacterRig } = await import("./characterRig");
     const rig = await CharacterRig.create(characterId, this.scene, `rig_${character.anchor.name}`);
     // Slot was removed, or a newer character was picked, while this loaded.
@@ -281,22 +290,69 @@ export class LobbyScene {
       rig?.dispose();
       return;
     }
-    if (!rig) return; // keep the placeholder
+    if (!rig) {
+      this.buildFallbackBody(character);
+      return;
+    }
 
     character.rig?.dispose();
     character.rig = rig;
+    this.clearBody(character);
     // Parented to the anchor, not the bobbing root: the model's own idle clip
     // provides the motion, and the plate/bubble links stay rock steady.
     // No scaling here: the rig measures the model and sizes itself to
     // CHARACTER_HEIGHT with its feet on the pedestal.
     rig.root.parent = character.anchor;
 
-    // Placeholder primitives are no longer needed. Their meshes hang off the
-    // bobbing root, so emptying it also parks the bob at zero.
+    if (idle) await rig.play(idle, { loop: true });
+  }
+
+  /** Empty the bobbing root (any stand-in body) and park the bob at zero. */
+  private clearBody(character: CharacterInstance) {
     for (const child of character.root.getChildren()) child.dispose();
     character.root.position.y = 0;
+  }
 
-    if (idle) await rig.play(idle, { loop: true });
+  /** Stylised stand-in built from primitives, shown ONLY when the real model
+   *  can't be loaded — no CDN configured, or the download failed. It hangs off
+   *  the bobbing root, so the idle bob in the render loop animates it. */
+  private buildFallbackBody(character: CharacterInstance) {
+    if (character.rig || character.root.getChildren().length > 0) return; // already has a body
+    const scene = this.scene;
+    const uid = character.uid;
+    const root = character.root;
+    const accent = colorFromUid(uid);
+
+    const bodyMat = new StandardMaterial(`bodyMat_${uid}`, scene);
+    bodyMat.diffuseColor = accent.scale(0.5);
+    bodyMat.specularColor = new Color3(0.1, 0.1, 0.1);
+    character.disposables.push(bodyMat);
+
+    const skinMat = new StandardMaterial(`skinMat_${uid}`, scene);
+    skinMat.diffuseColor = new Color3(0.85, 0.7, 0.6);
+    character.disposables.push(skinMat);
+
+    const body = MeshBuilder.CreateCapsule(`body_${uid}`, { height: 1.5, radius: 0.34 }, scene);
+    body.position.y = 1.05;
+    body.material = bodyMat;
+    body.parent = root;
+
+    const head = MeshBuilder.CreateSphere(`head_${uid}`, { diameter: 0.5, segments: 12 }, scene);
+    head.position.y = 2.05;
+    head.material = skinMat;
+    head.parent = root;
+
+    const makeLimb = (name: string, lx: number, ly: number, height: number, radius: number): Mesh => {
+      const limb = MeshBuilder.CreateCapsule(name, { height, radius }, scene);
+      limb.position.set(lx, ly, 0);
+      limb.material = bodyMat;
+      limb.parent = root;
+      return limb;
+    };
+    makeLimb(`armL_${uid}`, -0.48, 1.15, 1.0, 0.11);
+    makeLimb(`armR_${uid}`, 0.48, 1.15, 1.0, 0.11);
+    makeLimb(`legL_${uid}`, -0.18, 0.45, 0.9, 0.13);
+    makeLimb(`legR_${uid}`, 0.18, 0.45, 0.9, 0.13);
   }
 
   /** Free Fire-style team chat callout: a truncated preview of the message in
@@ -318,8 +374,9 @@ export class LobbyScene {
     }, 4500);
   }
 
-  /** Placeholder stylized character (primitives). Swap for a GLB model later —
-   *  keep the same slot/anchor structure and nothing else changes. */
+  /** Build a slot: pedestal, name plate and chat bubble. The BODY is not built
+   *  here — the real model is fetched straight away and only if that fails does
+   *  a stand-in appear (see buildFallbackBody). */
   private createCharacter(member: LobbyMember, x: number, z: number): CharacterInstance {
     const scene = this.scene;
     const disposables: { dispose: () => void }[] = [];
@@ -333,55 +390,10 @@ export class LobbyScene {
 
     const accent = colorFromUid(member.uid);
 
-    const bodyMat = new StandardMaterial(`bodyMat_${member.uid}`, scene);
-    bodyMat.diffuseColor = accent.scale(0.5);
-    bodyMat.specularColor = new Color3(0.1, 0.1, 0.1);
-    disposables.push(bodyMat);
-
     const accentMat = new StandardMaterial(`accentMat_${member.uid}`, scene);
     accentMat.emissiveColor = accent;
     accentMat.disableLighting = true;
     disposables.push(accentMat);
-
-    const skinMat = new StandardMaterial(`skinMat_${member.uid}`, scene);
-    skinMat.diffuseColor = new Color3(0.85, 0.7, 0.6);
-    disposables.push(skinMat);
-
-    const body = MeshBuilder.CreateCapsule(`body_${member.uid}`, { height: 1.5, radius: 0.34 }, scene);
-    body.position.y = 1.05;
-    body.material = bodyMat;
-    body.parent = root;
-
-    const head = MeshBuilder.CreateSphere(`head_${member.uid}`, { diameter: 0.5, segments: 12 }, scene);
-    head.position.y = 2.05;
-    head.material = skinMat;
-    head.parent = root;
-
-    const visor = MeshBuilder.CreateBox(`visor_${member.uid}`, { width: 0.42, height: 0.12, depth: 0.1 }, scene);
-    visor.position.set(0, 2.08, -0.22);
-    visor.material = accentMat;
-    visor.parent = root;
-
-    const makeLimb = (name: string, lx: number): Mesh => {
-      const limb = MeshBuilder.CreateCapsule(name, { height: 1.0, radius: 0.11 }, scene);
-      limb.position.set(lx, 1.15, 0);
-      limb.material = bodyMat;
-      limb.parent = root;
-      return limb;
-    };
-    makeLimb(`armL_${member.uid}`, -0.48);
-    makeLimb(`armR_${member.uid}`, 0.48);
-
-    const legMat = bodyMat;
-    for (const [name, lx] of [
-      [`legL_${member.uid}`, -0.18],
-      [`legR_${member.uid}`, 0.18],
-    ] as [string, number][]) {
-      const leg = MeshBuilder.CreateCapsule(name, { height: 0.9, radius: 0.13 }, scene);
-      leg.position.set(lx, 0.45, 0);
-      leg.material = legMat;
-      leg.parent = root;
-    }
 
     // Glowing pedestal under each player
     const pedestal = MeshBuilder.CreateCylinder(`ped_${member.uid}`, { diameter: 1.6, height: 0.08 }, scene);
@@ -450,6 +462,7 @@ export class LobbyScene {
     anchor.rotation.y = Math.PI;
 
     const instance: CharacterInstance = {
+      uid: member.uid,
       anchor,
       root,
       label,
@@ -462,10 +475,9 @@ export class LobbyScene {
       rig: null,
       loadToken: 0,
     };
-    // The primitives above are already on screen; the real model replaces them
-    // whenever it finishes downloading. Nobody waits on a network round trip to
-    // see their squad. Tap-picking keeps working throughout — it walks up to
-    // the anchor, which both the placeholder and the model hang off.
+    // The pedestal and plate are already on screen; the character itself drops
+    // in when its model arrives. Tap-picking works throughout — it walks up to
+    // the anchor, which both the model and any stand-in hang off.
     void this.attachModel(instance, member.character);
     return instance;
   }
