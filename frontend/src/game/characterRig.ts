@@ -166,13 +166,20 @@ export class CharacterRig {
   /** Scale and lift the model so it is always CHARACTER_HEIGHT tall with its
    *  feet on y=0, whatever height it happens to be authored at.
    *
-   *  Measured from the SKELETON — the world Y of every bone — and deliberately
-   *  not from the mesh bounding box. A skinned mesh's box is unreliable here:
-   *  with GPU skinning (every real browser) Babylon leaves it describing the
-   *  raw bind-pose vertex data rather than what is drawn, and reading it
-   *  produced a hundred-fold scale-up that filled the screen with one boot.
-   *  Bones are plain transform nodes, so their world positions are ordinary
-   *  matrix math — identical on any engine, with or without a GPU.
+   *  The subtlety is WHICH SPACE you measure in, and it is worth spelling out
+   *  because two plausible measurements both read ~1.8 while the character was
+   *  actually drawing at 170 units:
+   *
+   *    - bone transform nodes and the mesh bounding box agree with each other,
+   *      because both sit under the skeleton root node and inherit its scale
+   *    - the GPU does not. Babylon skins as `meshWorld x boneMatrix x
+   *      inverseBind`, and the bone matrices handed to the shader are relative
+   *      to the SKELETON, so the skeleton root node's scale never reaches them
+   *
+   *  With these models that node carries 0.01, so anything measured on the CPU
+   *  reads 100x smaller than what is drawn. Dividing by that scale converts the
+   *  measurement into the space the mesh actually renders in. A conventionally
+   *  authored rig has scale 1 there and this is a no-op.
    *
    *  Runs in the bind pose, before any clip plays, so a clip that lifts or
    *  crouches the character can't skew the measurement. */

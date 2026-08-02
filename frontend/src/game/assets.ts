@@ -33,7 +33,6 @@ export function setCatalog(next: Catalog) {
   for (const e of next.emotes) emotes.set(e.id, e);
 }
 
-export const getCatalog = (): Catalog | null => catalog;
 export const getCharacter = (id: string): CatalogCharacter | undefined => characters.get(id);
 export const getEmote = (id: string): CatalogEmote | undefined => emotes.get(id);
 export const getLobbyIdleClip = (): string | null => catalog?.lobbyIdleClip ?? null;
