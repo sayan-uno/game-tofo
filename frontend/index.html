@@ -12,6 +12,12 @@
     <link rel="icon" type="image/png" href="/favicon.png" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="preload" href="/fonts/archivo-black.woff2" as="font" type="font/woff2" crossorigin />
+    <!-- Character models and emote clips come from this origin. Opening the
+         connection during parse overlaps DNS + TLS with the rest of start-up
+         instead of paying for it when the first model is requested. It is a
+         hint only: if it ever goes stale nothing breaks, the handshake just
+         happens later, so this does not make it a second coupling point. -->
+    <link rel="preconnect" href="https://cdn.tofo.in" crossorigin />
     <script src="https://accounts.google.com/gsi/client" async defer></script>
   </head>
   <body>
