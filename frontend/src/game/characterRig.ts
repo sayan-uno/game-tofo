@@ -24,6 +24,7 @@ import type { AnimationGroup } from "@babylonjs/core/Animations/animationGroup";
 import type { Scene } from "@babylonjs/core/scene";
 import type { Node } from "@babylonjs/core/node";
 import { CHARACTER_HEIGHT, getCharacter, getEmote, getLobbyIdleClip } from "./assets";
+import { fetchAsset, primeStore } from "./assetStore";
 
 /** The glTF loader, pulled in on first use and never before.
  *
@@ -76,8 +77,8 @@ function ensureLoader(): Promise<void> {
  *  versa). A URL-only cache produced exactly that: whichever character was
  *  already loaded turned invisible, while the other one worked.
  *
- *  The bytes are still fetched once — the second scene's load is served from
- *  the browser's HTTP cache — so this costs a re-parse, not a re-download.
+ *  The bytes are still downloaded once: the second scene's load is served from
+ *  the on-device store, so this costs a re-parse, not a re-download.
  *
  *  WeakMap so a disposed scene's containers become collectable with it, and
  *  a stale container can never outlive its scene.
@@ -95,8 +96,15 @@ function load(url: string, scene: Scene): Promise<AssetContainer> {
   }
   let pending = perScene.get(url);
   if (!pending) {
+    // Bytes are fetched by assetStore, not by Babylon. That is what lets the
+    // on-device store hold the only copy: Babylon fetching the URL itself would
+    // populate the browser's HTTP cache with a duplicate we could never delete.
+    // Passing an ArrayBufferView means the loader has no filename to sniff, so
+    // the format has to be named explicitly.
+    const pluginExtension = url.slice(url.lastIndexOf(".")).split("?")[0] || ".glb";
     pending = ensureLoader()
-      .then(() => loadAssetContainerAsync(url, scene))
+      .then(() => fetchAsset(url))
+      .then((bytes) => loadAssetContainerAsync(bytes, scene, { pluginExtension }))
       .catch((err: unknown) => {
         perScene.delete(url);
         throw err;
@@ -116,6 +124,10 @@ function load(url: string, scene: Scene): Promise<AssetContainer> {
 export async function prefetchCharacter(id: string, scene: Scene): Promise<void> {
   const character = getCharacter(id);
   if (!character?.url) return;
+  // This is the one character that must survive eviction — a player returning
+  // after a month should not re-download their own skin. Also kicks off the
+  // idle sweep, once per session, off the critical path.
+  primeStore(character.url);
   const idleId = getLobbyIdleClip();
   const idle = idleId ? getEmote(idleId) : undefined;
   await Promise.all([
