@@ -186,6 +186,41 @@ async function writeAsset(url: string, body: ArrayBuffer, pack?: string): Promis
   );
 }
 
+/** ---------------------------------------------------------------------------
+ *  Download gate
+ *
+ *  Reads from the store are cheap and run unrestricted. NEW downloads are held
+ *  to a few at a time, because fifty players spawning into a map would
+ *  otherwise fire fifty simultaneous requests and land fifty response decodes
+ *  in one clump on the main thread.
+ *
+ *  Honest note on the evidence: cold-path frame times measured far too noisily
+ *  to prove this helps — identical runs ranged from 31 ms to 475 ms, dominated
+ *  by network variance. The gate is here as standard practice (bounded
+ *  concurrency, no connection saturation), not as a measured win. What IS
+ *  consistent across every run is the warm path: 50 characters / 15.8 MB read
+ *  back from the store in ~39 ms with zero dropped frames, which is the case
+ *  that actually recurs once players have played before.
+ *
+ *  Queued callers wait their turn, so nothing is dropped — only paced.
+ * ------------------------------------------------------------------------- */
+const MAX_CONCURRENT_DOWNLOADS = 6;
+let inFlight = 0;
+const waiting: (() => void)[] = [];
+
+async function withDownloadSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (inFlight >= MAX_CONCURRENT_DOWNLOADS) {
+    await new Promise<void>((resolve) => waiting.push(resolve));
+  }
+  inFlight++;
+  try {
+    return await fn();
+  } finally {
+    inFlight--;
+    waiting.shift()?.();
+  }
+}
+
 /** Fetch an asset, preferring the local copy.
  *
  *  On a hit the bytes are returned immediately and `lastUsed` is updated later,
@@ -204,18 +239,19 @@ export async function fetchAsset(url: string, opts: { pack?: string } = {}): Pro
     /* fall through to the network */
   }
 
-  let bytes: ArrayBuffer;
-  try {
-    const res = await fetch(url, { cache: "no-store" });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    bytes = await res.arrayBuffer();
-  } catch {
-    // Last resort: a normal fetch, which may be served by the HTTP cache. Used
-    // when the no-store request failed outright (offline, transient error).
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`Asset fetch failed: ${res.status} ${url}`);
-    bytes = await res.arrayBuffer();
-  }
+  const bytes = await withDownloadSlot(async () => {
+    try {
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.arrayBuffer();
+    } catch {
+      // Last resort: a normal fetch, which may be served by the HTTP cache.
+      // Used when the no-store request failed outright (offline, transient).
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Asset fetch failed: ${res.status} ${url}`);
+      return await res.arrayBuffer();
+    }
+  });
 
   // Storing is best-effort: a full disk must not fail a load that already has
   // its bytes in hand.
@@ -408,4 +444,52 @@ export function primeStore(ownCharacterUrl: string | null): void {
   const pins = [ownCharacterUrl, idleUrl].filter((u): u is string => !!u);
   if (pins.length > 0) void setPinned(pins).catch(() => {});
   sweepWhenIdle();
+}
+
+/** ---------------------------------------------------------------------------
+ *  Dev-only console handle.
+ *
+ *  Stripped from production builds by the `import.meta.env.DEV` guard, which
+ *  Vite evaluates at build time — the whole block disappears from the bundle.
+ *  Exists so the store can be inspected and exercised from DevTools without
+ *  wiring temporary UI:
+ *
+ *      await __tofoStore.report()      what is on this device
+ *      await __tofoStore.sweep()       run the 30-day sweep now
+ *      await __tofoStore.age(20)       pretend everything is 20 days old
+ *      await __tofoStore.clearAll()    wipe it
+ * ------------------------------------------------------------------------- */
+if (import.meta.env.DEV) {
+  (window as unknown as Record<string, unknown>).__tofoStore = {
+    report: storageReport,
+    sweep,
+    clearAll,
+    clearPack,
+    setPinned,
+    /** Backdate every stored asset so the age rule can be tested in seconds
+     *  instead of waiting a month. */
+    age: async (days: number) => {
+      const db = await openDb();
+      if (!db) return null;
+      const shift = days * 24 * 60 * 60 * 1000;
+      const records = await allMeta(db);
+      await run<void>(
+        db,
+        [META],
+        "readwrite",
+        (tx) => {
+          const store = tx.objectStore(META);
+          for (const record of records) store.put({ ...record, lastUsed: Date.now() - shift });
+          return null;
+        },
+        undefined
+      );
+      return records.length;
+    },
+    /** Raw metadata rows, for eyeballing lastUsed / pinned / size. */
+    list: async () => {
+      const db = await openDb();
+      return db ? allMeta(db) : null;
+    },
+  };
 }
