@@ -27,8 +27,9 @@ import type { Mesh } from "@babylonjs/core/Meshes/mesh";
 import { AdvancedDynamicTexture } from "@babylonjs/gui/2D/advancedDynamicTexture";
 import { TextBlock } from "@babylonjs/gui/2D/controls/textBlock";
 import { Rectangle } from "@babylonjs/gui/2D/controls/rectangle";
-import { getLobbyIdleClip, hasAssets } from "./assets";
+import { getCharacter, getLobbyIdleClip, hasAssets } from "./assets";
 import type { CharacterRig } from "./characterRig";
+import type { LegendaryAura } from "./legendaryAura";
 import type { LobbyMember } from "../types";
 
 // Fixed pedestal positions for up to 4 lobby members, local player centered.
@@ -95,6 +96,8 @@ interface CharacterInstance {
   /** The loaded model, once it arrives. Null while loading, and for good if
    *  the CDN is unreachable — in which case the fallback body is built. */
   rig: CharacterRig | null;
+  /** Only present on characters the catalog marks legendary. */
+  aura: LegendaryAura | null;
   /** Rises on every character change; a load that finishes after a newer one
    *  started sees a stale token and throws its result away. */
   loadToken: number;
@@ -235,6 +238,7 @@ export class LobbyScene {
       if (!keep.has(uid)) {
         clearTimeout(character.bubbleTimer);
         character.loadToken++; // strand any load still in flight for this slot
+        character.aura?.dispose();
         character.rig?.dispose();
         character.anchor.dispose();
         character.disposables.forEach((d) => d.dispose());
@@ -295,6 +299,8 @@ export class LobbyScene {
       return;
     }
 
+    character.aura?.dispose();
+    character.aura = null;
     character.rig?.dispose();
     character.rig = rig;
     this.clearBody(character);
@@ -305,6 +311,14 @@ export class LobbyScene {
     rig.root.parent = character.anchor;
 
     if (idle) await rig.play(idle, { loop: true });
+
+    if (getCharacter(characterId)?.rarity === "legendary") {
+      // Separate chunk: nobody who never stands next to a legendary pays for it.
+      const { LegendaryAura } = await import("./legendaryAura");
+      if (mine === character.loadToken) {
+        character.aura = LegendaryAura.attach(rig, this.scene);
+      }
+    }
   }
 
   /** Empty the bobbing root (any stand-in body) and park the bob at zero. */
@@ -465,6 +479,7 @@ export class LobbyScene {
       uid: member.uid,
       anchor,
       root,
+      aura: null,
       label,
       bubble,
       bubbleText,
@@ -486,6 +501,7 @@ export class LobbyScene {
     for (const character of this.characters.values()) {
       clearTimeout(character.bubbleTimer);
       character.loadToken++;
+      character.aura?.dispose();
       character.rig?.dispose();
     }
     this.characters.clear();

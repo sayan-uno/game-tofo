@@ -320,6 +320,15 @@ export class CharacterRig {
     this.current = null;
   }
 
+  /** A bone's transform node by name, for hanging effects off the skeleton.
+   *  Note for callers: these nodes carry the skeleton root's scale (0.01 on
+   *  these models), so read world positions from them rather than parenting to
+   *  them — see normalizeSize above. */
+  node(name: string): TransformNode | null {
+    const found = this.nodes.get(name) as TransformNode | undefined;
+    return found && typeof found.getAbsolutePosition === "function" ? found : null;
+  }
+
   /** Fires when the running clip finishes — used by the preview to drop back
    *  to idle after a one-shot emote. Returns an unsubscribe. */
   onClipEnd(fn: () => void): () => void {
