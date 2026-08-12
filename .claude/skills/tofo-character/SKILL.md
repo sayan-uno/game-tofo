@@ -50,12 +50,49 @@ It hard-fails, before writing anything, on:
 **Gate 1 — joint names.** All 24 canonical joints, exact names.
 
 **Gate 2 — bind pose.** Every core torso joint within 25° of the canonical rig.
-This is the one that matters and the one that is easy to miss: matching joint
-*names* is not enough. Meshy does not guarantee the same bind pose between
-exports. A joint bound 120° off looks perfectly fine standing still and tears
-the mesh open the moment a clip plays — reported as "the belly looks bad".
-**A bind-pose failure is not fixable in code.** Re-export from Meshy. A
-mathematical re-bind was attempted once and destroyed the model.
+Matching joint *names* is not enough. Meshy binds the Hips ~120° off on roughly
+half its rigs while every neighbouring joint lands within a few degrees, and
+re-rigging the same mesh reproduces it. It looks fine standing still and tears
+the moment a clip plays.
+
+**Always run `realign.mjs` first — not only when Gate 2 fails:**
+
+```bash
+node realign.mjs <raw.glb> <conformed.glb>
+node build.mjs <conformed.glb> <characterId> "<Display Name>"
+```
+
+Why any of this is needed: every clip carries translation, rotation *and* scale
+channels on all 24 joints, and a glTF channel REPLACES a node's local transform
+rather than composing with it. So a clip drives every character's skeleton to the
+same pose in the same units, leaving the inverse bind as the only thing that can
+differ. A character is correct exactly when its rest pose IS the pose the clips
+drive it to.
+
+**The one thing to understand before touching that tool:** a POSE difference and
+an ORIENTATION difference need opposite treatments, and confusing them has now
+caused two separate shipped bugs.
+
+| difference | fix | shipped bug when done wrong |
+|---|---|---|
+| pose (arms 60° low) | move the mesh | "the hands always come out to the front" |
+| bind orientation (Hips 120°) | absorb into the bind, move nothing | "the belly is broken" |
+
+Rotating belly vertices by the Hips' 120° while the vertices beside them move 3°
+tears the torso open — permanently, baked into the shipped mesh. So `realign.mjs`
+absorbs orientation at the ROOT joint only (it has no limb to point along, and
+Meshy varies its axis convention freely) and moves the mesh for everything else,
+where orientation legitimately encodes limb direction. It then refuses if any
+torso joint still needs >45° of mesh rotation. Read its output: `largest mesh
+rotation` should be a wrist, never a torso joint.
+
+The reference must be a **clip**, never the canonical character model. The two
+express the same skeleton in different units (model: metres with a 0.01 root
+scale; clips: centimetres with scale 1). Conforming to the model looks right at
+rest, reports 0.000 mm agreement, and detonates on the first animated frame.
+
+Fingers have no joints in the 24-joint rig, so splayed fingers stay splayed —
+fix that at generation time.
 
 It also handles automatically: Z-up → Y-up rotation when needed, dropping
 Meshy's duplicate emissive map (which otherwise makes the character ignore all

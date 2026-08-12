@@ -56,6 +56,7 @@ export type CatalogItem = CharacterItem | EmoteItem;
 const CHARACTERS: CharacterItem[] = [
   { id: "male", kind: "character", name: "Ranger", key: "characters/male/v1/model.glb", rarity: "starter", free: true },
   { id: "female", kind: "character", name: "Vanguard", key: "characters/female/v1/model.glb", rarity: "starter", free: true },
+  { id: "zenith", kind: "character", name: "Zenith", key: "characters/zenith/v1/model.glb", rarity: "epic", free: true },
 ];
 
 const EMOTES: EmoteItem[] = [
