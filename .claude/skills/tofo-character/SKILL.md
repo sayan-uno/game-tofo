@@ -1,0 +1,153 @@
+---
+name: tofo-character
+description: Create, process, verify and publish a TOFO player character end to end — generate and rig it in Meshy, run it through the asset pipeline, prove it works, upload it to Cloudflare R2, and add it to the game catalog. Use whenever the user asks for a new character, a new emote/animation, or wants an existing one reprocessed, re-uploaded, or added to Collections.
+---
+
+# TOFO character pipeline
+
+Turns "make me a new character" into a live, equippable character. Six stages,
+in order. **Do not skip stages 3 or 4** — both exist because a character that
+passed the obvious checks shipped anyway and had to be withdrawn.
+
+Tools live in `.claude/skills/tofo-character/tools/`. Run `npm install` there
+once. Credentials come from `backend/.env` (gitignored): `MESHY_API_KEY`,
+`R2_ACCOUNT_ID`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`.
+**Use them by reference, never print them.**
+
+---
+
+## 1. Generate in Meshy
+
+Prefer the `meshy` MCP server (configured in `.mcp.json`). Relevant tools:
+`meshy_text_to_3d`, `meshy_image_to_3d`, `meshy_rig`, `meshy_animate`,
+`meshy_download_model`, `meshy_get_task_status`, `meshy_check_balance`.
+
+If MCP isn't connected, the REST API works the same way:
+
+```bash
+curl -sS -H "Authorization: Bearer $MESHY_API_KEY" https://api.meshy.ai/openapi/v1/balance
+```
+
+Base URL is `https://api.meshy.ai/openapi/v1`. Generations cost credits — check
+the balance first and tell the user what a run will cost before burning it.
+
+**The model must be RIGGED before download.** An unrigged mesh fails stage 3
+immediately.
+
+## 2. Download the GLB
+
+Anywhere outside the repo is fine — these are 70–270 MB. Never commit one.
+
+## 3. Build (this is where the gates are)
+
+```bash
+cd .claude/skills/tofo-character/tools
+node build.mjs <input.glb> <characterId> "<Display Name>" [textureSize]
+```
+
+It hard-fails, before writing anything, on:
+
+**Gate 1 — joint names.** All 24 canonical joints, exact names.
+
+**Gate 2 — bind pose.** Every core torso joint within 25° of the canonical rig.
+This is the one that matters and the one that is easy to miss: matching joint
+*names* is not enough. Meshy does not guarantee the same bind pose between
+exports. A joint bound 120° off looks perfectly fine standing still and tears
+the mesh open the moment a clip plays — reported as "the belly looks bad".
+**A bind-pose failure is not fixable in code.** Re-export from Meshy. A
+mathematical re-bind was attempted once and destroyed the model.
+
+It also handles automatically: Z-up → Y-up rotation when needed, dropping
+Meshy's duplicate emissive map (which otherwise makes the character ignore all
+scene lighting), `OPAQUE` + single-sided materials when the alpha channel is
+unused, stripping baked clips, and extracting only clips **not** already on the
+CDN.
+
+**Texture budget:** dark characters get 2048, others 1024. A near-black
+character carries its entire form in dark gradients, which is exactly what
+lossy compression throws away — one shipped at 1024 and looked like mush.
+Override with the 4th argument if a render says otherwise.
+
+## 4. Verify — never skip
+
+Two things, both required.
+
+**Bind/joint report:**
+```bash
+node verify.mjs out/characters/<id>/v1/model.glb
+```
+
+**Render it.** A file that builds is not a file that looks right. Serve the
+built GLB from `frontend/public/_t/`, drive `CharacterRig.create()` in a
+headless browser, screenshot it, and *look*:
+
+- Full body, front and side, in `idle`
+- One strong pose (`dance-shake-it-off` around frame 45) — deformation shows
+  under motion, not at rest
+- Play all 9 shipped clips and confirm each returns true
+
+Camera notes, learned the hard way: set `cam.minZ = 0.01` (the default 1.0
+clips anything closer), don't reuse the lobby camera's radius/beta limits, and
+don't aim at the origin — characters are not centred there. Render full-body at
+high resolution and crop with PIL rather than fighting a close-up camera.
+
+Delete `frontend/public/_t/` and any test HTML afterwards.
+
+## 5. Upload
+
+```bash
+node upload.mjs          # dry run — shows what would go where
+node upload.mjs --go     # actually upload
+```
+
+Sets `model/gltf-binary` and `public, max-age=31536000, immutable`.
+
+**It refuses to overwrite an existing object, by design.** Paths are versioned
+and cached for a year with no way to purge a player's device. Fixing a live
+character means publishing `/v2/` and pointing the catalog at it — never
+replacing `/v1/`.
+
+Tell the user the exact destination path before uploading. Then verify:
+
+```bash
+curl -sS -o /dev/null -w "%{http_code} %{size_download}\n" https://cdn.tofo.in/characters/<id>/v1/model.glb
+```
+
+Byte count must match the built file.
+
+## 6. Add to the game — only when the user asks
+
+One line in `backend/src/services/catalog.ts`:
+
+```ts
+{ id: "<id>", kind: "character", name: "<Name>", key: "characters/<id>/v1/model.glb", rarity: "starter", free: true },
+```
+
+New emote:
+
+```ts
+{ id: "<slug>", kind: "emote", name: "<Label>", key: "animations/<slug>/v1/anim.glb",
+  category: "emote", duration: <s>, loop: false, rootMotion: <bool>, free: true },
+```
+
+Nothing else changes anywhere — the Collections page reads the catalog. Then
+add the new clip's Meshy source name to `ALREADY_SHIPPED` in `build.mjs`, or the
+next character will ship a duplicate of it.
+
+The backend must be restarted to pick up a catalog change.
+
+---
+
+## Rules that came from things going wrong
+
+- **The character id is baked into the URL.** Confirm it with the user *before*
+  uploading; changing it afterwards means re-uploading.
+- **Root-motion clips travel.** Anything over ~0.5u walks off the lobby
+  pedestal. Fine in the collection preview and in a match; never as a lobby idle.
+- **Never trust a bounding box on a skinned mesh.** With GPU skinning it
+  describes bind-pose vertex data, not what is drawn. `CharacterRig` sizes
+  characters from bone positions divided by the skeleton root's scale — the
+  mesh box reads 100× off. Do not "fix" that division.
+- **Don't ship a character you have not looked at**, however clean the numbers.
+- Triangle counts: the live characters are ~10k. Over ~40k is fine for a lobby,
+  heavy for a crowded match.

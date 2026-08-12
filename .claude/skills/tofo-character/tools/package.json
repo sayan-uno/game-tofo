@@ -1,0 +1,16 @@
+{
+  "name": "tofo-character-pipeline",
+  "private": true,
+  "type": "module",
+  "description": "Turns a raw Meshy export into a game-ready TOFO character. See ../SKILL.md",
+  "dependencies": {
+    "@gltf-transform/core": "^4.1.0",
+    "@gltf-transform/functions": "^4.1.0",
+    "@gltf-transform/extensions": "^4.1.0",
+    "@aws-sdk/client-s3": "^3.600.0",
+    "dotenv": "^16.4.5",
+    "gl-matrix": "^3.4.3",
+    "meshoptimizer": "^0.20.0",
+    "sharp": "^0.33.0"
+  }
+}

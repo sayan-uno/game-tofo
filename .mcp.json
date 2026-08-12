@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "meshy": {
+      "command": "npx",
+      "args": ["-y", "@meshy-ai/meshy-mcp-server"],
+      "_comment": "MESHY_API_KEY is read from backend/.env, reached through the gitignored .env symlink at the repo root. Deliberately no env block here: setting it to an unset shell variable would inject an empty string, and dotenv does not overwrite an already-set variable, which would break the key."
+    }
+  }
+}
