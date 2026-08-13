@@ -8,7 +8,9 @@
 // strand players on a stale file with no way to purge it. New content goes to
 // a new version folder.
 import { config } from 'dotenv';
-config({ path: '/workspaces/game-tofo/backend/.env' });
+// Resolved from this file's own location, not the repo's absolute path, so the
+// script keeps working after a move to a different machine or checkout dir.
+config({ path: path.resolve(import.meta.dirname, '../../../../backend/.env') });
 import { S3Client, PutObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
