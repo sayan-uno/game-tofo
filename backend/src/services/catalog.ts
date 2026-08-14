@@ -57,6 +57,7 @@ const CHARACTERS: CharacterItem[] = [
   { id: "male", kind: "character", name: "Ranger", key: "characters/male/v1/model.glb", rarity: "starter", free: true },
   { id: "female", kind: "character", name: "Vanguard", key: "characters/female/v1/model.glb", rarity: "starter", free: true },
   { id: "zenith", kind: "character", name: "Zenith", key: "characters/zenith/v1/model.glb", rarity: "legendary", free: true },
+  { id: "seraph", kind: "character", name: "Seraph", key: "characters/seraph/v1/model.glb", rarity: "legendary", free: true },
 ];
 
 const EMOTES: EmoteItem[] = [
