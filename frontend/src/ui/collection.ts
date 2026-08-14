@@ -5,7 +5,7 @@ import { PreviewScene } from "../game/previewScene";
 import { startRenderLoop } from "../game/engine";
 import type { Engine } from "@babylonjs/core/Engines/engine";
 import type { Scene } from "@babylonjs/core/scene";
-import type { CatalogCharacter, CatalogEmote, CollectionData } from "../types";
+import type { CatalogCharacter, CatalogEmote, CatalogWeapon, CollectionData } from "../types";
 
 /** The player's collection: characters they can wear, emotes they can perform.
  *
@@ -55,6 +55,8 @@ const ICONS: Record<string, string> = {
   back: `<path d="m15 18-6-6 6-6"/>`,
   user: `<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>`,
   spark: `<path d="M12 3v4"/><path d="M12 17v4"/><path d="M3 12h4"/><path d="M17 12h4"/><path d="m5.6 5.6 2.8 2.8"/><path d="m15.6 15.6 2.8 2.8"/><path d="m18.4 5.6-2.8 2.8"/><path d="m8.4 15.6-2.8 2.8"/>`,
+  sword: `<path d="M14.5 17.5 3 6V3h3l11.5 11.5"/><path d="m13 19 6-6"/><path d="m16 16 4 4"/><path d="m19 21 2-2"/>`,
+  none: `<circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/>`,
   check: `<path d="m5 12 5 5L20 6"/>`,
   play: `<path d="M6 4l14 8-14 8z"/>`,
 };
@@ -64,7 +66,9 @@ const icon = (k: string, cls = "") =>
 /** No artwork yet, so every tile draws a deterministic placeholder: a tinted
  *  panel keyed off the item id plus its initials. Stable per item (the same
  *  character is always the same colour) and costs zero network requests. */
-function placeholderTile(id: string, label: string, kind: "character" | "emote"): string {
+const THUMB_ICON: Record<string, string> = { character: "user", weapon: "sword", emote: "spark" };
+
+function placeholderTile(id: string, label: string, kind: "character" | "weapon" | "emote"): string {
   let hash = 0;
   for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) >>> 0;
   const hue = hash % 360;
@@ -75,7 +79,7 @@ function placeholderTile(id: string, label: string, kind: "character" | "emote")
     .join("")
     .toUpperCase();
   return `<span class="cl-thumb" style="--h:${hue}">
-      ${icon(kind === "character" ? "user" : "spark", "cl-thumb-icon")}
+      ${icon(THUMB_ICON[kind], "cl-thumb-icon")}
       <span class="cl-thumb-txt">${esc(initials)}</span>
     </span>`;
 }
@@ -110,6 +114,7 @@ export async function openCollection(opts: OpenCollectionOptions): Promise<void>
       <section class="cl-panel">
         <div class="cl-tabs" role="tablist">
           <button class="cl-tab active" role="tab" data-tab="characters">Characters</button>
+          <button class="cl-tab" role="tab" data-tab="weapons">Weapons</button>
           <button class="cl-tab" role="tab" data-tab="emotes">Emotes</button>
         </div>
         <div class="cl-grid" role="list"></div>
@@ -157,8 +162,13 @@ export async function openCollection(opts: OpenCollectionOptions): Promise<void>
   window.addEventListener("resize", aim);
 
   // --- state ---------------------------------------------------------------
-  let tab: "characters" | "emotes" = "characters";
+  type Tab = "characters" | "weapons" | "emotes";
+  let tab: Tab = "characters";
   let selectedCharacter = data.equippedCharacter;
+  /** null is a real choice here — empty-handed — not "nothing selected". The
+   *  coalesce covers a client that outlives a backend rollback, where the
+   *  field simply isn't in the response. */
+  let selectedWeapon: string | null = data.equippedWeapon ?? null;
   let previewCharacter = "";
 
   async function showCharacter(id: string) {
@@ -172,33 +182,45 @@ export async function openCollection(opts: OpenCollectionOptions): Promise<void>
   }
 
   function renderFoot() {
-    if (tab === "characters") {
-      const equipped = selectedCharacter === data.equippedCharacter;
-      foot.innerHTML = `<button class="btn btn-primary cl-equip" ${equipped ? "disabled" : ""}>
-          ${equipped ? `${icon("check", "cl-equip-ic")} Equipped` : "Equip"}
-        </button>`;
-      const btn = foot.querySelector<HTMLButtonElement>(".cl-equip")!;
-      btn.onclick = () => void equip(btn);
-    } else {
+    if (tab === "emotes") {
       foot.innerHTML = `<p class="cl-hint">Tap any clip to see it on your character.</p>`;
+      return;
     }
+    const worn = tab === "characters" ? selectedCharacter === data.equippedCharacter : selectedWeapon === data.equippedWeapon;
+    const label = worn
+      ? `${icon("check", "cl-equip-ic")} Equipped`
+      : tab === "weapons" && selectedWeapon === null
+        ? "Put away"
+        : "Equip";
+    foot.innerHTML = `<button class="btn btn-primary cl-equip" ${worn ? "disabled" : ""}>${label}</button>`;
+    const btn = foot.querySelector<HTMLButtonElement>(".cl-equip")!;
+    btn.onclick = () => void equip(btn);
   }
 
+  /** Equips whichever slot the open tab owns. The response carries BOTH slots,
+   *  so the local copy stays whole even though the request named one. */
   async function equip(btn: HTMLButtonElement) {
     btn.disabled = true;
+    const forCharacter = tab === "characters";
     try {
-      const res = await api.post<{ equippedCharacter: string }>("/api/collection/equip", {
-        characterId: selectedCharacter,
-      });
+      const res = await api.post<{ equippedCharacter: string; equippedWeapon: string | null }>(
+        "/api/collection/equip",
+        forCharacter ? { characterId: selectedCharacter } : { weaponId: selectedWeapon }
+      );
       data.equippedCharacter = res.equippedCharacter;
-      if (cached) cached.equippedCharacter = res.equippedCharacter;
+      data.equippedWeapon = res.equippedWeapon;
+      if (cached) {
+        cached.equippedCharacter = res.equippedCharacter;
+        cached.equippedWeapon = res.equippedWeapon;
+      }
       opts.onEquipped?.(res.equippedCharacter);
       renderGrid();
       renderFoot();
-      toast("Character equipped");
+      toast(forCharacter ? "Character equipped" : res.equippedWeapon ? "Weapon equipped" : "Weapon put away");
     } catch (err) {
       btn.disabled = false;
-      toast(err instanceof Error ? err.message : "Couldn't equip that character", true);
+      const fallback = forCharacter ? "Couldn't equip that character" : "Couldn't equip that weapon";
+      toast(err instanceof Error ? err.message : fallback, true);
     }
   }
 
@@ -227,6 +249,40 @@ export async function openCollection(opts: OpenCollectionOptions): Promise<void>
           void showCharacter(id);
         };
       });
+    } else if (tab === "weapons") {
+      grid.className = "cl-grid cl-grid-char";
+      // The empty hand leads the grid, because putting a weapon away has to be
+      // as reachable as picking one up — and it is a look in its own right.
+      const empty = `<button class="cl-card ${selectedWeapon === null ? "sel" : ""}" role="listitem" data-id="">
+          <span class="cl-thumb cl-thumb-none">${icon("none", "cl-thumb-icon")}</span>
+          <span class="cl-card-name">No weapon</span>
+          <span class="cl-card-meta">empty hand</span>
+          ${data.equippedWeapon === null ? `<span class="cl-badge">${icon("check")}</span>` : ""}
+        </button>`;
+      grid.innerHTML =
+        empty +
+        (data.weapons ?? [])
+          .map((w: CatalogWeapon) => {
+            const on = w.id === selectedWeapon;
+            const worn = w.id === data.equippedWeapon;
+            return `<button class="cl-card ${on ? "sel" : ""}" role="listitem" data-id="${esc(w.id)}">
+              ${placeholderTile(w.id, w.name, "weapon")}
+              <span class="cl-card-name">${esc(w.name)}</span>
+              <span class="cl-card-meta">${esc(w.rarity)}</span>
+              ${worn ? `<span class="cl-badge">${icon("check")}</span>` : ""}
+            </button>`;
+          })
+          .join("");
+      grid.querySelectorAll<HTMLButtonElement>(".cl-card").forEach((card) => {
+        card.onclick = () => {
+          const id = card.dataset.id || null;
+          if (id === selectedWeapon) return;
+          selectedWeapon = id;
+          renderGrid();
+          renderFoot();
+          void preview.setWeapon(id);
+        };
+      });
     } else {
       grid.className = "cl-grid cl-grid-emote";
       grid.innerHTML = data.emotes
@@ -253,15 +309,16 @@ export async function openCollection(opts: OpenCollectionOptions): Promise<void>
 
   page.querySelectorAll<HTMLButtonElement>(".cl-tab").forEach((btn) => {
     btn.onclick = () => {
-      const next = btn.dataset.tab as "characters" | "emotes";
+      const next = btn.dataset.tab as Tab;
       if (next === tab) return;
       tab = next;
       page.querySelectorAll(".cl-tab").forEach((t) => t.classList.toggle("active", t === btn));
       renderGrid();
       renderFoot();
-      // Emotes need somebody to perform them — make sure the equipped
-      // character is the one on stage when the player switches over.
-      if (tab === "emotes" && previewCharacter !== data.equippedCharacter) {
+      // Emotes need somebody to perform them, and a weapon needs a hand to be
+      // held in — make sure the equipped character is the one on stage when
+      // the player switches to either.
+      if (tab !== "characters" && previewCharacter !== data.equippedCharacter) {
         selectedCharacter = data.equippedCharacter;
         void showCharacter(data.equippedCharacter);
       }
@@ -270,6 +327,10 @@ export async function openCollection(opts: OpenCollectionOptions): Promise<void>
 
   renderGrid();
   renderFoot();
+  // The weapon first: the preview keeps it across character swaps, so setting
+  // it before the model lands means it is simply there when the model arrives,
+  // with no second load and no flicker.
+  void preview.setWeapon(selectedWeapon);
   void showCharacter(selectedCharacter);
 
   // --- teardown ------------------------------------------------------------

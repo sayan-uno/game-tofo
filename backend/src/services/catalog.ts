@@ -1,7 +1,7 @@
 import { config } from "../config.js";
 
 /** ---------------------------------------------------------------------------
- *  The asset catalog — characters and animation clips.
+ *  The asset catalog — characters, weapons and animation clips.
  *
  *  Every entry stores a PATH, never a URL. `assetUrl()` is the single place a
  *  path becomes fetchable, so the CDN can move with one env var (see
@@ -16,7 +16,7 @@ import { config } from "../config.js";
  *  Cost: cold path. Built once at module load, served from memory, no I/O.
  * ------------------------------------------------------------------------- */
 
-export type ItemKind = "character" | "emote";
+export type ItemKind = "character" | "weapon" | "emote";
 
 /** What the clip actually is. Only `emote` clips are meant to be performed on
  *  purpose — the rest are movement the game plays for you. The collection page
@@ -43,6 +43,21 @@ export interface CharacterItem {
   aura?: AuraKind;
 }
 
+/** A held prop. Everything about HOW it is held is baked into the model —
+ *  pivot at the grip, blade down +Y, edge along X, sized in metres — so the
+ *  client has one hand transform for all of them and a second weapon is a
+ *  catalog line, not a branch in the render code (see buildProp.mjs, and
+ *  weapon.ts on the client for the other half of that contract). */
+export interface WeaponItem {
+  id: string;
+  kind: "weapon";
+  name: string;
+  /** CDN path — turn into a URL with assetUrl(). */
+  key: string;
+  rarity: "starter" | "rare" | "epic" | "legendary";
+  free: boolean;
+}
+
 export interface EmoteItem {
   id: string;
   kind: "emote";
@@ -59,19 +74,37 @@ export interface EmoteItem {
   free: boolean;
 }
 
-export type CatalogItem = CharacterItem | EmoteItem;
+export type CatalogItem = CharacterItem | WeaponItem | EmoteItem;
 
+// Every character moved up a version at once, and they have to stay in step:
+// each of these carries a right hand closed into a fist, with the tunnel
+// through it aimed by 45 degrees of baked pronation (gripHand.mjs). The
+// client's weapon.ts holds the matching grip transform, so a character left
+// on an older version would go back to a sword floating past an open palm.
+//
+// Earlier versions stay published — /vN/ is immutable and cached for a year,
+// so nothing is reclaimed by pointing away from them, and a client that
+// fetched the catalog before this edit still wants the old one.
+//
+// male and zenith are at v3 rather than v2 for a dull reason worth writing
+// down: both were requested over the CDN in the seconds before R2 finished
+// accepting them, and the edge cached the 404 it got. The object was fine;
+// the URL was poisoned, and there is no purge credential here. Publishing a
+// fresh path is the fix, and the lesson is to let an upload settle BEFORE
+// fetching it — a 404 cached against a live path outlives the mistake.
 const CHARACTERS: CharacterItem[] = [
-  { id: "male", kind: "character", name: "Ranger", key: "characters/male/v1/model.glb", rarity: "starter", free: true },
-  { id: "female", kind: "character", name: "Vanguard", key: "characters/female/v1/model.glb", rarity: "starter", free: true },
-  { id: "zenith", kind: "character", name: "Zenith", key: "characters/zenith/v1/model.glb", rarity: "legendary", free: true, aura: "ember" },
-  // v6 carries the emissive mask that makes the garment itself glow: the chest
-  // and back prisms, the wrist and boot crystals, the blue crown horns, and the
-  // gold veins that veinFlow.ts runs a pulse down. Earlier versions are the same
-  // mesh with less of that mask and stay published — /vN/ is immutable and
-  // cached for a year, so nothing is reclaimed by pointing away from them, and
-  // a client that fetched the catalog before this edit still wants the old one.
-  { id: "seraph", kind: "character", name: "Seraph", key: "characters/seraph/v6/model.glb", rarity: "legendary", free: true, aura: "crystal" },
+  { id: "male", kind: "character", name: "Ranger", key: "characters/male/v3/model.glb", rarity: "starter", free: true },
+  { id: "female", kind: "character", name: "Vanguard", key: "characters/female/v2/model.glb", rarity: "starter", free: true },
+  { id: "zenith", kind: "character", name: "Zenith", key: "characters/zenith/v3/model.glb", rarity: "legendary", free: true, aura: "ember" },
+  // Seraph's v6 added the emissive mask that makes the garment itself glow: the
+  // chest and back prisms, the wrist and boot crystals, the blue crown horns,
+  // and the gold veins that veinFlow.ts runs a pulse down. v7 is that same
+  // model with the fist.
+  { id: "seraph", kind: "character", name: "Seraph", key: "characters/seraph/v7/model.glb", rarity: "legendary", free: true, aura: "crystal" },
+];
+
+const WEAPONS: WeaponItem[] = [
+  { id: "crimson-fang", kind: "weapon", name: "Crimson Fang", key: "weapons/crimson-fang/v1/model.glb", rarity: "legendary", free: true },
 ];
 
 const EMOTES: EmoteItem[] = [
@@ -101,6 +134,7 @@ export function assetUrl(key: string): string | null {
 }
 
 export const characters = (): CharacterItem[] => CHARACTERS;
+export const weapons = (): WeaponItem[] => WEAPONS;
 export const emotes = (): EmoteItem[] => EMOTES;
 
 /** Resolve a stored character id to one that definitely exists. A player whose
@@ -110,10 +144,25 @@ export function resolveCharacter(id: string | null | undefined): string {
   return id && CHARACTERS.some((c) => c.id === id) ? id : DEFAULT_CHARACTER;
 }
 
+/** Resolve a stored weapon id. Unlike a character, empty hands are a valid —
+ *  and the default — state, so this returns null rather than falling back to
+ *  something: an unarmed player is correct, a player holding a weapon they
+ *  didn't pick is not. A retired weapon therefore just disappears. */
+export function resolveWeapon(id: string | null | undefined): string | null {
+  return id && WEAPONS.some((w) => w.id === id) ? id : null;
+}
+
 /** Can this player equip this character? Every starter is free today; once
  *  paid characters exist this is where the user_items lookup goes. */
 export function canEquip(id: string): boolean {
   const item = CHARACTERS.find((c) => c.id === id);
+  return item !== undefined && item.free;
+}
+
+/** Same question for a weapon. Null is always allowed — that's unequipping. */
+export function canEquipWeapon(id: string | null): boolean {
+  if (id === null) return true;
+  const item = WEAPONS.find((w) => w.id === id);
   return item !== undefined && item.free;
 }
 
@@ -122,6 +171,7 @@ export function canEquip(id: string): boolean {
 export function publicCatalog() {
   return {
     characters: CHARACTERS.map(({ key, free, ...rest }) => ({ ...rest, url: assetUrl(key), owned: free })),
+    weapons: WEAPONS.map(({ key, free, ...rest }) => ({ ...rest, url: assetUrl(key), owned: free })),
     emotes: EMOTES.map(({ key, free, ...rest }) => ({ ...rest, url: assetUrl(key), owned: free })),
     defaultCharacter: DEFAULT_CHARACTER,
     lobbyIdleClip: LOBBY_IDLE_CLIP,

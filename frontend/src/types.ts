@@ -25,6 +25,9 @@ export interface LobbyMember extends User {
   /** Catalog id of the character this player is wearing. Always a valid id —
    *  the server resolves unset/retired values before broadcasting. */
   character: string;
+  /** Catalog id of the weapon in their hand, or null for empty-handed — which
+   *  is the default, not a failure. Also resolved server-side. */
+  weapon: string | null;
 }
 
 /** ---------------------------------------------------------------------------
@@ -47,6 +50,18 @@ export interface CatalogCharacter {
   owned: boolean;
 }
 
+/** A held prop. How it is held is baked into the model (pivot at the grip,
+ *  blade +Y, metres) — see buildProp.mjs — so there is nothing positional here
+ *  and a second weapon is a catalog line, not a change to the render code. */
+export interface CatalogWeapon {
+  id: string;
+  kind: "weapon";
+  name: string;
+  rarity: "starter" | "rare" | "epic" | "legendary";
+  url: string | null;
+  owned: boolean;
+}
+
 export interface CatalogEmote {
   id: string;
   kind: "emote";
@@ -64,6 +79,7 @@ export interface CatalogEmote {
 
 export interface Catalog {
   characters: CatalogCharacter[];
+  weapons: CatalogWeapon[];
   emotes: CatalogEmote[];
   defaultCharacter: string;
   lobbyIdleClip: string;
@@ -71,6 +87,8 @@ export interface Catalog {
 
 export interface CollectionData extends Catalog {
   equippedCharacter: string;
+  /** null = empty-handed, the default. */
+  equippedWeapon: string | null;
 }
 
 export interface ChatMessage {

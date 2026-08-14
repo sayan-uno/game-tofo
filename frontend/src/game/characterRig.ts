@@ -88,6 +88,13 @@ function ensureLoader(): Promise<void> {
  *  load is evicted so a flaky network can be retried. */
 const containers = new WeakMap<Scene, Map<string, Promise<AssetContainer>>>();
 
+/** Exported for held props (see weapon.ts): a weapon is another GLB that has to
+ *  come through the SAME cache, or four squadmates carrying the same sword
+ *  would download it four times and the loader would be registered twice. */
+export function loadContainer(url: string, scene: Scene): Promise<AssetContainer> {
+  return load(url, scene);
+}
+
 function load(url: string, scene: Scene): Promise<AssetContainer> {
   let perScene = containers.get(scene);
   if (!perScene) {

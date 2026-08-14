@@ -36,6 +36,13 @@
       "when": 1785606292504,
       "tag": "0004_pale_warlock",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1786726415656,
+      "tag": "0005_gigantic_frank_castle",
+      "breakpoints": true
     }
   ]
 }

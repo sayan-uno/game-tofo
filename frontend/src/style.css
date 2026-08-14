@@ -3041,7 +3041,10 @@ body {
 }
 .cl-tab {
   flex: 1;
-  padding: 9px 10px;
+  /* Three tabs now share this row: without min-width they refuse to shrink
+     below their text and push the last one off a narrow phone. */
+  min-width: 0;
+  padding: 9px 6px;
   border-radius: 10px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   background: rgba(255, 255, 255, 0.03);
@@ -3120,6 +3123,14 @@ body {
   opacity: 0.16;
   fill: none;
   stroke: currentColor;
+}
+/* The empty-hand tile: no item id to tint from, so it stays neutral and lets
+   its icon carry the meaning rather than pretending to be artwork. */
+.cl-thumb-none {
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.05), #140a0d);
+}
+.cl-thumb-none .cl-thumb-icon {
+  opacity: 0.3;
 }
 .cl-thumb-txt {
   position: relative;
@@ -3208,6 +3219,14 @@ body {
 /* Narrow / portrait: stack the stage above the grid instead of beside it.
    The preview camera re-aims itself from the element box, so nothing else
    has to know this happened. */
+/* Tighten the tab row where three uppercase labels get close to the edges. */
+@media (max-width: 420px) {
+  .cl-tab {
+    font-size: 11px;
+    letter-spacing: 0.06em;
+  }
+}
+
 @media (max-aspect-ratio: 1/1) {
   .cl-body { flex-direction: column; }
   .cl-stage { flex: 0 0 38%; }

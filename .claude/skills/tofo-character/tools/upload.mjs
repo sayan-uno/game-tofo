@@ -24,7 +24,11 @@ const s3 = new S3Client({ region: 'auto', endpoint: `https://${ACC}.r2.cloudflar
   credentials: { accessKeyId: KEY, secretAccessKey: SECRET } });
 
 const manifest = JSON.parse(await readFile(path.join(OUT, 'manifest.json'), 'utf8'));
-const items = [...manifest.characters.map((c) => c.key), ...manifest.newAnimations.map((a) => a.key)];
+const items = [
+  ...(manifest.characters ?? []).map((c) => c.key),
+  ...(manifest.weapons ?? []).map((w) => w.key),
+  ...(manifest.newAnimations ?? []).map((a) => a.key),
+];
 if (!items.length) { console.log('nothing in out/manifest.json to upload'); process.exit(0); }
 
 const exists = async (Key) => {

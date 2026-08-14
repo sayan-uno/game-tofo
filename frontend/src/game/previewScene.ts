@@ -22,12 +22,18 @@ import { GlowLayer } from "@babylonjs/core/Layers/glowLayer";
 import { getEmote } from "./assets";
 import { CharacterRig } from "./characterRig";
 import { attachAura, type Aura } from "./aura";
+import type { HeldWeapon } from "./weapon";
 
 export class PreviewScene {
   readonly scene: Scene;
   private camera: ArcRotateCamera;
   private rig: CharacterRig | null = null;
   private aura: Aura | null = null;
+  private weapon: HeldWeapon | null = null;
+  /** Held across character swaps: picking a different character on the
+   *  Characters tab should not put down the sword you were just looking at. */
+  private weaponId: string | null = null;
+  private weaponToken = 0;
   private characterId: string | null = null;
   /** Guards against a slow load landing after the player picked something
    *  else — without it, tapping two characters quickly can leave the loser
@@ -125,6 +131,9 @@ export class PreviewScene {
       rig?.dispose(); // a newer pick won the race
       return false;
     }
+    this.weaponToken++;
+    this.weapon?.dispose();
+    this.weapon = null;
     this.aura?.dispose();
     this.aura = null;
     this.rig?.dispose();
@@ -137,7 +146,30 @@ export class PreviewScene {
     const aura = await attachAura(id, rig, this.scene);
     if (mine === this.token) this.aura = aura;
     else aura?.dispose(); // a newer pick won the race
+    // Only after a clip has posed the skeleton — see weapon.ts.
+    if (mine === this.token) await this.hold(this.weaponId);
     return true;
+  }
+
+  /** Show a weapon in the character's hand, or null for empty-handed. */
+  async setWeapon(id: string | null): Promise<void> {
+    this.weaponId = id;
+    await this.hold(id);
+  }
+
+  private async hold(id: string | null): Promise<void> {
+    const mine = ++this.weaponToken;
+    this.weapon?.dispose();
+    this.weapon = null;
+    const rig = this.rig;
+    if (!id || !rig) return;
+    const { attachWeapon } = await import("./weapon");
+    const held = await attachWeapon(id, rig, this.scene);
+    if (mine !== this.weaponToken) {
+      held?.dispose();
+      return;
+    }
+    this.weapon = held;
   }
 
   /** Play a clip once, then fall back to idle. Clips that travel are played on
@@ -168,6 +200,7 @@ export class PreviewScene {
   }
 
   dispose() {
+    this.weapon?.dispose();
     this.aura?.dispose();
     this.unsubscribeEnd?.();
     this.rig?.dispose();

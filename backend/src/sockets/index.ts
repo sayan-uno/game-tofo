@@ -29,7 +29,7 @@ import {
 } from "../redis.js";
 import { areFriends, displayName, getFriendIds, getUserById, getUserByUid, getUsersByIds } from "../services/users.js";
 import { registerChatHandlers, syncTeamChatSession } from "./chat.js";
-import { resolveCharacter } from "../services/catalog.js";
+import { resolveCharacter, resolveWeapon } from "../services/catalog.js";
 
 interface AuthedSocket extends Socket {
   data: { auth: AuthPayload };
@@ -60,6 +60,9 @@ export async function broadcastLobby(io: Server, lobbyId: string) {
     // (not on the client) so a retired or never-chosen id can never reach the
     // scene as a broken model URL.
     character: resolveCharacter(u.equippedCharacter),
+    // What they're holding, or null for empty-handed. Resolved here too, so a
+    // retired weapon leaves an empty hand rather than a broken model URL.
+    weapon: resolveWeapon(u.equippedWeapon),
   }));
   io.to(`room:${lobbyId}`).emit("lobby:members", { lobbyId, mode, members, teamCode });
 }

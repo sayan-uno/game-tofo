@@ -1,6 +1,6 @@
 ---
 name: tofo-character
-description: Create, process, verify and publish a TOFO player character end to end — generate and rig it in Meshy, run it through the asset pipeline, prove it works, upload it to Cloudflare R2, and add it to the game catalog. Use whenever the user asks for a new character, a new emote/animation, or wants an existing one reprocessed, re-uploaded, or added to Collections.
+description: Create, process, verify and publish a TOFO player character, weapon or emote end to end — generate it in Meshy, run it through the asset pipeline, prove it works, upload it to Cloudflare R2, and add it to the game catalog. Use whenever the user asks for a new character, weapon/held prop, or emote/animation, or wants an existing one reprocessed, re-uploaded, or added to Collections.
 ---
 
 # TOFO character pipeline
@@ -144,13 +144,23 @@ and cached for a year with no way to purge a player's device. Fixing a live
 character means publishing `/v2/` and pointing the catalog at it — never
 replacing `/v1/`.
 
-Tell the user the exact destination path before uploading. Then verify:
+Tell the user the exact destination path before uploading. Then **wait ~20s**
+before the first fetch, and verify:
 
 ```bash
 curl -sS -o /dev/null -w "%{http_code} %{size_download}\n" https://cdn.tofo.in/characters/<id>/v1/model.glb
 ```
 
 Byte count must match the built file.
+
+**Do not fetch a path the instant the upload returns.** R2 can take a few
+seconds to serve a new object, and the CDN caches the 404 it gets in the
+meantime — against a path that is now permanently immutable, with no purge
+credential in this repo. The object is fine and `HeadObject` proves it, but
+the URL is dead and the only fix is to publish a new version and point the
+catalog there. This has already cost two characters a version number. If a
+fresh path 404s while `HeadObject` finds the object, that is what happened;
+a `?cb=` query string returning 200 confirms it.
 
 ## 6. Add to the game — only when the user asks
 
@@ -175,6 +185,78 @@ The backend must be restarted to pick up a catalog change.
 
 ---
 
+## Weapons and other held props
+
+A prop is not a character: no skeleton, no clips, no bind pose. It does NOT go
+through `build.mjs` (both gates would fail on the missing skin). Use:
+
+```bash
+node buildProp.mjs <input.glb> <weaponId> "<Display Name>" [lengthMetres] [textureSize]
+```
+
+Generate it with the IMAGE route — `meshy_text_to_image` for a design sheet you
+can actually look at for 3 credits, then `meshy_image_to_3d`. Ask for the
+weapon alone, vertical, on a plain background. Budget ~33 credits: meshy-6
+image-to-3d with remesh bills 30, not the 20 the tool's own table implies.
+
+What replaces the rig gates is a CONTRACT with the hand, baked into the model
+so the client needs no per-weapon offsets:
+
+- pivot at the grip (where the fist closes), found from the mesh — the fattest
+  slice is the crossguard, the thin run below it is the handle
+- blade along +Y, and the tool flips the model if the tip came out at -Y
+- sized in metres, so it matches the 1.8 m character holding it
+
+The neon is the base colour texture used as its own emissive map — the albedo
+is already flat saturated colour over near-black, so the guard stays matte
+while the blade lights itself, at zero extra texture bytes.
+
+Upload and catalog work the same way, under `weapons/<id>/v1/model.glb` and a
+`WEAPONS` line in `catalog.ts`. `weapon.ts` on the client is where a prop meets
+a hand, and its header explains the one thing that matters there — a POSED
+skeleton shares the drawn mesh's space and a RESTING one is 100x off.
+
+### The hand has to be closed first
+
+Meshy generates an open, splayed hand ~21cm from wrist to fingertip (a fist is
+~10cm), and the canonical rig has no finger joints — `RightHand` is a leaf — so
+nothing can ever close it. A weapon hung off that hand passes straight through
+a flat palm. This is the single most obvious flaw in a held weapon and it is
+not fixable by moving the weapon.
+
+```bash
+node gripHand.mjs <in.glb> <out.glb> [radius_cm] [knuckle_cm] [twist_deg]
+```
+
+Every finger vertex is rigidly weighted to the one hand joint, so curling them
+in the BIND POSE is indistinguishable from the hand having been modelled as a
+fist: the fist then rides the hand through every clip, no animation changes,
+and the joint list is still the canonical 24. Defaults scale to the hand's own
+measured length, and the palm side is detected from the way relaxed fingers
+already drift, so it needs no per-character tuning. Run `verify.mjs` after —
+the bind report must be identical to the original.
+
+**A fist's tunnel runs across the palm, perpendicular to the forearm.** That,
+not the grip transform, is what decides where a held blade can point: with the
+arm hanging at the character's side, a truly gripped weapon is stuck within
+~30 degrees of horizontal. A vertical blade means the hand is not really
+holding it. The `twist_deg` argument bakes forearm pronation to aim that
+tunnel — the shipped characters use -45, which swings the blade from across
+the chest to out past the hip. Keep it within about ±70 degrees.
+
+**But the handle does not lie straight along that tunnel.** A real sword grip
+runs DIAGONALLY across the palm — in between thumb and forefinger, out at the
+heel of the hand — about 45 degrees off the knuckles. That diagonal is what
+drops the blade from sticking out sideways into the lowered carry a swordsman
+actually stands in, and it is the difference between "held" and "held well".
+It lives in weapon.ts's grip rotation, costs nothing, and needs no re-bake.
+
+The weapon's grip constants and the characters' baked hands are ONE unit.
+Changing either means re-publishing every character together, which is why
+they all moved to a new version at the same time.
+
+---
+
 ## Rules that came from things going wrong
 
 - **The character id is baked into the URL.** Confirm it with the user *before*
@@ -186,5 +268,9 @@ The backend must be restarted to pick up a catalog change.
   characters from bone positions divided by the skeleton root's scale — the
   mesh box reads 100× off. Do not "fix" that division.
 - **Don't ship a character you have not looked at**, however clean the numbers.
+- **A verification harness must play a clip before it reads any joint.** In the
+  rest pose the joints are a hundredth of the size of the character they belong
+  to, so every position read off them is wrong by 100x — and wrong in a way
+  that still renders, which is how it gets believed.
 - Triangle counts: the live characters are ~10k. Over ~40k is fine for a lobby,
   heavy for a crowded match.

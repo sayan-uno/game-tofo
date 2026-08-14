@@ -5,7 +5,7 @@
 // the heavy model/animation machinery in characterRig.ts stays behind a dynamic
 // import. Adding a Babylon value import here would quietly put ~550 kB back on
 // the lobby's first frame, so keep everything below `import type`.
-import type { Catalog, CatalogCharacter, CatalogEmote } from "../types";
+import type { Catalog, CatalogCharacter, CatalogEmote, CatalogWeapon } from "../types";
 
 /** How tall a character stands in the world, in scene units (1 unit = 1 metre).
  *
@@ -21,6 +21,7 @@ export const CHARACTER_HEIGHT = 1.8;
 
 let catalog: Catalog | null = null;
 const characters = new Map<string, CatalogCharacter>();
+const weapons = new Map<string, CatalogWeapon>();
 const emotes = new Map<string, CatalogEmote>();
 
 /** Handed the catalog once per session, right after it's fetched. Everything
@@ -28,12 +29,17 @@ const emotes = new Map<string, CatalogEmote>();
 export function setCatalog(next: Catalog) {
   catalog = next;
   characters.clear();
+  weapons.clear();
   emotes.clear();
   for (const c of next.characters) characters.set(c.id, c);
+  // Tolerated as absent: a client that outlives a backend rollback still gets
+  // a catalog, just without weapons in it.
+  for (const w of next.weapons ?? []) weapons.set(w.id, w);
   for (const e of next.emotes) emotes.set(e.id, e);
 }
 
 export const getCharacter = (id: string): CatalogCharacter | undefined => characters.get(id);
+export const getWeapon = (id: string): CatalogWeapon | undefined => weapons.get(id);
 export const getEmote = (id: string): CatalogEmote | undefined => emotes.get(id);
 export const getLobbyIdleClip = (): string | null => catalog?.lobbyIdleClip ?? null;
 

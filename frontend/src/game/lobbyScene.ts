@@ -30,6 +30,7 @@ import { Rectangle } from "@babylonjs/gui/2D/controls/rectangle";
 import { getLobbyIdleClip, hasAssets } from "./assets";
 import type { CharacterRig } from "./characterRig";
 import { attachAura, type Aura } from "./aura";
+import type { HeldWeapon } from "./weapon";
 import type { LobbyMember } from "../types";
 
 // Fixed pedestal positions for up to 4 lobby members, local player centered.
@@ -93,14 +94,21 @@ interface CharacterInstance {
   uid: string;
   /** Catalog id currently shown, so an equip elsewhere swaps just this model. */
   characterId: string;
+  /** Weapon catalog id currently shown, null for empty-handed. */
+  weaponId: string | null;
   /** The loaded model, once it arrives. Null while loading, and for good if
    *  the CDN is unreachable — in which case the fallback body is built. */
   rig: CharacterRig | null;
   /** Only present on characters the catalog marks legendary. */
   aura: Aura | null;
+  /** What's in their hand, once it arrives. */
+  weapon: HeldWeapon | null;
   /** Rises on every character change; a load that finishes after a newer one
    *  started sees a stale token and throws its result away. */
   loadToken: number;
+  /** The same guard for weapons, counted separately: swapping a sword must not
+   *  invalidate a character load that is still in flight beside it. */
+  weaponToken: number;
 }
 
 export class LobbyScene {
@@ -238,6 +246,8 @@ export class LobbyScene {
       if (!keep.has(uid)) {
         clearTimeout(character.bubbleTimer);
         character.loadToken++; // strand any load still in flight for this slot
+        character.weaponToken++;
+        character.weapon?.dispose();
         character.aura?.dispose();
         character.rig?.dispose();
         character.anchor.dispose();
@@ -257,10 +267,16 @@ export class LobbyScene {
           applyNameStyle(existing.label, member);
         }
         // Someone equipped a different character — swap just that model, keep
-        // the pedestal, plate and any bubble exactly as they are.
+        // the pedestal, plate and any bubble exactly as they are. The weapon
+        // rides along: attachModel re-hangs it on the new rig, since the old
+        // one it was following is about to be disposed.
         if (existing.characterId !== member.character) {
           existing.characterId = member.character;
+          existing.weaponId = member.weapon;
           void this.attachModel(existing, member.character);
+        } else if (existing.weaponId !== member.weapon) {
+          existing.weaponId = member.weapon;
+          void this.attachWeapon(existing);
         }
         return;
       }
@@ -299,6 +315,9 @@ export class LobbyScene {
       return;
     }
 
+    character.weaponToken++; // the rig it was following is going away
+    character.weapon?.dispose();
+    character.weapon = null;
     character.aura?.dispose();
     character.aura = null;
     character.rig?.dispose();
@@ -317,6 +336,28 @@ export class LobbyScene {
     const aura = await attachAura(characterId, rig, this.scene);
     if (mine === character.loadToken) character.aura = aura;
     else aura?.dispose(); // a newer load won the race
+
+    // After the idle clip, never before: a weapon reads the hand joint, and
+    // until a clip has posed the skeleton that joint is in the rest pose, a
+    // hundred times smaller than the character it belongs to (see weapon.ts).
+    if (mine === character.loadToken) await this.attachWeapon(character);
+  }
+
+  /** Put the slot's current weapon in its hand, or take it away. Empty-handed
+   *  is the common case and costs nothing — the module isn't even downloaded. */
+  private async attachWeapon(character: CharacterInstance): Promise<void> {
+    const mine = ++character.weaponToken;
+    character.weapon?.dispose();
+    character.weapon = null;
+    const rig = character.rig;
+    if (!character.weaponId || !rig) return;
+    const { attachWeapon } = await import("./weapon");
+    const held = await attachWeapon(character.weaponId, rig, this.scene);
+    if (mine !== character.weaponToken) {
+      held?.dispose(); // a newer weapon (or a character swap) won the race
+      return;
+    }
+    character.weapon = held;
   }
 
   /** Empty the bobbing root (any stand-in body) and park the bob at zero. */
@@ -485,8 +526,11 @@ export class LobbyScene {
       isLeader: member.isLeader,
       disposables,
       characterId: member.character,
+      weaponId: member.weapon,
       rig: null,
+      weapon: null,
       loadToken: 0,
+      weaponToken: 0,
     };
     // The pedestal and plate are already on screen; the character itself drops
     // in when its model arrives. Tap-picking works throughout — it walks up to
@@ -499,6 +543,8 @@ export class LobbyScene {
     for (const character of this.characters.values()) {
       clearTimeout(character.bubbleTimer);
       character.loadToken++;
+      character.weaponToken++;
+      character.weapon?.dispose();
       character.aura?.dispose();
       character.rig?.dispose();
     }

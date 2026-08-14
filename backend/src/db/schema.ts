@@ -27,6 +27,11 @@ export const users = pgTable(
     // Ownership lives in the catalog for now (both starters are free); when
     // paid characters ship this gets checked against a user_items table.
     equippedCharacter: varchar("equipped_character", { length: 40 }),
+    // Catalog id of the weapon held in the lobby. NULL means empty-handed,
+    // which — unlike a character — is a legitimate resting state and the
+    // default, so nothing is backfilled and a retired weapon simply leaves the
+    // hand empty rather than falling back to some other blade.
+    equippedWeapon: varchar("equipped_weapon", { length: 40 }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     lastLoginAt: timestamp("last_login_at", { withTimezone: true }).notNull().defaultNow(),
   },
