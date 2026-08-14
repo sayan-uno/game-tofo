@@ -24,6 +24,11 @@ export type ItemKind = "character" | "emote";
  *  the squad" flow will only ever offer `emote`. */
 export type ClipCategory = "emote" | "locomotion" | "traversal";
 
+/** Which legendary effect a character wears. Only read for `legendary`
+ *  rarity; anything else ignores it. Absent means "ember", so the field can be
+ *  left off every character that shipped before a second effect existed. */
+export type AuraKind = "ember" | "crystal";
+
 export interface CharacterItem {
   id: string;
   kind: "character";
@@ -33,6 +38,9 @@ export interface CharacterItem {
   rarity: "starter" | "rare" | "epic" | "legendary";
   /** Free starters are owned by everyone; paid ones will check user_items. */
   free: boolean;
+  /** Legendary effect variant. Lives here rather than in the client so a new
+   *  character's look is data, not a branch in the render code. */
+  aura?: AuraKind;
 }
 
 export interface EmoteItem {
@@ -56,8 +64,14 @@ export type CatalogItem = CharacterItem | EmoteItem;
 const CHARACTERS: CharacterItem[] = [
   { id: "male", kind: "character", name: "Ranger", key: "characters/male/v1/model.glb", rarity: "starter", free: true },
   { id: "female", kind: "character", name: "Vanguard", key: "characters/female/v1/model.glb", rarity: "starter", free: true },
-  { id: "zenith", kind: "character", name: "Zenith", key: "characters/zenith/v1/model.glb", rarity: "legendary", free: true },
-  { id: "seraph", kind: "character", name: "Seraph", key: "characters/seraph/v1/model.glb", rarity: "legendary", free: true },
+  { id: "zenith", kind: "character", name: "Zenith", key: "characters/zenith/v1/model.glb", rarity: "legendary", free: true, aura: "ember" },
+  // v6 carries the emissive mask that makes the garment itself glow: the chest
+  // and back prisms, the wrist and boot crystals, the blue crown horns, and the
+  // gold veins that veinFlow.ts runs a pulse down. Earlier versions are the same
+  // mesh with less of that mask and stay published — /vN/ is immutable and
+  // cached for a year, so nothing is reclaimed by pointing away from them, and
+  // a client that fetched the catalog before this edit still wants the old one.
+  { id: "seraph", kind: "character", name: "Seraph", key: "characters/seraph/v6/model.glb", rarity: "legendary", free: true, aura: "crystal" },
 ];
 
 const EMOTES: EmoteItem[] = [

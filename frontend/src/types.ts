@@ -32,11 +32,17 @@ export interface LobbyMember extends User {
  *  server-side from CDN_BASE_URL; null means the CDN isn't configured, and the
  *  lobby falls back to its built-in placeholder character.
  * ------------------------------------------------------------------------- */
+/** Which legendary effect a character wears. Only meaningful at `legendary`
+ *  rarity; absent means "ember". */
+export type AuraKind = "ember" | "crystal";
+
 export interface CatalogCharacter {
   id: string;
   kind: "character";
   name: string;
   rarity: "starter" | "rare" | "epic" | "legendary";
+  /** Chosen server-side so a new character's look is data, not a client branch. */
+  aura?: AuraKind;
   url: string | null;
   owned: boolean;
 }

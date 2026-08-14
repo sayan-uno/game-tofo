@@ -27,9 +27,9 @@ import type { Mesh } from "@babylonjs/core/Meshes/mesh";
 import { AdvancedDynamicTexture } from "@babylonjs/gui/2D/advancedDynamicTexture";
 import { TextBlock } from "@babylonjs/gui/2D/controls/textBlock";
 import { Rectangle } from "@babylonjs/gui/2D/controls/rectangle";
-import { getCharacter, getLobbyIdleClip, hasAssets } from "./assets";
+import { getLobbyIdleClip, hasAssets } from "./assets";
 import type { CharacterRig } from "./characterRig";
-import type { LegendaryAura } from "./legendaryAura";
+import { attachAura, type Aura } from "./aura";
 import type { LobbyMember } from "../types";
 
 // Fixed pedestal positions for up to 4 lobby members, local player centered.
@@ -97,7 +97,7 @@ interface CharacterInstance {
    *  the CDN is unreachable — in which case the fallback body is built. */
   rig: CharacterRig | null;
   /** Only present on characters the catalog marks legendary. */
-  aura: LegendaryAura | null;
+  aura: Aura | null;
   /** Rises on every character change; a load that finishes after a newer one
    *  started sees a stale token and throws its result away. */
   loadToken: number;
@@ -312,13 +312,11 @@ export class LobbyScene {
 
     if (idle) await rig.play(idle, { loop: true });
 
-    if (getCharacter(characterId)?.rarity === "legendary") {
-      // Separate chunk: nobody who never stands next to a legendary pays for it.
-      const { LegendaryAura } = await import("./legendaryAura");
-      if (mine === character.loadToken) {
-        character.aura = LegendaryAura.attach(rig, this.scene);
-      }
-    }
+    // Separate chunk per effect: nobody who never stands next to a legendary
+    // pays for one, and seeing Seraph does not download Zenith's.
+    const aura = await attachAura(characterId, rig, this.scene);
+    if (mine === character.loadToken) character.aura = aura;
+    else aura?.dispose(); // a newer load won the race
   }
 
   /** Empty the bobbing root (any stand-in body) and park the bob at zero. */

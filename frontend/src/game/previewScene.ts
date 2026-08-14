@@ -18,15 +18,16 @@ import { Viewport } from "@babylonjs/core/Maths/math.viewport";
 import { Color3, Color4 } from "@babylonjs/core/Maths/math.color";
 import { MeshBuilder } from "@babylonjs/core/Meshes/meshBuilder";
 import { StandardMaterial } from "@babylonjs/core/Materials/standardMaterial";
-import { getCharacter, getEmote } from "./assets";
+import { GlowLayer } from "@babylonjs/core/Layers/glowLayer";
+import { getEmote } from "./assets";
 import { CharacterRig } from "./characterRig";
-import type { LegendaryAura } from "./legendaryAura";
+import { attachAura, type Aura } from "./aura";
 
 export class PreviewScene {
   readonly scene: Scene;
   private camera: ArcRotateCamera;
   private rig: CharacterRig | null = null;
-  private aura: LegendaryAura | null = null;
+  private aura: Aura | null = null;
   private characterId: string | null = null;
   /** Guards against a slow load landing after the player picked something
    *  else — without it, tapping two characters quickly can leave the loser
@@ -82,6 +83,19 @@ export class PreviewScene {
     ringMat.disableLighting = true;
     ring.material = ringMat;
     ring.freezeWorldMatrix();
+
+    // The lobby has one of these, so without it a character's emissive work —
+    // Seraph's chest prism, the crystal along the coat — renders flat here and
+    // glowing in the lobby, which reads as the collection being the broken one.
+    // Quarter-res, and only ever running while the collection page is open.
+    //
+    // The pad and ring are excluded on purpose: they are flat emissive
+    // decoration authored to sit BEHIND the character, and blooming them
+    // washes a bright red haze up over its legs.
+    const glow = new GlowLayer("previewGlow", this.scene, { mainTextureRatio: 0.25 });
+    glow.intensity = 0.9;
+    glow.addExcludedMesh(pad);
+    glow.addExcludedMesh(ring);
   }
 
   /** Aim the camera at exactly the screen box the page left transparent for it.
@@ -120,10 +134,9 @@ export class PreviewScene {
     rig.root.rotation.y = Math.PI; // face the camera, same as the lobby
     await rig.play(this.idleClip, { loop: true });
 
-    if (getCharacter(id)?.rarity === "legendary") {
-      const { LegendaryAura } = await import("./legendaryAura");
-      if (mine === this.token) this.aura = LegendaryAura.attach(rig, this.scene);
-    }
+    const aura = await attachAura(id, rig, this.scene);
+    if (mine === this.token) this.aura = aura;
+    else aura?.dispose(); // a newer pick won the race
     return true;
   }
 
