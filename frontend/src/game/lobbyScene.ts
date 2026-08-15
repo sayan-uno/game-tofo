@@ -1,19 +1,34 @@
-// The Free Fire-style lobby scene.
+// The TOFO lobby: painted backdrop art, one fixed camera, characters you spin.
+//
+// The scene is deliberately composed like a POSTER rather than a room you fly
+// around in. The backdrop is a single full-screen image drawn behind
+// everything, the camera never moves, and the only thing a drag can touch is
+// the character it started on. That buys three things at once: the framing can
+// never be broken by the player, the painted art and the 3D characters always
+// share one perspective, and the whole environment costs a single textured
+// quad instead of a room full of geometry.
+//
 // Performance notes baked in:
 //  - tree-shaken imports (only what we use ships in the bundle)
-//  - static meshes get frozen world matrices, materials get frozen after setup
-//  - pointer-move picking disabled (big win on mobile)
-//  - one fullscreen GUI texture for all name plates, linked to static meshes
-//    (pedestals) so idle-animation frames never force a GUI repaint
+//  - one full-screen quad for the entire environment; no walls, no ground mesh
+//  - a fixed camera means no per-frame camera matrix churn and, more usefully,
+//    GUI plates linked to static meshes never re-project, so the fullscreen GUI
+//    texture is painted on member changes only — never per frame
+//  - picking is one ray against ONE invisible box per member (4 max) rather
+//    than against skinned character meshes, so a tap costs microseconds
+//  - pointer-move picking disabled entirely
 import { Scene } from "@babylonjs/core/scene";
 import type { Engine } from "@babylonjs/core/Engines/engine";
-import { ArcRotateCamera } from "@babylonjs/core/Cameras/arcRotateCamera";
+import { TargetCamera } from "@babylonjs/core/Cameras/targetCamera";
 import { HemisphericLight } from "@babylonjs/core/Lights/hemisphericLight";
 import { DirectionalLight } from "@babylonjs/core/Lights/directionalLight";
 import { Vector3 } from "@babylonjs/core/Maths/math.vector";
 import { Color3, Color4 } from "@babylonjs/core/Maths/math.color";
 import { MeshBuilder } from "@babylonjs/core/Meshes/meshBuilder";
 import { StandardMaterial } from "@babylonjs/core/Materials/standardMaterial";
+import { DynamicTexture } from "@babylonjs/core/Materials/Textures/dynamicTexture";
+import { Texture } from "@babylonjs/core/Materials/Textures/texture";
+import { Layer } from "@babylonjs/core/Layers/layer";
 import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
 import { GlowLayer } from "@babylonjs/core/Layers/glowLayer";
 import "@babylonjs/core/Layers/effectLayerSceneComponent";
@@ -22,24 +37,49 @@ import { PointerEventTypes } from "@babylonjs/core/Events/pointerEvents";
 // tree-shaken builds get a stub that always returns an empty PickingInfo,
 // so character taps silently hit nothing.
 import "@babylonjs/core/Culling/ray";
-import type { Node } from "@babylonjs/core/node";
+import type { AbstractMesh } from "@babylonjs/core/Meshes/abstractMesh";
+import type { IPointerEvent } from "@babylonjs/core/Events/deviceInputEvents";
 import type { Mesh } from "@babylonjs/core/Meshes/mesh";
 import { AdvancedDynamicTexture } from "@babylonjs/gui/2D/advancedDynamicTexture";
 import { TextBlock } from "@babylonjs/gui/2D/controls/textBlock";
 import { Rectangle } from "@babylonjs/gui/2D/controls/rectangle";
-import { getStanceClip, hasAssets } from "./assets";
+import { CHARACTER_HEIGHT, getStanceClip, hasAssets } from "./assets";
 import type { CharacterRig } from "./characterRig";
 import { attachAura, type Aura } from "./aura";
 import type { HeldWeapon } from "./weapon";
 import type { LobbyMember } from "../types";
 
-// Fixed pedestal positions for up to 4 lobby members, local player centered.
-const SLOTS: [number, number][] = [
-  [0, 0],
-  [-2.4, -0.6],
-  [2.4, -0.6],
-  [-4.6, -1.4],
-];
+/** Painted stage art, served from our own origin (179 kB WebP). */
+const BACKDROP_URL = "/lobby-bg.webp";
+/** Aspect the art was authored at — the cover-fit maths needs it. */
+const BACKDROP_ASPECT = 1536 / 1024;
+/** Zoom applied on top of cover-fit, so the slow drift below always has art to
+ *  drift INTO and can never expose an edge. */
+const BACKDROP_OVERSCAN = 1.035;
+
+/** Camera. Level (no downward pitch) on purpose: the backdrop is a photograph
+ *  of a level camera — its horizon sits on the frame's centre line — and a
+ *  tilted 3D camera would put the characters on a floor that visibly disagrees
+ *  with the painted one. Everything else about the framing is derived, not
+ *  guessed: see frameCamera(). */
+const CAM_HEIGHT = 1.15;
+const CAM_FOV = 0.78;
+/** Where the characters' feet should land, as a fraction of screen height.
+ *  This is the whole composition in one number — it decides how far back the
+ *  camera stands, and therefore how big the squad reads. */
+const FEET_AT = 0.81;
+
+/** A full screen-width drag turns a character one and a half times round. */
+const SPIN_PER_DRAG = Math.PI * 3;
+const TWO_PI = Math.PI * 2;
+/** Cap on the release glide, so a violent flick can't leave a character
+ *  spinning like a top. */
+const SPIN_MAX = 13;
+
+const ACCENT = "#e5182e"; // brand crimson
+const ACCENT_LEADER = "#ffd45e";
+const PAD_TINT = new Color3(0.92, 0.1, 0.19);
+const PAD_TINT_LEADER = new Color3(1.0, 0.74, 0.26);
 
 // Shared 2D context for name-plate text measurement — a few µs per member
 // change, never per frame. (A DOM-style scrolling reveal is out here on
@@ -63,26 +103,89 @@ function fitPlateFontSize(text: string): number {
 
 /** Name line of the base plate: leader gets the star and the gold. Reused
  *  in place when leadership moves so the plate never gets rebuilt. */
-function applyNameStyle(label: TextBlock, member: LobbyMember) {
+function applyNameStyle(plate: Rectangle, label: TextBlock, member: LobbyMember) {
   const text = `${member.name}${member.isLeader ? " ★" : ""}`;
   label.text = text;
   label.fontSize = fitPlateFontSize(text);
-  label.color = member.isLeader ? "#ffd45e" : "#f2f5ff";
+  label.color = member.isLeader ? ACCENT_LEADER : "#f2f5ff";
+  plate.color = member.isLeader ? ACCENT_LEADER : ACCENT;
 }
 
-function colorFromUid(uid: string): Color3 {
-  let hash = 0;
-  for (let i = 0; i < uid.length; i++) hash = (hash * 31 + uid.charCodeAt(i)) >>> 0;
-  const hue = (hash % 360) / 360;
-  return Color3.FromHSV(hue * 360, 0.65, 0.9);
+/** Where each member stands, for a squad of `count`.
+ *
+ *  Returned centre-out — index 0 is the middle-most spot — because the caller
+ *  hands out slots in that order and the local player is always first. The
+ *  squad therefore opens outwards around you as people join rather than
+ *  shuffling you sideways into a queue.
+ *
+ *  The z stagger is what stops four characters reading as a flat cut-out row:
+ *  the outer ones stand slightly further back, so the group curves away from
+ *  the camera the way a lobby line-up does. */
+function layoutFor(count: number): [number, number][] {
+  const n = Math.min(Math.max(count, 1), 4);
+  const spacing = n >= 4 ? 1.78 : n === 3 ? 1.95 : 2.15;
+  const xs: number[] = [];
+  for (let i = 0; i < n; i++) xs.push((i - (n - 1) / 2) * spacing);
+  return xs
+    .map((x, i) => ({ x, i }))
+    .sort((a, b) => Math.abs(a.x) - Math.abs(b.x) || a.x - b.x)
+    .map(({ x }): [number, number] => [x, 0.12 * Math.abs(x) - 0.05]);
 }
+
+/** The light pool + contact shadow under a character, drawn once and shared by
+ *  every slot.
+ *
+ *  White where the slot's accent colour should come through, BLACK in the
+ *  middle: the material tints by multiplying, and anything times black stays
+ *  black, so the contact shadow reads as a shadow whether the character is
+ *  standing on a crimson pad or a leader's gold one. One texture, two
+ *  materials, no per-member allocation. */
+function createPadTexture(scene: Scene): DynamicTexture {
+  const size = 256;
+  const tex = new DynamicTexture("padTex", { width: size, height: size }, scene, false);
+  const ctx = tex.getContext();
+  const r = size / 2;
+  const grad = ctx.createRadialGradient(r, r, 0, r, r, r);
+  grad.addColorStop(0.0, "rgba(0,0,0,0.66)"); // feet: contact shadow
+  grad.addColorStop(0.34, "rgba(0,0,0,0.42)");
+  grad.addColorStop(0.54, "rgba(70,70,70,0.2)");
+  grad.addColorStop(0.74, "rgba(255,255,255,0.4)"); // light pool
+  grad.addColorStop(0.84, "rgba(255,255,255,0.72)"); // rim
+  grad.addColorStop(0.91, "rgba(255,255,255,0.26)");
+  grad.addColorStop(1.0, "rgba(255,255,255,0)");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, size, size);
+  tex.update(false);
+  tex.hasAlpha = true;
+  return tex;
+}
+
+/** Only the invisible per-member hit boxes are pickable, and they are boxes, so
+ *  a tap costs a handful of ray/AABB tests — never a triangle sweep over a
+ *  skinned character. Replaces Babylon's default predicate, which also demands
+ *  isVisible and so would skip the hit boxes entirely. */
+const isHitBox = (mesh: AbstractMesh): boolean =>
+  mesh.isPickable && mesh.isEnabled() && (mesh.metadata as { hit?: boolean } | null)?.hit === true;
+
+const uidOfPick = (mesh: AbstractMesh | null | undefined): string | null =>
+  (mesh?.metadata as { memberUid?: string } | null)?.memberUid ?? null;
 
 interface CharacterInstance {
-  /** Fixed slot node — parent of everything, including the pedestal disc. */
+  /** Fixed slot node — parent of everything, including the pedestal pad. */
   anchor: TransformNode;
+  /** Turntable between the anchor and the character: a drag writes here, so
+   *  the pad, the plate link and the chat bubble anchor never move with it. */
+  spinner: TransformNode;
   /** Animated (bobbing) child. Holds the primitive fallback body when one is
-   *  needed; real models hang off the anchor and bob via their own idle clip. */
+   *  needed; real models hang off the spinner and bob via their own idle clip. */
   root: TransformNode;
+  /** Glowing floor pad. The plate hangs off it and it is what seats the
+   *  character on the painted floor. */
+  pad: Mesh;
+  /** Invisible box the pointer actually hits — see isHitBox. */
+  hit: Mesh;
+  /** The plate frame, restyled in place when leadership moves. */
+  plate: Rectangle;
   /** Name line of the base plate — updated in place when leadership moves. */
   label: TextBlock;
   /** Free Fire-style chat bubble over the head; hidden until a team message. */
@@ -92,6 +195,15 @@ interface CharacterInstance {
   isLeader: boolean;
   disposables: { dispose: () => void }[];
   uid: string;
+  /** Slot this member is walking to — the anchor eases towards it, so a join
+   *  or a leave opens the line-up instead of teleporting everyone. */
+  slotX: number;
+  slotZ: number;
+  /** Turntable angle, and the glide left over after a flick. */
+  spin: number;
+  spinVel: number;
+  /** Rotation applied since the last frame, used to measure release speed. */
+  spinPending: number;
   /** Catalog id currently shown, so an equip elsewhere swaps just this model. */
   characterId: string;
   /** Weapon catalog id currently shown, null for empty-handed. */
@@ -117,161 +229,352 @@ interface CharacterInstance {
 
 export class LobbyScene {
   readonly scene: Scene;
+  private camera: TargetCamera;
+  private backdrop: Layer;
+  private glow: GlowLayer;
   private gui: AdvancedDynamicTexture;
+  private padTexture!: DynamicTexture;
+  private padMat!: StandardMaterial;
+  private padMatLeader!: StandardMaterial;
   private characters = new Map<string, CharacterInstance>();
   private localUid: string;
   private time = 0;
+  /** How far the widest member stands from the middle — the camera pulls back
+   *  to fit it. */
+  private spread = 0;
+  /** How much room the backdrop's overscan leaves for the drift, in NDC. */
+  private driftRoom = 0;
+  /** Drawing surface the current framing was computed for — see refit(). */
+  private viewWidth = 0;
+  private viewHeight = 0;
+  /** The character being turned, and the pointer turning it. */
+  private drag: { uid: string; pointerId: number; lastX: number } | null = null;
+  private onCaptureLost: (() => void) | null = null;
 
   constructor(engine: Engine, localUid: string, onMemberTap?: (uid: string) => void) {
     this.localUid = localUid;
     this.scene = new Scene(engine);
     const scene = this.scene;
 
-    scene.clearColor = new Color4(0.02, 0.03, 0.07, 1);
+    scene.clearColor = new Color4(0.02, 0.01, 0.02, 1);
     scene.skipPointerMovePicking = true; // no hover picking needed in the lobby
+    // Both pointer picks the input manager runs for us are narrowed to the hit
+    // boxes, so POINTERDOWN (start a turn) and POINTERTAP (open a card) both
+    // land on the member without a second raycast of our own.
+    scene.pointerDownPredicate = isHitBox;
+    scene.pointerUpPredicate = isHitBox;
 
-    // Tap a character → report which member was tapped (one raycast per tap,
-    // never per frame; camera drags don't count as taps). The picked mesh's
-    // ancestor chain carries the member uid in its metadata.
-    if (onMemberTap) {
-      scene.onPointerObservable.add((pointerInfo) => {
-        if (pointerInfo.type !== PointerEventTypes.POINTERTAP) return;
-        let node: Node | null = pointerInfo.pickInfo?.pickedMesh ?? null;
-        while (node) {
-          const uid = (node.metadata as { memberUid?: string } | null)?.memberUid;
-          if (uid) {
-            onMemberTap(uid);
-            return;
-          }
-          node = node.parent;
-        }
-      });
+    // Camera: fixed. No attachControl anywhere — the lobby is a composed shot,
+    // and letting it orbit is what made the old one feel like a level editor.
+    this.camera = new TargetCamera("cam", new Vector3(0, CAM_HEIGHT, -5), scene);
+    this.camera.fov = CAM_FOV;
+    this.camera.minZ = 0.6;
+    this.camera.maxZ = 60;
+    this.camera.setTarget(new Vector3(0, CAM_HEIGHT, 0));
+
+    // The environment, in one draw call.
+    this.backdrop = new Layer("backdrop", BACKDROP_URL, scene, true);
+    if (this.backdrop.texture) {
+      this.backdrop.texture.wrapU = Texture.CLAMP_ADDRESSMODE;
+      this.backdrop.texture.wrapV = Texture.CLAMP_ADDRESSMODE;
+      this.backdrop.texture.anisotropicFilteringLevel = 1; // no mips on a layer
     }
 
-    // Camera: gentle framing like a lobby showcase; user can rotate a little.
-    const camera = new ArcRotateCamera("cam", -Math.PI / 2, 1.25, 9, new Vector3(0, 1.2, 0), scene);
-    camera.attachControl(engine.getRenderingCanvas(), true);
-    camera.lowerRadiusLimit = 6;
-    camera.upperRadiusLimit = 13;
-    camera.lowerBetaLimit = 1.0;
-    camera.upperBetaLimit = 1.45;
-    camera.wheelPrecision = 40;
-    camera.pinchPrecision = 120;
-    camera.panningSensibility = 0; // no panning — keeps the scene framed
-
-    // Lighting: one hemispheric + one directional. Cheap and looks clean.
+    // Lighting matched to the backdrop AND to the collection preview, so a
+    // character never looks like two different characters in the two places:
+    // a soft cool fill, a warm key from the front left, and a crimson rim from
+    // behind that lifts them off the painted arena.
     const hemi = new HemisphericLight("hemi", new Vector3(0, 1, 0), scene);
-    hemi.intensity = 0.55;
-    hemi.groundColor = new Color3(0.05, 0.08, 0.2);
-    const dir = new DirectionalLight("dir", new Vector3(-0.4, -1, 0.6), scene);
-    dir.position = new Vector3(6, 12, -8);
-    dir.intensity = 0.9;
+    hemi.intensity = 0.6;
+    hemi.groundColor = new Color3(0.16, 0.05, 0.07);
+    const key = new DirectionalLight("key", new Vector3(-0.45, -1, 0.55), scene);
+    key.position = new Vector3(5, 9, -6);
+    key.intensity = 1.05;
+    const rim = new DirectionalLight("rim", new Vector3(0.55, -0.25, -0.85), scene);
+    rim.diffuse = new Color3(1, 0.28, 0.36);
+    rim.intensity = 0.75;
 
     // Subtle glow for the neon accents (low cost with small kernel).
-    const glow = new GlowLayer("glow", scene, { mainTextureRatio: 0.25 });
-    glow.intensity = 0.6;
+    this.glow = new GlowLayer("glow", scene, { mainTextureRatio: 0.25 });
+    this.glow.intensity = 0.6;
 
-    this.buildEnvironment();
+    this.buildStage();
 
     this.gui = AdvancedDynamicTexture.CreateFullscreenUI("ui", true, scene);
     this.gui.renderScale = 1;
 
-    // Idle "breathing" for FALLBACK bodies only — one observer for all.
-    // A loaded character animates through its own idle clip; bobbing it too
-    // would fight that clip and read as a jitter, so rigged slots are skipped.
+    this.installPointer(engine, onMemberTap);
+
     scene.onBeforeRenderObservable.add(() => {
-      this.time += engine.getDeltaTime() / 1000;
-      let i = 0;
-      for (const character of this.characters.values()) {
-        if (!character.rig) character.root.position.y = Math.sin(this.time * 1.6 + i * 1.3) * 0.04;
-        i++;
-      }
+      const dt = Math.min(engine.getDeltaTime(), 100) / 1000;
+      this.time += dt;
+      this.refit(engine);
+      this.driftBackdrop();
+      this.stepCharacters(dt);
     });
   }
 
-  private buildEnvironment() {
+  /** Everything static in the scene: the shared floor-pad art and the two
+   *  materials that tint it. The backdrop already IS the environment, so
+   *  there is no ground, no walls and no props to build. */
+  private buildStage() {
     const scene = this.scene;
+    this.padTexture = createPadTexture(scene);
 
-    // Floor
-    const ground = MeshBuilder.CreateDisc("ground", { radius: 14, tessellation: 48 }, scene);
-    ground.isPickable = false; // only characters need tap-picking
-    ground.rotation.x = Math.PI / 2;
-    const groundMat = new StandardMaterial("groundMat", scene);
-    groundMat.diffuseColor = new Color3(0.05, 0.07, 0.13);
-    groundMat.specularColor = new Color3(0.02, 0.02, 0.04);
-    ground.material = groundMat;
+    const makePadMat = (name: string, tint: Color3) => {
+      const mat = new StandardMaterial(name, scene);
+      mat.diffuseTexture = this.padTexture;
+      mat.useAlphaFromDiffuseTexture = true;
+      mat.diffuseColor = new Color3(0, 0, 0); // colour comes from emissive only
+      mat.specularColor = new Color3(0, 0, 0);
+      mat.emissiveColor = tint;
+      mat.disableLighting = true;
+      mat.backFaceCulling = false;
+      return mat;
+    };
+    this.padMat = makePadMat("padMat", PAD_TINT);
+    this.padMatLeader = makePadMat("padMatLeader", PAD_TINT_LEADER);
 
-    // Neon ring accent around the stage
-    const ring = MeshBuilder.CreateTorus("ring", { diameter: 12, thickness: 0.06, tessellation: 64 }, scene);
-    ring.isPickable = false;
-    ring.position.y = 0.02;
-    const ringMat = new StandardMaterial("ringMat", scene);
-    ringMat.emissiveColor = new Color3(0.1, 0.6, 1.0);
-    ringMat.disableLighting = true;
-    ring.material = ringMat;
-
-    // Back wall panels for depth
-    const panelMat = new StandardMaterial("panelMat", scene);
-    panelMat.diffuseColor = new Color3(0.04, 0.05, 0.1);
-    panelMat.emissiveColor = new Color3(0.01, 0.02, 0.05);
-    const basePanel = MeshBuilder.CreateBox("panel0", { width: 2.2, height: 6, depth: 0.3 }, scene);
-    basePanel.isPickable = false;
-    basePanel.material = panelMat;
-    basePanel.position.set(0, 3, 8);
-    for (let i = 1; i < 7; i++) {
-      // Instances share geometry+material: 7 panels ≈ cost of 1 draw call
-      const inst = basePanel.createInstance(`panel${i}`);
-      inst.isPickable = false;
-      const angle = (i - 3) * 0.28;
-      inst.position.set(Math.sin(angle) * 11, 3, Math.cos(angle) * 8 + 1);
-      inst.rotation.y = -angle;
-      inst.freezeWorldMatrix();
-    }
-
-    // Everything above is static — freeze it all.
-    ground.freezeWorldMatrix();
-    ring.freezeWorldMatrix();
-    basePanel.freezeWorldMatrix();
     scene.freezeMaterials();
+  }
+
+  /** Re-fit the shot whenever the drawing surface changes size.
+   *
+   *  Two integer compares per frame, and in exchange the framing can never get
+   *  stuck: a resize event that arrives before the browser has laid the canvas
+   *  out, an orientation lock, entering fullscreen from the entry gate, the
+   *  mobile keyboard resizing the visual viewport — all of them land here the
+   *  frame after the engine's own size actually changes, which is exactly when
+   *  the composition has to be recomputed and never otherwise. */
+  private refit(engine: Engine) {
+    const width = engine.getRenderWidth();
+    const height = engine.getRenderHeight();
+    if (width === this.viewWidth && height === this.viewHeight) return;
+    this.viewWidth = width;
+    this.viewHeight = height;
+    this.fitBackdrop();
+    this.frameCamera();
+  }
+
+  /** Cover-fit the backdrop, the way `background-size: cover` would.
+   *
+   *  A Layer stretches its texture across the whole canvas, which distorts the
+   *  art on any screen that isn't the aspect it was painted at — and phones in
+   *  landscape are nowhere near it. Layer.scale grows the QUAD (the shader
+   *  shifts gl_Position and derives the UV from it), so scaling the squeezed
+   *  axis past the screen restores the art's own aspect and crops the overflow
+   *  instead of stretching it. Runs on resize only. */
+  private fitBackdrop() {
+    const engine = this.scene.getEngine();
+    const aspect = engine.getRenderWidth() / Math.max(engine.getRenderHeight(), 1);
+    let x = BACKDROP_OVERSCAN;
+    let y = BACKDROP_OVERSCAN;
+    if (aspect > BACKDROP_ASPECT) y *= aspect / BACKDROP_ASPECT;
+    else x *= BACKDROP_ASPECT / aspect;
+    this.backdrop.scale.set(x, y);
+    this.driftRoom = Math.min(x, y) - 1;
+  }
+
+  /** A drift slow enough to read as depth rather than movement — a full cycle
+   *  takes about two minutes and never travels further than the overscan the
+   *  fit above reserved for it. Two float writes per frame. */
+  private driftBackdrop() {
+    const room = this.driftRoom;
+    if (room <= 0) return;
+    this.backdrop.offset.set(
+      Math.sin(this.time * 0.055) * room * 0.55,
+      Math.sin(this.time * 0.037 + 1.1) * room * 0.35
+    );
+  }
+
+  /** Stand the camera where the whole squad fits with their feet at FEET_AT.
+   *
+   *  Derived rather than hand-tuned, because with a fixed camera the framing
+   *  has to survive every screen the game runs on: a phone in landscape is
+   *  more than twice as wide as it is tall, a desktop window can be nearly
+   *  square, and the player has no zoom to rescue a bad guess. The distance
+   *  that satisfies the vertical composition and the one that keeps the
+   *  outermost character on screen are both computed; the larger wins. */
+  private frameCamera() {
+    const engine = this.scene.getEngine();
+    const aspect = engine.getRenderWidth() / Math.max(engine.getRenderHeight(), 1);
+    const tanV = Math.tan(CAM_FOV / 2);
+    // Feet at FEET_AT of the screen: a point on the floor at distance d sits
+    // (CAM_HEIGHT / d) / tanV below the centre line, in half-heights.
+    const forHeight = CAM_HEIGHT / ((2 * FEET_AT - 1) * tanV);
+    // Outermost character, plus a body's width of margin, inside 92% of the
+    // half-width — the rest is breathing room and HUD.
+    const forWidth = (this.spread + 0.85) / (0.92 * tanV * aspect);
+    const distance = Math.min(Math.max(Math.max(forHeight, forWidth), 3.2), 16);
+    this.camera.position.set(0, CAM_HEIGHT, -distance);
+    this.camera.setTarget(new Vector3(0, CAM_HEIGHT, 0));
+  }
+
+  /** Turning a character, and everything else that has to move between frames.
+   *  One loop over at most four members. */
+  private stepCharacters(dt: number) {
+    let i = 0;
+    for (const character of this.characters.values()) {
+      // Walk to the slot the current squad size gives them.
+      const dx = character.slotX - character.anchor.position.x;
+      const dz = character.slotZ - character.anchor.position.z;
+      if (dx * dx + dz * dz > 1e-6) {
+        const step = 1 - Math.exp(-dt * 9);
+        character.anchor.position.x += dx * step;
+        character.anchor.position.z += dz * step;
+      }
+
+      if (this.drag?.uid === character.uid) {
+        // Measure the release speed while the finger is still down, smoothed
+        // so one stuttering frame can't turn a slow drag into a flick.
+        const sample = character.spinPending / Math.max(dt, 0.004);
+        character.spinVel = character.spinVel * 0.65 + sample * 0.35;
+        character.spinPending = 0;
+      } else if (character.spinVel !== 0) {
+        character.spin = (character.spin + character.spinVel * dt) % TWO_PI;
+        character.spinner.rotation.y = character.spin;
+        character.spinVel *= Math.exp(-dt * 6.5);
+        if (Math.abs(character.spinVel) < 0.05) character.spinVel = 0;
+      }
+
+      // Idle "breathing" for FALLBACK bodies only. A loaded character animates
+      // through its own idle clip; bobbing it too would fight that clip and
+      // read as a jitter, so rigged slots are skipped.
+      if (!character.rig) character.root.position.y = Math.sin(this.time * 1.6 + i * 1.3) * 0.04;
+      i++;
+    }
+  }
+
+  /** Drag a character to turn it; tap one to open their card.
+   *
+   *  Babylon only reports a TAP when the pointer stayed inside its drag
+   *  threshold, so the two gestures can share one pointer without a mode
+   *  switch: a turn never opens a card, and a card never eats a turn. */
+  private installPointer(engine: Engine, onMemberTap?: (uid: string) => void) {
+    const canvas = engine.getRenderingCanvas();
+
+    this.scene.onPointerObservable.add((info) => {
+      const event = info.event as IPointerEvent;
+      switch (info.type) {
+        case PointerEventTypes.POINTERDOWN: {
+          const uid = uidOfPick(info.pickInfo?.pickedMesh);
+          const character = uid ? this.characters.get(uid) : null;
+          if (!character) return;
+          character.spinVel = 0; // grabbing a gliding character stops it dead
+          character.spinPending = 0;
+          this.drag = { uid: character.uid, pointerId: event.pointerId, lastX: event.clientX };
+          // Capture, so a finger that slides off the canvas still delivers its
+          // move and up events here instead of stranding the drag.
+          try {
+            canvas?.setPointerCapture(event.pointerId);
+          } catch {
+            /* pointer already gone — the drag simply ends at the next up */
+          }
+          if (canvas) canvas.style.cursor = "grabbing";
+          return;
+        }
+        case PointerEventTypes.POINTERMOVE: {
+          const drag = this.drag;
+          if (!drag || event.pointerId !== drag.pointerId) return;
+          const character = this.characters.get(drag.uid);
+          if (!character) {
+            this.endDrag();
+            return;
+          }
+          const moved = event.clientX - drag.lastX;
+          if (moved === 0) return;
+          drag.lastX = event.clientX;
+          const turn = (moved / (canvas?.clientWidth || 1)) * SPIN_PER_DRAG;
+          character.spin = (character.spin + turn) % TWO_PI;
+          character.spinner.rotation.y = character.spin;
+          character.spinPending += turn;
+          return;
+        }
+        case PointerEventTypes.POINTERUP: {
+          if (this.drag && event.pointerId === this.drag.pointerId) {
+            const character = this.characters.get(this.drag.uid);
+            if (character) {
+              character.spinVel = Math.max(-SPIN_MAX, Math.min(SPIN_MAX, character.spinVel));
+            }
+            this.endDrag();
+          }
+          return;
+        }
+        case PointerEventTypes.POINTERTAP: {
+          if (!onMemberTap) return;
+          const uid = uidOfPick(info.pickInfo?.pickedMesh);
+          if (uid) onMemberTap(uid);
+          return;
+        }
+      }
+    });
+
+    // A cancelled gesture (system swipe, alt-tab mid-drag) never sends an up.
+    // Losing the capture is the one signal that always arrives.
+    if (canvas) {
+      this.onCaptureLost = () => this.endDrag();
+      canvas.addEventListener("lostpointercapture", this.onCaptureLost);
+    }
+  }
+
+  private endDrag() {
+    const drag = this.drag;
+    this.drag = null;
+    const canvas = this.scene.getEngine().getRenderingCanvas();
+    if (!canvas) return;
+    canvas.style.cursor = "";
+    if (drag && canvas.hasPointerCapture(drag.pointerId)) canvas.releasePointerCapture(drag.pointerId);
   }
 
   /** Rebuild the characters to match the lobby member list. */
   setMembers(members: LobbyMember[]) {
-    // Local player always takes the center slot.
+    // Local player always takes the centre slot.
     const ordered = [...members].sort((a, b) =>
       a.uid === this.localUid ? -1 : b.uid === this.localUid ? 1 : a.uid.localeCompare(b.uid)
     );
 
     // Remove characters that left. Disposing the anchor takes the whole
-    // hierarchy with it — body, name plate link AND the pedestal disc, which
+    // hierarchy with it — body, name plate link AND the floor pad, which
     // used to linger as a bare white plate when only the root was disposed.
     const keep = new Set(ordered.map((m) => m.uid));
     for (const [uid, character] of this.characters) {
       if (!keep.has(uid)) {
+        if (this.drag?.uid === uid) this.endDrag();
         clearTimeout(character.bubbleTimer);
         character.loadToken++; // strand any load still in flight for this slot
         character.weaponToken++;
         character.weapon?.dispose();
         character.aura?.dispose();
         character.rig?.dispose();
+        // The glow layer holds excluded meshes by id and never drops them by
+        // itself, and it walks that list per glowing mesh per frame — so a
+        // session with a lot of coming and going would pay a little more every
+        // time somebody left.
+        this.glow.removeExcludedMesh(character.pad);
         character.anchor.dispose();
         character.disposables.forEach((d) => d.dispose());
         this.characters.delete(uid);
       }
     }
 
+    const slots = layoutFor(ordered.length);
+    this.spread = Math.max(...slots.map(([x]) => Math.abs(x)));
+
     ordered.forEach((member, index) => {
-      const [x, z] = SLOTS[index] ?? [0, 0];
+      const [x, z] = slots[index] ?? [0, 0];
       const existing = this.characters.get(member.uid);
       if (existing) {
-        existing.anchor.position.set(x, 0, z);
+        existing.slotX = x;
+        existing.slotZ = z;
         if (existing.isLeader !== member.isLeader) {
-          // Leadership moved (transfer / old leader left) — restar the plate.
+          // Leadership moved (transfer / old leader left) — restyle the plate
+          // and the pad rather than rebuilding either.
           existing.isLeader = member.isLeader;
-          applyNameStyle(existing.label, member);
+          applyNameStyle(existing.plate, existing.label, member);
+          existing.pad.material = member.isLeader ? this.padMatLeader : this.padMat;
         }
         // Someone equipped a different character — swap just that model, keep
-        // the pedestal, plate and any bubble exactly as they are. The weapon
+        // the pad, plate and any bubble exactly as they are. The weapon
         // rides along: attachModel re-hangs it on the new rig, since the old
         // one it was following is about to be disposed.
         if (existing.characterId !== member.character) {
@@ -286,14 +589,17 @@ export class LobbyScene {
       }
       this.characters.set(member.uid, this.createCharacter(member, x, z));
     });
+
+    // A wider squad needs a wider shot.
+    this.frameCamera();
   }
 
   /** Load a character model into a slot.
    *
-   *  Nothing stands on the pedestal until the real model arrives. An earlier
+   *  Nothing stands on the pad until the real model arrives. An earlier
    *  version drew primitive stand-ins immediately and swapped them out, but a
    *  capsule-robot turning into a character every time you open the lobby reads
-   *  as a glitch — a briefly empty pedestal reads as loading. The stand-in is
+   *  as a glitch — a briefly empty pad reads as loading. The stand-in is
    *  now only built when the model genuinely cannot be shown, so the lobby is
    *  never empty for a reason the player can't recover from. */
   private async attachModel(character: CharacterInstance, characterId: string): Promise<void> {
@@ -307,7 +613,7 @@ export class LobbyScene {
     const idle = getStanceClip(character.weaponId);
 
     // Dynamic: Babylon's skinning + animation machinery is ~550 kB, and the
-    // pedestals and plates are already painted by now, so none of that weight
+    // pads and plates are already painted by now, so none of that weight
     // sits on the lobby's first frame.
     const { CharacterRig } = await import("./characterRig");
     const rig = await CharacterRig.create(characterId, this.scene, `rig_${character.anchor.name}`);
@@ -330,11 +636,12 @@ export class LobbyScene {
     character.rig?.dispose();
     character.rig = rig;
     this.clearBody(character);
-    // Parented to the anchor, not the bobbing root: the model's own idle clip
-    // provides the motion, and the plate/bubble links stay rock steady.
+    // Parented to the spinner, not the bobbing root: the model's own idle clip
+    // provides the motion, and the pad/plate/bubble links stay rock steady
+    // while a drag turns the character.
     // No scaling here: the rig measures the model and sizes itself to
-    // CHARACTER_HEIGHT with its feet on the pedestal.
-    rig.root.parent = character.anchor;
+    // CHARACTER_HEIGHT with its feet on the floor.
+    rig.root.parent = character.spinner;
 
     if (idle) {
       await rig.play(idle, { loop: true });
@@ -384,48 +691,64 @@ export class LobbyScene {
   private clearBody(character: CharacterInstance) {
     for (const child of character.root.getChildren()) child.dispose();
     character.root.position.y = 0;
+    character.root.scaling.setAll(1); // the stand-in's normalising scale, undone
   }
 
   /** Stylised stand-in built from primitives, shown ONLY when the real model
    *  can't be loaded — no CDN configured, or the download failed. It hangs off
-   *  the bobbing root, so the idle bob in the render loop animates it. */
+   *  the bobbing root, so the idle bob in the render loop animates it.
+   *
+   *  Deliberately anonymous and on-brand: a dark figure with a crimson edge,
+   *  standing exactly CHARACTER_HEIGHT tall like everybody else. It should read
+   *  as "this player's model hasn't arrived", which is what it means — an
+   *  oversized primitive in a random colour reads as a broken game instead. */
   private buildFallbackBody(character: CharacterInstance) {
     if (character.rig || character.root.getChildren().length > 0) return; // already has a body
     const scene = this.scene;
     const uid = character.uid;
     const root = character.root;
-    const accent = colorFromUid(uid);
+    // Authored from the floor up, then normalised to the height every real
+    // character is measured to — so a stand-in never towers over the squad it
+    // is standing in.
+    const headSize = 0.42;
+    const headY = 1.98;
+    root.scaling.setAll(CHARACTER_HEIGHT / (headY + headSize / 2));
 
     const bodyMat = new StandardMaterial(`bodyMat_${uid}`, scene);
-    bodyMat.diffuseColor = accent.scale(0.5);
+    bodyMat.diffuseColor = new Color3(0.08, 0.08, 0.1);
+    bodyMat.emissiveColor = new Color3(0.1, 0.013, 0.028);
     bodyMat.specularColor = new Color3(0.1, 0.1, 0.1);
     character.disposables.push(bodyMat);
 
     const skinMat = new StandardMaterial(`skinMat_${uid}`, scene);
-    skinMat.diffuseColor = new Color3(0.85, 0.7, 0.6);
+    skinMat.diffuseColor = new Color3(0.16, 0.16, 0.19);
+    skinMat.emissiveColor = new Color3(0.08, 0.01, 0.022);
     character.disposables.push(skinMat);
 
-    const body = MeshBuilder.CreateCapsule(`body_${uid}`, { height: 1.5, radius: 0.34 }, scene);
+    const body = MeshBuilder.CreateCapsule(`body_${uid}`, { height: 1.5, radius: 0.22 }, scene);
     body.position.y = 1.05;
     body.material = bodyMat;
+    body.isPickable = false;
     body.parent = root;
 
-    const head = MeshBuilder.CreateSphere(`head_${uid}`, { diameter: 0.5, segments: 12 }, scene);
-    head.position.y = 2.05;
+    const head = MeshBuilder.CreateSphere(`head_${uid}`, { diameter: headSize, segments: 12 }, scene);
+    head.position.y = headY;
     head.material = skinMat;
+    head.isPickable = false;
     head.parent = root;
 
     const makeLimb = (name: string, lx: number, ly: number, height: number, radius: number): Mesh => {
       const limb = MeshBuilder.CreateCapsule(name, { height, radius }, scene);
       limb.position.set(lx, ly, 0);
       limb.material = bodyMat;
+      limb.isPickable = false;
       limb.parent = root;
       return limb;
     };
-    makeLimb(`armL_${uid}`, -0.48, 1.15, 1.0, 0.11);
-    makeLimb(`armR_${uid}`, 0.48, 1.15, 1.0, 0.11);
-    makeLimb(`legL_${uid}`, -0.18, 0.45, 0.9, 0.13);
-    makeLimb(`legR_${uid}`, 0.18, 0.45, 0.9, 0.13);
+    makeLimb(`armL_${uid}`, -0.32, 1.15, 1.0, 0.075);
+    makeLimb(`armR_${uid}`, 0.32, 1.15, 1.0, 0.075);
+    makeLimb(`legL_${uid}`, -0.13, 0.45, 0.9, 0.1);
+    makeLimb(`legR_${uid}`, 0.13, 0.45, 0.9, 0.1);
   }
 
   /** Free Fire-style team chat callout: a truncated preview of the message in
@@ -447,57 +770,69 @@ export class LobbyScene {
     }, 4500);
   }
 
-  /** Build a slot: pedestal, name plate and chat bubble. The BODY is not built
-   *  here — the real model is fetched straight away and only if that fails does
-   *  a stand-in appear (see buildFallbackBody). */
+  /** Build a slot: floor pad, hit box, name plate and chat bubble. The BODY is
+   *  not built here — the real model is fetched straight away and only if that
+   *  fails does a stand-in appear (see buildFallbackBody). */
   private createCharacter(member: LobbyMember, x: number, z: number): CharacterInstance {
     const scene = this.scene;
     const disposables: { dispose: () => void }[] = [];
 
-    // anchor = fixed slot position; root = animated (bobbing) child
+    // anchor = slot position; spinner = turntable; root = bobbing stand-in host
     const anchor = new TransformNode(`anchor_${member.uid}`, scene);
-    anchor.metadata = { memberUid: member.uid }; // tap-picking looks this up
     anchor.position.set(x, 0, z);
+    anchor.rotation.y = Math.PI; // characters face the camera side
+    const spinner = new TransformNode(`spin_${member.uid}`, scene);
+    spinner.parent = anchor;
     const root = new TransformNode(`char_${member.uid}`, scene);
-    root.parent = anchor;
+    root.parent = spinner;
 
-    const accent = colorFromUid(member.uid);
+    // Light pool + contact shadow: what actually seats the character on the
+    // painted floor, in one transparent disc.
+    const pad = MeshBuilder.CreateDisc(`pad_${member.uid}`, { radius: 0.8, tessellation: 40 }, scene);
+    pad.rotation.x = Math.PI / 2;
+    pad.position.y = 0.012;
+    pad.isPickable = false;
+    pad.material = member.isLeader ? this.padMatLeader : this.padMat;
+    pad.parent = anchor;
+    // Blooming a flat floor decal washes red haze up over the character's
+    // legs — the collection preview learned the same lesson.
+    this.glow.addExcludedMesh(pad);
 
-    const accentMat = new StandardMaterial(`accentMat_${member.uid}`, scene);
-    accentMat.emissiveColor = accent;
-    accentMat.disableLighting = true;
-    disposables.push(accentMat);
-
-    // Glowing pedestal under each player
-    const pedestal = MeshBuilder.CreateCylinder(`ped_${member.uid}`, { diameter: 1.6, height: 0.08 }, scene);
-    pedestal.position.y = 0.04;
-    pedestal.material = accentMat;
-    pedestal.parent = anchor;
+    // What the pointer actually hits: one invisible box around the character.
+    // Square in plan, so turning the character never moves its hit area, and
+    // present from the first frame, so a slot can be grabbed and tapped while
+    // its model is still downloading.
+    const hit = MeshBuilder.CreateBox(`hit_${member.uid}`, { width: 1.05, depth: 1.05, height: 2.25 }, scene);
+    hit.position.y = 1.1;
+    hit.isVisible = false;
+    hit.metadata = { memberUid: member.uid, hit: true };
+    hit.parent = anchor;
 
     // Name plate at the character's base (Free Fire/PUBG style: a banner on
-    // the podium, not floating over the head). Linked to the STATIC pedestal
-    // rather than the bobbing body — a link target that never moves means the
+    // the podium, not floating over the head). Linked to the STATIC pad
+    // rather than the character — a link target that never moves means the
     // fullscreen GUI texture stops repainting every animation frame.
     const plate = new Rectangle(`plate_${member.uid}`);
     plate.width = "160px";
     plate.height = "30px";
     plate.cornerRadius = 6;
     plate.thickness = 1.5;
-    plate.color = accent.toHexString(); // border ties the plate to the pedestal glow
-    plate.background = "rgba(8, 12, 26, 0.85)";
+    plate.background = "rgba(8, 5, 8, 0.82)";
+    plate.isHitTestVisible = false; // never swallow a turn that starts on it
     this.gui.addControl(plate);
-    plate.linkWithMesh(pedestal);
-    plate.linkOffsetY = 30; // px below the pedestal → sits on the floor in front
+    plate.linkWithMesh(pad);
+    plate.linkOffsetY = 30; // px below the pad → sits on the floor in front
 
     const label = new TextBlock(`label_${member.uid}`);
     label.fontFamily = '"Archivo Black", system-ui, sans-serif';
-    applyNameStyle(label, member); // sets text, color AND the fitted fontSize
+    label.isHitTestVisible = false;
+    applyNameStyle(plate, label, member); // text, colours AND the fitted size
     plate.addControl(label);
     disposables.push(plate);
 
     // Chat bubble over the head. Linked to a tiny STATIC invisible mesh at
-    // head height (parented to the anchor, not the bobbing root) so the
-    // projection tracks zoom correctly without forcing a GUI repaint every
+    // head height (parented to the anchor, not the spinner) so the
+    // projection tracks correctly without forcing a GUI repaint every
     // animation frame — same trick as the base plate.
     const bubbleAnchor = MeshBuilder.CreateBox(`bubbleAnchor_${member.uid}`, { size: 0.01 }, scene);
     bubbleAnchor.isVisible = false;
@@ -510,8 +845,8 @@ export class LobbyScene {
     bubble.adaptHeightToChildren = true;
     bubble.cornerRadius = 8;
     bubble.thickness = 1.5;
-    bubble.color = accent.toHexString();
-    bubble.background = "rgba(8, 12, 26, 0.9)";
+    bubble.color = ACCENT;
+    bubble.background = "rgba(8, 5, 8, 0.9)";
     bubble.isVisible = false;
     bubble.isHitTestVisible = false; // never steal character taps
     this.gui.addControl(bubble);
@@ -524,6 +859,7 @@ export class LobbyScene {
     bubbleText.color = "#f2f5ff";
     bubbleText.fontSize = 12;
     bubbleText.fontFamily = "system-ui, sans-serif";
+    bubbleText.isHitTestVisible = false;
     bubbleText.paddingTop = "6px";
     bubbleText.paddingBottom = "6px";
     bubbleText.paddingLeft = "8px";
@@ -531,20 +867,26 @@ export class LobbyScene {
     bubble.addControl(bubbleText);
     disposables.push(bubble);
 
-    // Characters face the camera side
-    anchor.rotation.y = Math.PI;
-
     const instance: CharacterInstance = {
       uid: member.uid,
       anchor,
+      spinner,
       root,
+      pad,
+      hit,
       aura: null,
+      plate,
       label,
       bubble,
       bubbleText,
       bubbleTimer: 0,
       isLeader: member.isLeader,
       disposables,
+      slotX: x,
+      slotZ: z,
+      spin: 0,
+      spinVel: 0,
+      spinPending: 0,
       characterId: member.character,
       weaponId: member.weapon,
       rig: null,
@@ -553,9 +895,9 @@ export class LobbyScene {
       loadToken: 0,
       weaponToken: 0,
     };
-    // The pedestal and plate are already on screen; the character itself drops
-    // in when its model arrives. Tap-picking works throughout — it walks up to
-    // the anchor, which both the model and any stand-in hang off.
+    // The pad and plate are already on screen; the character itself drops
+    // in when its model arrives. Tapping and turning work throughout — both go
+    // through the hit box, which exists before the model does.
     void this.attachModel(instance, member.character);
     return instance;
   }
@@ -570,6 +912,8 @@ export class LobbyScene {
       character.rig?.dispose();
     }
     this.characters.clear();
+    const canvas = this.scene.getEngine().getRenderingCanvas();
+    if (canvas && this.onCaptureLost) canvas.removeEventListener("lostpointercapture", this.onCaptureLost);
     this.scene.dispose();
   }
 }
