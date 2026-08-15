@@ -63,12 +63,20 @@ const BACKDROP_OVERSCAN = 1.035;
  *  tilted 3D camera would put the characters on a floor that visibly disagrees
  *  with the painted one. Everything else about the framing is derived, not
  *  guessed: see frameCamera(). */
-const CAM_HEIGHT = 1.15;
+const CAM_HEIGHT = 0.96;
 const CAM_FOV = 0.78;
 /** Where the characters' feet should land, as a fraction of screen height.
- *  This is the whole composition in one number — it decides how far back the
- *  camera stands, and therefore how big the squad reads. */
-const FEET_AT = 0.81;
+ *  With CAM_HEIGHT this is the whole composition in two numbers: they decide
+ *  how far back the camera stands, and therefore how big the squad reads. A
+ *  character ends up filling `CHARACTER_HEIGHT x (2 x FEET_AT - 1) / (2 x
+ *  CAM_HEIGHT)` of the screen whenever height is the binding constraint —
+ *  about 63%, which is the size a lobby hero reads at.
+ *
+ *  The two move TOGETHER: lowering both keeps that fraction identical while
+ *  lifting the whole line-up up the screen, which is how the name plates stay
+ *  clear of the chat button and the party card in the bottom corners without
+ *  the squad having to shrink. */
+const FEET_AT = 0.835;
 
 const ACCENT = "#e5182e"; // brand crimson
 const ACCENT_LEADER = "#ffd45e";
@@ -117,7 +125,9 @@ function applyNameStyle(plate: Rectangle, label: TextBlock, member: LobbyMember)
  *  the camera the way a lobby line-up does. */
 function layoutFor(count: number): [number, number][] {
   const n = Math.min(Math.max(count, 1), 4);
-  const spacing = n >= 4 ? 1.78 : n === 3 ? 1.95 : 2.15;
+  // Tight enough that four still read big, wide enough that the floor pads
+  // (0.6 radius) keep clear air between them.
+  const spacing = n >= 4 ? 1.4 : n === 3 ? 1.6 : 1.85;
   const xs: number[] = [];
   for (let i = 0; i < n; i++) xs.push((i - (n - 1) / 2) * spacing);
   return xs
@@ -394,9 +404,9 @@ export class LobbyScene {
     // Feet at FEET_AT of the screen: a point on the floor at distance d sits
     // (CAM_HEIGHT / d) / tanV below the centre line, in half-heights.
     const forHeight = CAM_HEIGHT / ((2 * FEET_AT - 1) * tanV);
-    // Outermost character, plus a body's width of margin, inside 92% of the
-    // half-width — the rest is breathing room and HUD.
-    const forWidth = (this.spread + 0.85) / (0.92 * tanV * aspect);
+    // Outermost character, plus its floor pad and a little air, inside 92% of
+    // the half-width — the rest is breathing room and HUD.
+    const forWidth = (this.spread + 0.76) / (0.92 * tanV * aspect);
     const distance = Math.min(Math.max(Math.max(forHeight, forWidth), 3.2), 16);
     this.camera.position.set(0, CAM_HEIGHT, -distance);
     this.camera.setTarget(new Vector3(0, CAM_HEIGHT, 0));
@@ -763,7 +773,7 @@ export class LobbyScene {
 
     // Light pool + contact shadow: what actually seats the character on the
     // painted floor, in one transparent disc.
-    const pad = MeshBuilder.CreateDisc(`pad_${member.uid}`, { radius: 0.8, tessellation: 40 }, scene);
+    const pad = MeshBuilder.CreateDisc(`pad_${member.uid}`, { radius: 0.6, tessellation: 40 }, scene);
     pad.rotation.x = Math.PI / 2;
     pad.position.y = 0.012;
     pad.isPickable = false;
@@ -796,7 +806,10 @@ export class LobbyScene {
     plate.isHitTestVisible = false; // never swallow a turn that starts on it
     this.gui.addControl(plate);
     plate.linkWithMesh(pad);
-    plate.linkOffsetY = 30; // px below the pad → sits on the floor in front
+    // Just clear of the pad. Not further: at this framing the feet already sit
+    // low, and every pixel the plate drops takes it towards the chat button and
+    // the party card in the bottom corners.
+    plate.linkOffsetY = 10;
 
     const label = new TextBlock(`label_${member.uid}`);
     label.fontFamily = '"Archivo Black", system-ui, sans-serif';
@@ -812,7 +825,10 @@ export class LobbyScene {
     const bubbleAnchor = MeshBuilder.CreateBox(`bubbleAnchor_${member.uid}`, { size: 0.01 }, scene);
     bubbleAnchor.isVisible = false;
     bubbleAnchor.isPickable = false;
-    bubbleAnchor.position.y = 2.6;
+    // Hugging a CHARACTER_HEIGHT head. It used to sit at 2.6, which was clear
+    // of the old wide shot but rides off the top of the screen now that
+    // characters are framed half again as large.
+    bubbleAnchor.position.y = 1.95;
     bubbleAnchor.parent = anchor;
 
     const bubble = new Rectangle(`bubble_${member.uid}`);
