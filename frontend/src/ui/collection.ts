@@ -21,9 +21,9 @@ import type { CatalogCharacter, CatalogEmote, CatalogWeapon, CollectionData } fr
 export interface OpenCollectionOptions {
   engine: Engine;
   /** The lobby's scene. Both scenes share one canvas, so its input has to be
-   *  detached while this page owns the view — otherwise drags meant for the
-   *  preview also spin the lobby camera behind it, and closing the page reveals
-   *  a lobby that quietly rotated. */
+   *  detached while this page owns the view — otherwise a drag meant for the
+   *  preview also turns whichever lobby character is standing behind it, and
+   *  closing the page reveals a squad that quietly rotated. */
   lobbyScene: Scene;
   /** Put the lobby's render loop back when the page closes. */
   restoreLobby: () => void;
@@ -145,13 +145,43 @@ export async function openCollection(opts: OpenCollectionOptions): Promise<void>
 
   opts.lobbyScene.detachControl();
   const preview = new PreviewScene(opts.engine, data.lobbyIdleClip);
-  let last = performance.now();
-  startRenderLoop(opts.engine, () => {
-    const now = performance.now();
-    preview.spin(now - last);
-    last = now;
-    preview.scene.render();
+  startRenderLoop(opts.engine, () => preview.scene.render());
+
+  // Drag the stage to turn the model, exactly as the lobby turns a character.
+  //
+  // The listeners go on the STAGE ELEMENT, not the canvas. This page is a
+  // full-screen overlay inside #ui-root, and `#ui-root > *` sets
+  // `pointer-events: auto` with an id's specificity — which beats the
+  // `.cl-screen { pointer-events: none }` that was meant to make this a hole.
+  // So nothing here ever reaches the canvas, and a scene-level pointer handler
+  // is silently dead. Listening on the element the player is actually touching
+  // needs no hole at all, and no cascade can switch it off.
+  let turningPointer: number | null = null;
+  let turnLastX = 0;
+  stage.addEventListener("pointerdown", (e) => {
+    turningPointer = e.pointerId;
+    turnLastX = e.clientX;
+    preview.grabTurn();
+    stage.classList.add("turning");
+    stage.setPointerCapture(e.pointerId); // keep the drag even if it leaves the box
   });
+  stage.addEventListener("pointermove", (e) => {
+    if (turningPointer !== e.pointerId) return;
+    const moved = e.clientX - turnLastX;
+    if (moved === 0) return;
+    turnLastX = e.clientX;
+    // Measured against the CANVAS, so a swipe turns a character by the same
+    // amount here as it does on the podium.
+    preview.turnBy(moved, canvas.clientWidth || 1);
+  });
+  const endTurn = (e: PointerEvent) => {
+    if (turningPointer !== e.pointerId) return;
+    turningPointer = null;
+    stage.classList.remove("turning");
+    preview.releaseTurn();
+  };
+  stage.addEventListener("pointerup", endTurn);
+  stage.addEventListener("pointercancel", endTurn);
 
   const aim = () => preview.setViewportFromRect(stage.getBoundingClientRect(), canvas);
   aim();

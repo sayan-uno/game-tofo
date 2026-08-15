@@ -2997,13 +2997,22 @@ body {
   align-items: stretch;
 }
 
-/* The hole. No background and no pointer events — the preview scene renders
-   here and the camera receives the drags. */
+/* The stage. No background — the preview scene renders here, behind the page —
+   but it IS interactive: dragging it turns the model, so it takes pointer
+   events itself rather than trying to be a hole through to the canvas. (It
+   can't be a hole anyway: `#ui-root > *` above sets pointer-events with an
+   id's specificity and beats any class here.) touch-action keeps a phone from
+   treating the drag as a scroll. */
 .cl-stage {
   flex: 1 1 42%;
   min-width: 0;
   position: relative;
-  pointer-events: none;
+  pointer-events: auto;
+  touch-action: none;
+  cursor: grab;
+}
+.cl-stage.turning {
+  cursor: grabbing;
 }
 .cl-stage-status {
   position: absolute;

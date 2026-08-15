@@ -10,7 +10,7 @@
 // canvas; the collection's item grid is opaque DOM sitting over the rest.
 import { Scene } from "@babylonjs/core/scene";
 import type { Engine } from "@babylonjs/core/Engines/engine";
-import { ArcRotateCamera } from "@babylonjs/core/Cameras/arcRotateCamera";
+import { TargetCamera } from "@babylonjs/core/Cameras/targetCamera";
 import { HemisphericLight } from "@babylonjs/core/Lights/hemisphericLight";
 import { DirectionalLight } from "@babylonjs/core/Lights/directionalLight";
 import { Vector3 } from "@babylonjs/core/Maths/math.vector";
@@ -22,12 +22,19 @@ import { GlowLayer } from "@babylonjs/core/Layers/glowLayer";
 import { getEmote, getStanceClip } from "./assets";
 import { CharacterRig } from "./characterRig";
 import { attachAura, type Aura } from "./aura";
+import { Turntable } from "./turntable";
 import type { HeldWeapon } from "./weapon";
+
+/** Where the model faces before anything is turned — the same "front to the
+ *  camera" the lobby starts every character at. */
+const FACING = Math.PI;
 
 export class PreviewScene {
   readonly scene: Scene;
-  private camera: ArcRotateCamera;
+  private camera: TargetCamera;
   private rig: CharacterRig | null = null;
+  /** Drag-to-turn, exactly as it feels in the lobby (see turntable.ts). */
+  private turn = new Turntable();
   private aura: Aura | null = null;
   private weapon: HeldWeapon | null = null;
   /** Held across character swaps: picking a different character on the
@@ -46,18 +53,20 @@ export class PreviewScene {
     this.idleClip = idleClip;
     this.scene = new Scene(engine);
     this.scene.clearColor = new Color4(0.043, 0.02, 0.027, 1);
-    this.scene.skipPointerMovePicking = true;
     this.scene.autoClear = true;
+    // There is nothing in here to pick: the whole stage box turns the one model
+    // standing in it. Skipping all three saves a ray per pointer event.
+    this.scene.skipPointerMovePicking = true;
+    this.scene.skipPointerDownPicking = true;
+    this.scene.skipPointerUpPicking = true;
 
-    this.camera = new ArcRotateCamera("previewCam", -Math.PI / 2, 1.28, 4.6, new Vector3(0, 0.95, 0), this.scene);
-    this.camera.attachControl(engine.getRenderingCanvas(), true);
-    this.camera.lowerRadiusLimit = 2.6;
-    this.camera.upperRadiusLimit = 7;
-    this.camera.lowerBetaLimit = 0.75;
-    this.camera.upperBetaLimit = 1.62;
-    this.camera.wheelPrecision = 60;
-    this.camera.pinchPrecision = 140;
-    this.camera.panningSensibility = 0; // framing stays put; rotate only
+    // Fixed, like the lobby. The player turns the CHARACTER, not the camera —
+    // an orbiting camera and a turning model look the same for one drag and
+    // then diverge, and having the locker work one way and the podium the other
+    // is the confusing half of that. Position is the old orbit framing
+    // (alpha -π/2, beta 1.28, radius 4.6 about the chest) solved once.
+    this.camera = new TargetCamera("previewCam", new Vector3(0, 2.269, -4.407), this.scene);
+    this.camera.setTarget(new Vector3(0, 0.95, 0));
 
     const hemi = new HemisphericLight("previewHemi", new Vector3(0, 1, 0), this.scene);
     hemi.intensity = 0.85;
@@ -102,6 +111,39 @@ export class PreviewScene {
     glow.intensity = 0.9;
     glow.addExcludedMesh(pad);
     glow.addExcludedMesh(ring);
+
+    this.scene.onBeforeRenderObservable.add(() => {
+      if (this.turn.step(Math.min(engine.getDeltaTime(), 100) / 1000)) this.applyTurn();
+    });
+  }
+
+  /** Take hold of the model.
+   *
+   *  Turning is driven by the PAGE, from pointer events on its own stage
+   *  element, not by this scene watching the canvas. The collection page is a
+   *  full-screen overlay above the canvas, so canvas-level input never reaches
+   *  it — and the element the player sees as the stage is exactly the surface
+   *  that should turn the model, which makes this the honest wiring rather
+   *  than a workaround. */
+  grabTurn() {
+    this.turn.grab();
+  }
+
+  /** Turn by a pointer that moved `dx` px, measured against `width` — pass the
+   *  CANVAS width, not the stage's, so a swipe turns a character by the same
+   *  amount here as it does in the lobby. */
+  turnBy(dx: number, width: number) {
+    this.turn.turn(dx, width);
+    this.applyTurn();
+  }
+
+  /** Let go; whatever speed the drag had becomes the glide. */
+  releaseTurn() {
+    this.turn.release();
+  }
+
+  private applyTurn() {
+    if (this.rig) this.rig.root.rotation.y = FACING + this.turn.angle;
   }
 
   /** Aim the camera at exactly the screen box the page left transparent for it.
@@ -140,7 +182,9 @@ export class PreviewScene {
     this.rig = rig;
     if (!rig) return false;
 
-    rig.root.rotation.y = Math.PI; // face the camera, same as the lobby
+    // A new subject on the stand faces front, however the last one was left.
+    this.turn.reset();
+    rig.root.rotation.y = FACING; // face the camera, same as the lobby
     await rig.play(this.stance(), { loop: true });
 
     const aura = await attachAura(id, rig, this.scene);
@@ -203,12 +247,6 @@ export class PreviewScene {
       });
     }
     return true;
-  }
-
-  /** Gentle auto-spin so a showcased character reads as 3D without the player
-   *  having to drag. Any manual rotation simply moves alpha from here. */
-  spin(deltaMs: number) {
-    this.camera.alpha += deltaMs * 0.00016;
   }
 
   dispose() {

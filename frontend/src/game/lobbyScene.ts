@@ -47,6 +47,7 @@ import { CHARACTER_HEIGHT, getStanceClip, hasAssets } from "./assets";
 import type { CharacterRig } from "./characterRig";
 import { attachAura, type Aura } from "./aura";
 import type { HeldWeapon } from "./weapon";
+import { Turntable } from "./turntable";
 import type { LobbyMember } from "../types";
 
 /** Painted stage art, served from our own origin (179 kB WebP). */
@@ -68,13 +69,6 @@ const CAM_FOV = 0.78;
  *  This is the whole composition in one number — it decides how far back the
  *  camera stands, and therefore how big the squad reads. */
 const FEET_AT = 0.81;
-
-/** A full screen-width drag turns a character one and a half times round. */
-const SPIN_PER_DRAG = Math.PI * 3;
-const TWO_PI = Math.PI * 2;
-/** Cap on the release glide, so a violent flick can't leave a character
- *  spinning like a top. */
-const SPIN_MAX = 13;
 
 const ACCENT = "#e5182e"; // brand crimson
 const ACCENT_LEADER = "#ffd45e";
@@ -199,11 +193,9 @@ interface CharacterInstance {
    *  or a leave opens the line-up instead of teleporting everyone. */
   slotX: number;
   slotZ: number;
-  /** Turntable angle, and the glide left over after a flick. */
-  spin: number;
-  spinVel: number;
-  /** Rotation applied since the last frame, used to measure release speed. */
-  spinPending: number;
+  /** Drag-to-turn state. The feel lives in turntable.ts, shared with the
+   *  collection preview. */
+  turn: Turntable;
   /** Catalog id currently shown, so an equip elsewhere swaps just this model. */
   characterId: string;
   /** Weapon catalog id currently shown, null for empty-handed. */
@@ -424,18 +416,7 @@ export class LobbyScene {
         character.anchor.position.z += dz * step;
       }
 
-      if (this.drag?.uid === character.uid) {
-        // Measure the release speed while the finger is still down, smoothed
-        // so one stuttering frame can't turn a slow drag into a flick.
-        const sample = character.spinPending / Math.max(dt, 0.004);
-        character.spinVel = character.spinVel * 0.65 + sample * 0.35;
-        character.spinPending = 0;
-      } else if (character.spinVel !== 0) {
-        character.spin = (character.spin + character.spinVel * dt) % TWO_PI;
-        character.spinner.rotation.y = character.spin;
-        character.spinVel *= Math.exp(-dt * 6.5);
-        if (Math.abs(character.spinVel) < 0.05) character.spinVel = 0;
-      }
+      if (character.turn.step(dt)) character.spinner.rotation.y = character.turn.angle;
 
       // Idle "breathing" for FALLBACK bodies only. A loaded character animates
       // through its own idle clip; bobbing it too would fight that clip and
@@ -460,8 +441,7 @@ export class LobbyScene {
           const uid = uidOfPick(info.pickInfo?.pickedMesh);
           const character = uid ? this.characters.get(uid) : null;
           if (!character) return;
-          character.spinVel = 0; // grabbing a gliding character stops it dead
-          character.spinPending = 0;
+          character.turn.grab();
           this.drag = { uid: character.uid, pointerId: event.pointerId, lastX: event.clientX };
           // Capture, so a finger that slides off the canvas still delivers its
           // move and up events here instead of stranding the drag.
@@ -484,18 +464,13 @@ export class LobbyScene {
           const moved = event.clientX - drag.lastX;
           if (moved === 0) return;
           drag.lastX = event.clientX;
-          const turn = (moved / (canvas?.clientWidth || 1)) * SPIN_PER_DRAG;
-          character.spin = (character.spin + turn) % TWO_PI;
-          character.spinner.rotation.y = character.spin;
-          character.spinPending += turn;
+          character.turn.turn(moved, canvas?.clientWidth || 1);
+          character.spinner.rotation.y = character.turn.angle;
           return;
         }
         case PointerEventTypes.POINTERUP: {
           if (this.drag && event.pointerId === this.drag.pointerId) {
-            const character = this.characters.get(this.drag.uid);
-            if (character) {
-              character.spinVel = Math.max(-SPIN_MAX, Math.min(SPIN_MAX, character.spinVel));
-            }
+            this.characters.get(this.drag.uid)?.turn.release();
             this.endDrag();
           }
           return;
@@ -884,9 +859,7 @@ export class LobbyScene {
       disposables,
       slotX: x,
       slotZ: z,
-      spin: 0,
-      spinVel: 0,
-      spinPending: 0,
+      turn: new Turntable(),
       characterId: member.character,
       weaponId: member.weapon,
       rig: null,
