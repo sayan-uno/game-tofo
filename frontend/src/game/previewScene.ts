@@ -19,7 +19,7 @@ import { Color3, Color4 } from "@babylonjs/core/Maths/math.color";
 import { MeshBuilder } from "@babylonjs/core/Meshes/meshBuilder";
 import { StandardMaterial } from "@babylonjs/core/Materials/standardMaterial";
 import { GlowLayer } from "@babylonjs/core/Layers/glowLayer";
-import { getEmote } from "./assets";
+import { getEmote, getStanceClip } from "./assets";
 import { CharacterRig } from "./characterRig";
 import { attachAura, type Aura } from "./aura";
 import type { HeldWeapon } from "./weapon";
@@ -141,7 +141,7 @@ export class PreviewScene {
     if (!rig) return false;
 
     rig.root.rotation.y = Math.PI; // face the camera, same as the lobby
-    await rig.play(this.idleClip, { loop: true });
+    await rig.play(this.stance(), { loop: true });
 
     const aura = await attachAura(id, rig, this.scene);
     if (mine === this.token) this.aura = aura;
@@ -151,10 +151,22 @@ export class PreviewScene {
     return true;
   }
 
-  /** Show a weapon in the character's hand, or null for empty-handed. */
+  /** The clip the character stands in: the held weapon's stance, or the idle
+   *  when empty-handed. */
+  private stance(): string {
+    return getStanceClip(this.weaponId) ?? this.idleClip;
+  }
+
+  /** Show a weapon in the character's hand, or null for empty-handed. Picking
+   *  one up changes the stance too — that is most of what makes it read as
+   *  "armed" rather than "carrying a prop". */
   async setWeapon(id: string | null): Promise<void> {
+    const before = this.stance();
     this.weaponId = id;
+    const after = this.stance();
     await this.hold(id);
+    // Only when it actually changes: replaying the same clip restarts it.
+    if (after !== before && this.rig) await this.rig.play(after, { loop: true });
   }
 
   private async hold(id: string | null): Promise<void> {
@@ -187,7 +199,7 @@ export class PreviewScene {
       this.unsubscribeEnd = rig.onClipEnd(() => {
         this.unsubscribeEnd?.();
         this.unsubscribeEnd = null;
-        void rig.play(this.idleClip, { loop: true });
+        void rig.play(this.stance(), { loop: true }); // back to the armed stance, not a bare idle
       });
     }
     return true;

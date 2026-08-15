@@ -27,7 +27,7 @@ import type { Mesh } from "@babylonjs/core/Meshes/mesh";
 import { AdvancedDynamicTexture } from "@babylonjs/gui/2D/advancedDynamicTexture";
 import { TextBlock } from "@babylonjs/gui/2D/controls/textBlock";
 import { Rectangle } from "@babylonjs/gui/2D/controls/rectangle";
-import { getLobbyIdleClip, hasAssets } from "./assets";
+import { getStanceClip, hasAssets } from "./assets";
 import type { CharacterRig } from "./characterRig";
 import { attachAura, type Aura } from "./aura";
 import type { HeldWeapon } from "./weapon";
@@ -103,6 +103,10 @@ interface CharacterInstance {
   aura: Aura | null;
   /** What's in their hand, once it arrives. */
   weapon: HeldWeapon | null;
+  /** Clip currently looping on this slot. Tracked so picking a weapon up
+   *  switches stance exactly once — calling play() again with the same clip
+   *  restarts it, which reads as the character flinching. */
+  clipId: string | null;
   /** Rises on every character change; a load that finishes after a newer one
    *  started sees a stale token and throws its result away. */
   loadToken: number;
@@ -298,7 +302,9 @@ export class LobbyScene {
       this.buildFallbackBody(character);
       return;
     }
-    const idle = getLobbyIdleClip();
+    // Start straight in the stance the weapon calls for, rather than idling
+    // first and switching a frame later — that switch is visible.
+    const idle = getStanceClip(character.weaponId);
 
     // Dynamic: Babylon's skinning + animation machinery is ~550 kB, and the
     // pedestals and plates are already painted by now, so none of that weight
@@ -318,6 +324,7 @@ export class LobbyScene {
     character.weaponToken++; // the rig it was following is going away
     character.weapon?.dispose();
     character.weapon = null;
+    character.clipId = null; // new rig, nothing playing on it yet
     character.aura?.dispose();
     character.aura = null;
     character.rig?.dispose();
@@ -329,7 +336,10 @@ export class LobbyScene {
     // CHARACTER_HEIGHT with its feet on the pedestal.
     rig.root.parent = character.anchor;
 
-    if (idle) await rig.play(idle, { loop: true });
+    if (idle) {
+      await rig.play(idle, { loop: true });
+      character.clipId = idle;
+    }
 
     // Separate chunk per effect: nobody who never stands next to a legendary
     // pays for one, and seeing Seraph does not download Zenith's.
@@ -350,7 +360,17 @@ export class LobbyScene {
     character.weapon?.dispose();
     character.weapon = null;
     const rig = character.rig;
-    if (!character.weaponId || !rig) return;
+    if (!rig) return;
+
+    // Picking a weapon up changes how they stand, not just what they hold.
+    const stance = getStanceClip(character.weaponId);
+    if (stance && stance !== character.clipId) {
+      character.clipId = stance;
+      await rig.play(stance, { loop: true });
+      if (mine !== character.weaponToken) return;
+    }
+
+    if (!character.weaponId) return;
     const { attachWeapon } = await import("./weapon");
     const held = await attachWeapon(character.weaponId, rig, this.scene);
     if (mine !== character.weaponToken) {
@@ -529,6 +549,7 @@ export class LobbyScene {
       weaponId: member.weapon,
       rig: null,
       weapon: null,
+      clipId: null,
       loadToken: 0,
       weaponToken: 0,
     };

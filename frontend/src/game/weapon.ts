@@ -60,18 +60,38 @@ const HAND_JOINT = "RightHand";
  *  the hand was not really holding it. The pronation baked into the hand is
  *  what turns that angle away from across the chest and out past the hip.
  *
- *  The handle then lies DIAGONALLY across the palm rather than straight along
- *  the knuckles — 45 degrees off the fist's own tunnel, toward the fingers.
- *  That is not a fudge: a real sword grip runs corner to corner across the
- *  hand, entering between thumb and forefinger and leaving at the heel of the
- *  palm, and it is what drops the blade from sticking out sideways into the
- *  lowered, ready carry a swordsman actually stands in. Checked against a
- *  Meshy character generated holding a sword on this same skeleton, which
- *  carries its blade low across the front of the legs the same way. */
-const GRIP_ROTATION = new Quaternion(-0.24572, 0.07785, -0.29182, 0.92109);
+ *  SOLVED BACKWARDS, and that is the trick. Rather than picking a handle angle
+ *  and seeing where the blade ended up, this was derived from the answer: put
+ *  the arm where it should be (out at the side, wrist at its resting bend, palm
+ *  turned in the way a hand actually holds a hilt), then ask what grip sends
+ *  the blade along the reference art's line from there. One matrix inverse.
+ *
+ *  Solving it the other way round is what cost so many attempts. The grip
+ *  fixes the angle between the blade and the palm, so choosing it first LOCKS
+ *  those two together: every pose that aimed the blade correctly then rolled
+ *  the palm to face outward, and every pose with the palm right threw the
+ *  blade 50 degrees off. Neither is a stance problem, and no amount of arm
+ *  tuning escapes it — the constraint is in this constant.
+ *
+ *  Which way the palm ends up facing is not free, and it is the stance that
+ *  picks it: the grip rides the hand, so twisting the forearm turns the palm
+ *  and drags the handle's angle with it. This constant is solved FROM the
+ *  stance's twist, not chosen alongside it — change RightForeArm in the clip
+ *  and this has to be re-derived or the blade leaves the reference line. */
+const GRIP_ROTATION = new Quaternion(0.17658, -0.04534, -0.24455, 0.95234);
 /** The centre of the fist's tunnel, in metres, in the hand joint's frame:
- *  across the palm, down toward the knuckles, and out to the palm side. */
-const GRIP_OFFSET = new Vector3(0.0314, 0.0869, 0.0222);
+ *  across the palm, down toward the knuckles, and out to the palm side.
+ *
+ *  MEASURED off the shipped mesh, not derived. Every hand vertex is rigidly
+ *  weighted to this joint, so the centroid of the curled finger mass is a
+ *  constant that can be read straight out of the GLB — and that is the only
+ *  trustworthy way to find it. The version this replaces was computed by
+ *  rotating a pre-bake measurement through the hand's baked twist, and the
+ *  rotation went the wrong way round: glTF is right-handed and Babylon is not,
+ *  so the twist's sense flips across that boundary. The X came out positive
+ *  instead of negative and the handle sat 6cm off the side of the fist,
+ *  hovering past the knuckles instead of through them. */
+const GRIP_OFFSET = new Vector3(-0.0314, 0.0973, 0.0347);
 
 export interface HeldWeapon {
   dispose(): void;

@@ -56,6 +56,11 @@ export interface WeaponItem {
   key: string;
   rarity: "starter" | "rare" | "epic" | "legendary";
   free: boolean;
+  /** Clip id the character stands in while carrying this — a stance, not an
+   *  emote. Absent means they keep the ordinary idle. Per-weapon because a
+   *  greatsword and a pistol are not held the same way, so the day a second
+   *  weapon ships this is a catalog line rather than a branch in the scene. */
+  stance?: string;
 }
 
 export interface EmoteItem {
@@ -104,12 +109,40 @@ const CHARACTERS: CharacterItem[] = [
 ];
 
 const WEAPONS: WeaponItem[] = [
-  { id: "crimson-fang", kind: "weapon", name: "Crimson Fang", key: "weapons/crimson-fang/v1/model.glb", rarity: "legendary", free: true },
+  { id: "crimson-fang", kind: "weapon", name: "Crimson Fang", key: "weapons/crimson-fang/v1/model.glb", rarity: "legendary", free: true, stance: "sword-idle" },
 ];
 
 const EMOTES: EmoteItem[] = [
   { id: "dance-shake-it-off", kind: "emote", name: "Shake It Off", key: "animations/dance-shake-it-off/v1/anim.glb", category: "emote",      duration: 16.27, loop: false, rootMotion: true,  free: true },
   { id: "idle",               kind: "emote", name: "Idle",         key: "animations/idle/v1/anim.glb",               category: "locomotion", duration: 9.97,  loop: true,  rootMotion: false, free: true },
+  // Idle re-posed into the sword carry — feet apart, blade lowered across the
+  // front — derived from the idle clip itself (poseClip.mjs), so the breathing
+  // still runs underneath the stance. Worn automatically by anyone holding a
+  // weapon that names it; it is listed here because that is how every clip's
+  // URL gets resolved, not because it is meant to be performed on purpose.
+  //
+  // Matched to img/sword-picking*.png: feet apart, sword arm out at the side
+  // with the elbow carried outward rather than tucked behind, blade lowered
+  // and sweeping across the front of the legs. Blade lands exactly on the
+  // reference's line; elbow 29.7cm out and 7.5cm behind the hip, hand 30cm
+  // out, wrist at its resting bend.
+  //
+  // The pose is four joints: two legs, the shoulder, and 60 degrees of forearm
+  // pronation that turns the palm IN to face the body — which is how a hand
+  // really sits on a hilt carried down at the side, the flat of the palm
+  // toward the thigh. That last one is FREE: the forearm's twist axis runs
+  // down the arm, so it spins the palm without moving the hand a millimetre
+  // (elbow, hand and wrist metrics are identical with it and without), and
+  // weapon.ts's grip is re-solved from the twisted hand so the blade still
+  // lands on the same line.
+  //
+  // Nothing else below the shoulder is touched, and that part is deliberate.
+  // BENDING the forearm or wrist to aim the blade is what produced the
+  // previous eight versions, and it always broke something else: the palm
+  // rolled outward, or the hand ended up in front of the body. Twisting is
+  // safe; bending is not. If the blade's angle needs changing, change the grip
+  // constant in weapon.ts, not the arm.
+  { id: "sword-idle",         kind: "emote", name: "Sword Stance", key: "animations/sword-idle/v12/anim.glb",        category: "locomotion", duration: 9.97,  loop: true,  rootMotion: false, free: true },
   { id: "walk",               kind: "emote", name: "Walk",         key: "animations/walk/v1/anim.glb",               category: "locomotion", duration: 1.03,  loop: true,  rootMotion: false, free: true },
   { id: "run",                kind: "emote", name: "Run",          key: "animations/run/v1/anim.glb",                category: "locomotion", duration: 0.63,  loop: true,  rootMotion: false, free: true },
   { id: "run-fast",           kind: "emote", name: "Run Fast",     key: "animations/run-fast/v1/anim.glb",           category: "locomotion", duration: 0.57,  loop: true,  rootMotion: true,  free: true },

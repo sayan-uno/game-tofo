@@ -58,6 +58,8 @@ export interface CatalogWeapon {
   kind: "weapon";
   name: string;
   rarity: "starter" | "rare" | "epic" | "legendary";
+  /** Clip id to stand in while carrying this. Absent = the ordinary idle. */
+  stance?: string;
   url: string | null;
   owned: boolean;
 }

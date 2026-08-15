@@ -255,6 +255,118 @@ The weapon's grip constants and the characters' baked hands are ONE unit.
 Changing either means re-publishing every character together, which is why
 they all moved to a new version at the same time.
 
+### Authoring a stance the animation library doesn't have
+
+```bash
+node poseClip.mjs <source-anim.glb> <out.glb> <clipName> <offsets.json>
+```
+
+Derives a clip from an existing one by rotating named joints — an idle re-posed
+into a weapon carry, say. `offsets.json` is `{"Joint": [pitch, yaw, roll]}` in
+degrees, applied in each joint's own frame, so whatever motion the source had
+(idle's breathing) still runs underneath the new pose. A weapon names its stance
+via `WeaponItem.stance`, and the client swaps to it when the weapon is picked up.
+
+Don't guess the angles. Load a reference beside the rig in the harness, apply
+offsets live in an `onBeforeRenderObservable` (animations update BEFORE that, so
+they stick), and solve numerically against something measurable — the reference
+blade's direction, which principal-axis analysis of the most elongated connected
+component gets off an unrigged mesh.
+
+**Score the whole pose, not one direction.** A solver told only to match a blade
+direction will wreck everything else to get it, and each failure ships looking
+fine in a wide shot:
+
+- *Wrist.* Aiming needs pronation and the solver takes it from the wrist. Score
+  it as the angle between the hand's finger axis and the forearm's line —
+  pronation doesn't appear in that, which is the point — and hold it near its
+  resting value.
+- *Body clearance.* Treat the blade as a segment from the grip and the limbs as
+  segments between their joints — then remember a limb has RADIUS. An upper
+  thigh is ~9cm, so 9cm from the axis is zero real gap. A stance shipped with
+  2mm between blade and thigh because the gate compared against the axis alone;
+  another shipped with the grip itself buried in the leg for the same reason.
+  Require axis distance greater than limb radius plus weapon radius plus margin.
+- *Palm.* The hand's local +Z is palmward. Its world Z says how far the palm has
+  rolled backward — and its world X, how far it has turned to the side. Work the
+  SIGN out once and write it down: with the character facing the camera the
+  character's own right is world **-X**, so "palm faces right" is `-palm.x`
+  near +1. Scoring the palm on the wrong axis, or the right axis with the wrong
+  sign, is indistinguishable from a pose that is genuinely wrong.
+
+  "Turn the hand to the right side" is ambiguous and cost a whole round trip:
+  it usually means *put the hand out at the body's right*, which is a shoulder
+  angle, not *point the palm rightward*, which is forearm twist — and those two
+  readings want opposite twists. Say which one back in plain words, or render
+  both, before baking a version.
+
+**MEASURE the grip off the mesh; never derive it through a transform.** Every
+hand vertex is rigidly weighted to one joint, so the centroid of the curled
+finger mass is a constant you can read straight out of the GLB — that is the
+grip point, and `_fist`-style analysis gets it in seconds. The alternative,
+taking a pre-bake measurement and rotating it through the hand's baked twist,
+shipped with the rotation's sense flipped (glTF is right-handed, Babylon is
+not, and the twist axis crosses that boundary): X came out positive instead of
+negative, the handle hovered 6cm off the side of the fist, and FOUR rounds of
+stance tuning went into a fault that was never in the pose. If a hand looks
+like it is not holding the weapon, check the grip constant before touching a
+single joint angle.
+
+**Solve the grip BACKWARDS from the pose you want.** The grip constant fixes the
+angle between the blade and the palm, so choosing it first locks those two
+together for good: every arm angle that aims the blade correctly then rolls the
+palm to face outward, and every one with the palm right throws the blade tens
+of degrees off. That reads as a stance problem and is not one — no amount of
+arm tuning escapes a constant. Instead put the arm where it belongs (out at the
+side, wrist at rest, palm turned as a hand really holds a hilt), then ask what
+grip sends the blade where the art does: one inverse of the hand's world
+matrix. Check the answer sits within ~35 degrees of the fist's tunnel so the
+handle still reads as gripped, and stop there.
+
+**Never assume which way a joint rotation moves a limb — print it.** A shoulder
+roll that was assumed to swing the arm OUT swung it in and forward instead, so
+several rounds of "hold it further from the body" each made it worse than doing
+nothing: 7cm out and 11cm in front, where a plain hanging arm is 18cm out and
+level. One line reporting the hand's offset from the hip in centimetres, before
+and after, would have caught it immediately. Report positions, not just angles.
+
+**Aiming a held weapon by rotating the arm is mostly a trap.** The arm carries
+the hand, so every degree spent aiming the blade rolls the palm and swings the
+blade toward the body. On this rig the plain idle already holds a weapon with a
+natural palm and good clearance, so a weapon stance is better built from the
+LEGS — feet apart reads as "armed" and costs nothing — with the arm left alone
+unless a clearance check is being watched while it moves.
+
+**Forearm TWIST is the one exception, and it is free.** Bending a joint moves
+everything downstream of it; twisting the forearm about its own long axis moves
+nothing, because the axis runs through the hand. Sweeping `RightForeArm` yaw
+left the elbow, hand and wrist metrics identical to the last decimal and changed
+only the palm — from 0.829 facing backward at 0, to 0.984 facing the body at
++60, to 0.985 facing outward at -120. Re-solve the grip from the twisted hand
+and the blade lands on the same line as before, so the whole change costs one
+constant. When the complaint is "the palm faces the wrong way" and everything
+else already looks right, this is the knob — not the shoulder, which drags the
+hand across the body with it.
+
+A hand carrying a sword down at the side wants the palm turned IN, toward the
+thigh. That is +60 here, and it costs something: the handle ends up 114 degrees
+off the fist's tunnel rather than 41, because the tunnel twists with the hand
+while the blade stays pinned to the reference line. Fixing that properly means
+re-baking the fist's `twist_deg` for an inward carry, not re-posing the arm.
+
+When a grip "looks detached", measure before re-posing: the weapon's pivot in
+the hand's frame is rigid by construction, so if it reads the same across two
+clips the geometry is fine and the problem is the hand's ORIENTATION.
+
+Two traps, each of which cost a debugging cycle:
+
+- **Freeze a clip with `speedRatio = 0`, never `pause()`.** A paused group stops
+  writing joint rotations, so per-frame offsets compound into nonsense.
+- **A meshopt clip stores rotations as NORMALIZED INT16.** `getArray()` hands
+  back values like `-11522`; quaternion maths on those saturates every keyframe
+  to a constant and the clip silently drives nothing. Use the accessor's
+  `getElement`/`setElement`, which de- and re-normalise.
+
 ---
 
 ## Rules that came from things going wrong
