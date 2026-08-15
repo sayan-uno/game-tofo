@@ -43,7 +43,7 @@ import type { Mesh } from "@babylonjs/core/Meshes/mesh";
 import { AdvancedDynamicTexture } from "@babylonjs/gui/2D/advancedDynamicTexture";
 import { TextBlock } from "@babylonjs/gui/2D/controls/textBlock";
 import { Rectangle } from "@babylonjs/gui/2D/controls/rectangle";
-import { CHARACTER_HEIGHT, getStanceClip, hasAssets } from "./assets";
+import { CHARACTER_HEIGHT, getPerformableEmotes, getStanceClip, hasAssets } from "./assets";
 import type { CharacterRig } from "./characterRig";
 import { attachAura, type Aura } from "./aura";
 import type { HeldWeapon } from "./weapon";
@@ -221,6 +221,11 @@ interface CharacterInstance {
    *  switches stance exactly once — calling play() again with the same clip
    *  restarts it, which reads as the character flinching. */
   clipId: string | null;
+  /** Unsubscribe for the "emote finished, go back to standing" hook, and the
+   *  token that stops a finished emote from re-posing a character that has
+   *  since been swapped or has started a newer emote. */
+  emoteEnd: (() => void) | null;
+  emoteToken: number;
   /** Rises on every character change; a load that finishes after a newer one
    *  started sees a stale token and throws its result away. */
   loadToken: number;
@@ -525,6 +530,8 @@ export class LobbyScene {
     for (const [uid, character] of this.characters) {
       if (!keep.has(uid)) {
         if (this.drag?.uid === uid) this.endDrag();
+        character.emoteToken++;
+        character.emoteEnd?.();
         clearTimeout(character.bubbleTimer);
         character.loadToken++; // strand any load still in flight for this slot
         character.weaponToken++;
@@ -613,6 +620,9 @@ export class LobbyScene {
     }
 
     character.weaponToken++; // the rig it was following is going away
+    character.emoteToken++;
+    character.emoteEnd?.();
+    character.emoteEnd = null;
     character.weapon?.dispose();
     character.weapon = null;
     character.clipId = null; // new rig, nothing playing on it yet
@@ -755,6 +765,57 @@ export class LobbyScene {
     }, 4500);
   }
 
+  /** Perform an emote on a member's character: play it once, exactly as
+   *  authored, then settle back into whatever stance they were standing in.
+   *
+   *  The character is deliberately NOT held in place. Emotes travel — this one
+   *  covers 0.79 m of the pad — and that movement is the point of owning one;
+   *  a dance pinned to a spot reads as a bug, not a performance.
+   *
+   *  ONE path for everybody. The local player calls this the instant they tap
+   *  so their own emote never waits for a round trip, and every squadmate
+   *  calls it when the server forwards the same id — which is what stops
+   *  "what I see" and "what they see" drifting into two behaviours.
+   *
+   *  Returns false when the character has no model yet: a player who emotes at
+   *  a teammate whose skin is still downloading is not an error, there is just
+   *  nothing to pose. */
+  async playEmote(uid: string, clipId: string): Promise<boolean> {
+    const character = this.characters.get(uid);
+    const rig = character?.rig;
+    if (!character || !rig) return false;
+
+    const mine = ++character.emoteToken;
+    character.emoteEnd?.(); // a second emote replaces the first, never queues
+    character.emoteEnd = null;
+
+    const started = await rig.play(clipId, { loop: false });
+    if (!started || mine !== character.emoteToken) return false;
+    character.clipId = clipId;
+
+    character.emoteEnd = rig.onClipEnd(() => {
+      character.emoteEnd?.();
+      character.emoteEnd = null;
+      if (mine !== character.emoteToken) return; // superseded while performing
+      const stance = getStanceClip(character.weaponId);
+      character.clipId = stance;
+      if (stance) void rig.play(stance, { loop: true });
+    });
+    return true;
+  }
+
+  /** Warm the emote clips into cache. Called when the sheet OPENS, so by the
+   *  time a player has read the menu and picked one the clip is usually
+   *  already here and the emote starts on the tap instead of after a
+   *  download. 72 kB for the whole set today. */
+  async prefetchEmotes(): Promise<void> {
+    if (!hasAssets()) return;
+    const ids = getPerformableEmotes().map((emote) => emote.id);
+    if (ids.length === 0) return;
+    const { prefetchClips } = await import("./characterRig");
+    await prefetchClips(ids, this.scene);
+  }
+
   /** Build a slot: floor pad, hit box, name plate and chat bubble. The BODY is
    *  not built here — the real model is fetched straight away and only if that
    *  fails does a stand-in appear (see buildFallbackBody). */
@@ -881,6 +942,8 @@ export class LobbyScene {
       rig: null,
       weapon: null,
       clipId: null,
+      emoteEnd: null,
+      emoteToken: 0,
       loadToken: 0,
       weaponToken: 0,
     };
@@ -894,6 +957,7 @@ export class LobbyScene {
   dispose() {
     for (const character of this.characters.values()) {
       clearTimeout(character.bubbleTimer);
+      character.emoteEnd?.();
       character.loadToken++;
       character.weaponToken++;
       character.weapon?.dispose();

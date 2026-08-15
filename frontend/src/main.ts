@@ -91,9 +91,35 @@ async function enterLobby(user: User) {
   // the snapshot and the way through to the full profile; only the leader also
   // gets the group controls on it.
   let lobbyState: LobbyState | null = null;
+
+  // Tapping YOUR OWN character opens the emote sheet. Picking one performs it
+  // immediately — the player who chose it never waits for the server — and
+  // tells the squad, who play the same clip through the same path.
+  const onSelfTap = () => {
+    void import("./ui/emotes")
+      .then(({ openEmoteSheet }) =>
+        openEmoteSheet({
+          onOpen: () => void lobby.prefetchEmotes(),
+          onPick: (emoteId) => {
+            void lobby.playEmote(user.uid, emoteId);
+            void emitAck("lobby:emote", { emoteId }).then((res) => {
+              // The emote already played here; this only reports that the
+              // squad didn't get it, which is worth knowing and not fatal.
+              if (res.error) toast(res.error, true);
+            });
+          },
+        })
+      )
+      .catch(() => toast("Couldn't open your emotes", true));
+  };
+
   const onMemberTap = (uid: string) => {
     const state = lobbyState;
-    if (!state || uid === user.uid) return;
+    if (uid === user.uid) {
+      onSelfTap();
+      return;
+    }
+    if (!state) return;
     const member = state.members.find((m) => m.uid === uid);
     if (!member) return;
     const isLeader = state.lobbyId === `L${user.uid}`;
@@ -231,6 +257,13 @@ async function enterLobby(user: User) {
   });
 
   socket.on("lobby:error", ({ error }: { error: string }) => toast(error, true));
+
+  // A squadmate performed an emote. Same call the performer made locally, so
+  // both sides of the group are running one behaviour rather than two.
+  socket.on("lobby:emote", (payload: { uid?: string; emoteId?: string } | null) => {
+    const { uid, emoteId } = payload ?? {};
+    if (uid && emoteId) void lobby.playEmote(uid, emoteId);
+  });
 
   // A member revealed or reset the party's code — keep every open card fresh.
   socket.on("lobby:teamCode", ({ teamCode }: { teamCode: string }) => {

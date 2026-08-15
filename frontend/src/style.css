@@ -3249,3 +3249,117 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .cl-screen { animation: none; }
 }
+
+/* ---------- emote sheet (tap your own character in the lobby) ---------- */
+/* Sits in #ui-root like every other overlay, so it takes pointer events from
+   the `#ui-root > *` rule and the canvas behind it goes quiet while open. */
+.em-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 95; /* above the HUD, below toasts */
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+.em-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(6, 3, 4, 0.5);
+  animation: em-fade 0.16s ease-out;
+}
+.em-sheet {
+  position: relative;
+  width: min(560px, 100%);
+  margin: 0 auto max(14px, env(safe-area-inset-bottom));
+  padding: 14px 16px 12px;
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(24, 10, 14, 0.96), rgba(11, 5, 7, 0.98));
+  border: 1px solid rgba(229, 24, 46, 0.42);
+  box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(10px);
+  animation: em-rise 0.18s cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+@keyframes em-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes em-rise { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .em-backdrop, .em-sheet { animation: none; }
+}
+
+.em-head { display: flex; align-items: baseline; gap: 10px; }
+.em-kicker {
+  font-family: var(--display-font, "Archivo Black", system-ui, sans-serif);
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  color: #e5182e;
+}
+.em-title {
+  font-family: var(--display-font, "Archivo Black", system-ui, sans-serif);
+  font-size: 15px;
+  letter-spacing: 0.04em;
+  margin: 0;
+  color: #f3f4f6;
+}
+.em-close {
+  margin-left: auto;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  color: #a7abb4;
+  font-size: 13px;
+  cursor: pointer;
+}
+.em-close:hover { color: #fff; border-color: rgba(229, 24, 46, 0.55); }
+
+.em-grid {
+  margin-top: 12px;
+  display: grid;
+  /* auto-FIT + centred: with one emote you get one centred card rather than a
+     lonely tile in the corner of an empty grid. */
+  grid-template-columns: repeat(auto-fit, minmax(92px, 116px));
+  justify-content: center;
+  gap: 10px;
+  max-height: 42vh;
+  overflow-y: auto;
+}
+.em-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.035);
+  color: #fff;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.1s ease;
+}
+.em-card:hover { border-color: rgba(229, 24, 46, 0.55); background: rgba(229, 24, 46, 0.09); }
+.em-card:active { transform: scale(0.97); }
+.em-card:focus-visible { outline: 2px solid #ff2f43; outline-offset: 2px; }
+.em-thumb {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 1 / 1;
+  width: 100%;
+  border-radius: 9px;
+  background:
+    radial-gradient(80% 70% at 50% 18%, hsl(var(--h) 62% 34% / 0.75), transparent 70%),
+    linear-gradient(160deg, hsl(var(--h) 45% 16%), #140a0d);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  color: rgba(255, 255, 255, 0.85);
+}
+.em-thumb svg { width: 34%; height: 34%; }
+.em-name { font-size: 12px; font-weight: 600; margin-top: 4px; }
+.em-meta { font-size: 10.5px; color: #7d828c; font-variant-numeric: tabular-nums; }
+.em-empty { margin: 16px 0 6px; color: #a7abb4; font-size: 13px; text-align: center; }
+.em-hint { margin: 10px 0 0; text-align: center; font-size: 11px; color: #7d828c; }
+
+/* Landscape phones: the sheet must not swallow the screen. */
+@media (max-height: 520px) {
+  .em-sheet { width: min(560px, 96%); padding: 10px 12px 8px; border-radius: 14px; }
+  .em-grid { max-height: 38vh; grid-template-columns: repeat(auto-fit, minmax(78px, 104px)); gap: 8px; }
+  .em-hint { display: none; }
+}

@@ -143,6 +143,18 @@ export async function prefetchCharacter(id: string, scene: Scene): Promise<void>
   ]);
 }
 
+/** Pull clips into cache without posing anything, so the first performance
+ *  doesn't wait on a download. Failures are swallowed — this is a head start,
+ *  not a requirement, and play() will fetch the clip itself if it has to. */
+export async function prefetchClips(ids: string[], scene: Scene): Promise<void> {
+  await Promise.all(
+    ids.map((id) => {
+      const clip = getEmote(id);
+      return clip?.url ? load(clip.url, scene).catch(() => {}) : Promise.resolve();
+    })
+  );
+}
+
 /** One posed, animatable character in a scene.
  *
  *  Owns its instantiated nodes and every clip retargeted onto them, so
@@ -280,7 +292,15 @@ export class CharacterRig {
   }
 
   /** Load (once) and play a clip. Repeat calls are cheap: the retargeted group
-   *  is kept, so replaying an emote costs no network and no rebuild. */
+   *  is kept, so replaying an emote costs no network and no rebuild.
+   *
+   *  Clips are played EXACTLY as authored, root motion included: an emote that
+   *  travels is meant to travel — that movement is most of what makes it worth
+   *  owning. Measured on dance-shake-it-off: it wanders 0.79 m across the pad
+   *  and its last frame lands back where it started, so handing back to the
+   *  standing stance costs a 3.5 cm step nobody can see. A clip that does NOT
+   *  end where it began would leave the character standing off its pad — worth
+   *  knowing if a future emote ever looks parked in the wrong place. */
   async play(clipId: string, opts: { loop?: boolean } = {}): Promise<boolean> {
     const emote = getEmote(clipId);
     if (!emote?.url || this.disposed) return false;

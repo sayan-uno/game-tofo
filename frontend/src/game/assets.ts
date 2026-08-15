@@ -49,6 +49,16 @@ export const getLobbyIdleClip = (): string | null => catalog?.lobbyIdleClip ?? n
 export const getStanceClip = (weaponId: string | null): string | null =>
   (weaponId ? weapons.get(weaponId)?.stance : undefined) ?? catalog?.lobbyIdleClip ?? null;
 
+/** The clips a player can choose to PERFORM.
+ *
+ *  A filter over the catalog rather than a second list to keep in step with
+ *  it: only `emote` clips are meant to be performed on purpose — locomotion
+ *  and traversal are movement the game plays for you — so shipping a new
+ *  dance is a catalog line and nothing here changes. The server enforces the
+ *  same rule (canPerform), because this list is only a menu. */
+export const getPerformableEmotes = (): CatalogEmote[] =>
+  [...emotes.values()].filter((e) => e.category === "emote" && e.owned && e.url);
+
 /** True once at least one character URL is known — i.e. the CDN is configured
  *  and worth trying. The lobby checks this before paying for the rig chunk at
  *  all, so a deployment with no CDN never downloads a byte of it. */

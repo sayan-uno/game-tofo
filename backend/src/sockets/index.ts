@@ -29,11 +29,16 @@ import {
 } from "../redis.js";
 import { areFriends, displayName, getFriendIds, getUserById, getUserByUid, getUsersByIds } from "../services/users.js";
 import { registerChatHandlers, syncTeamChatSession } from "./chat.js";
-import { resolveCharacter, resolveWeapon } from "../services/catalog.js";
+import { canPerform, resolveCharacter, resolveWeapon } from "../services/catalog.js";
 
 interface AuthedSocket extends Socket {
   data: { auth: AuthPayload };
 }
+
+/** Floor between two emotes from one connection. Long enough to stop a held
+ *  finger (or a script) making every squadmate re-pose on every frame, short
+ *  enough that a player who genuinely wants to emote twice can. */
+const EMOTE_COOLDOWN_MS = 1200;
 
 /** Push the current member list (and party mode) of a lobby to everyone in it.
  *  Exported because equipping a character changes what squadmates see, so the
@@ -192,6 +197,8 @@ export function registerSockets(io: Server) {
     const socket = rawSocket as AuthedSocket;
     const { userId, uid, name } = socket.data.auth;
     const soloLobby = `L${uid}`;
+    /** When this connection may emote again — see EMOTE_COOLDOWN_MS. */
+    let emoteReadyAt = 0;
 
     // Register ALL event handlers before any awaited setup below — events a
     // fast client emits right after connecting would otherwise be dropped.
@@ -387,6 +394,35 @@ export function registerSockets(io: Server) {
       } catch (err) {
         console.error("user:dnd error:", err);
         ack?.({ error: "Could not update Do Not Disturb" });
+      }
+    });
+
+    // Perform an emote on my own character, for the whole squad to see.
+    //
+    // The performer does NOT wait for this: they play the clip the moment they
+    // tap it and this call only tells everyone else, so the one player whose
+    // latency they can feel never pays a round trip for their own emote.
+    socket.on("lobby:emote", async (payload: { emoteId?: string } | null, ack?: (r: object) => void) => {
+      try {
+        const { emoteId } = payload ?? {};
+        const id = String(emoteId || "");
+        // The client's sheet is a menu, not a guarantee — a modified client
+        // can ask for "fall", or for an emote it hasn't bought.
+        if (!canPerform(id)) return ack?.({ error: "You can't perform that" });
+        // Held per connection, in memory: emote spam costs every squadmate a
+        // clip download and a re-pose, so the SERVER owns the floor on it
+        // rather than trusting the sheet to stay closed.
+        const now = Date.now();
+        if (now < emoteReadyAt) return ack?.({ error: "Slow down" });
+        emoteReadyAt = now + EMOTE_COOLDOWN_MS;
+        const lobbyId = await getUserLobby(userId);
+        // Alone is not an error: the emote still played on their own screen,
+        // there is simply nobody to forward it to.
+        if (lobbyId) socket.to(`room:${lobbyId}`).emit("lobby:emote", { uid, emoteId: id });
+        ack?.({ ok: true });
+      } catch (err) {
+        console.error("lobby:emote error:", err);
+        ack?.({ error: "Emote failed" });
       }
     });
 

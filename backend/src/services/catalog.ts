@@ -192,6 +192,20 @@ export function canEquip(id: string): boolean {
   return item !== undefined && item.free;
 }
 
+/** Can this player perform this clip on purpose?
+ *
+ *  Only `emote` clips qualify: locomotion and traversal are movement the game
+ *  plays FOR you, and a lobby full of players triggering "fall" on demand is
+ *  not the feature. The `free` check is the same ownership seam as canEquip —
+ *  when paid emotes ship, the user_items lookup goes here and nowhere else.
+ *
+ *  Enforced server-side because the client's list is only a menu: a modified
+ *  client can emit any id it likes. */
+export function canPerform(id: string): boolean {
+  const clip = EMOTES.find((e) => e.id === id);
+  return clip !== undefined && clip.category === "emote" && clip.free;
+}
+
 /** Same question for a weapon. Null is always allowed — that's unequipping. */
 export function canEquipWeapon(id: string | null): boolean {
   if (id === null) return true;
