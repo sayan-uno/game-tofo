@@ -21,6 +21,15 @@ export interface RankMember {
   isBot: boolean;
 }
 
+/** A live, authoritative simulation of ONE runner, owned by the match runtime.
+ *  The game supplies it; the platform only feeds inputs and asks whether the
+ *  runner is still going, so the platform never learns what a lane is. */
+export interface ServerRunnerSim {
+  addInput(input: MatchInput): void;
+  advanceTo(tick: number): void;
+  isOut(): boolean;
+}
+
 export interface GameServerDefinition {
   id: string;
   name: string;
@@ -39,8 +48,14 @@ export interface GameServerDefinition {
   inputLateLimitMs: number;
   inputMaxPerSec: number;
   isValidInputKind(kind: string): boolean;
-  /** Authoritative results: replays the shared sim over the input logs. */
-  rank(members: RankMember[], endTick: number): Standing[];
+  /** Build the server's own simulation of a runner. Used to decide when the
+   *  match is over because everyone has crashed — the server must know that
+   *  itself rather than believe a client that says "I'm out". */
+  createSim(seed: number, seat: number): ServerRunnerSim;
+  /** Authoritative results: replays the shared sim over the input logs, on the
+   *  course the match's seed produced. Nothing a client sent is trusted here
+   *  beyond the inputs themselves. */
+  rank(members: RankMember[], endTick: number, seed: number): Standing[];
 }
 
 const games = new Map<string, GameServerDefinition>();

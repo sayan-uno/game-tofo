@@ -4,7 +4,22 @@
 //   2. review the generated SQL (especially anything that drops/renames with data)
 //   3. `npm run db:migrate` — applies pending migrations to the database
 import { sql } from "drizzle-orm";
-import { pgTable, primaryKey, uuid, varchar, text, timestamp, index, uniqueIndex, unique, check } from "drizzle-orm/pg-core";
+import {
+  pgTable,
+  primaryKey,
+  uuid,
+  varchar,
+  text,
+  timestamp,
+  index,
+  uniqueIndex,
+  unique,
+  check,
+  integer,
+  boolean,
+  jsonb,
+  bigint,
+} from "drizzle-orm/pg-core";
 
 export const users = pgTable(
   "users",
@@ -150,3 +165,81 @@ export const friendships = pgTable(
     check("friendships_check", sql`requester_id <> addressee_id`),
   ]
 );
+
+// ---------------------------------------------------------------------------
+// Matches
+//
+// One row per finished match, written ONCE by the server from its own replay
+// of the input logs — never from anything a client reported. `match_key` is
+// the runtime match id and is unique, which is what makes the write
+// idempotent: a retry (or a double "match ended") cannot double-count a win.
+//
+// Nothing game-specific gets a column. Per-game numbers live in
+// match_players.detail as JSON, so a second game adds no migration.
+// ---------------------------------------------------------------------------
+export const matches = pgTable(
+  "matches",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    matchKey: text("match_key").notNull().unique("matches_match_key_key"),
+    gameId: varchar("game_id", { length: 40 }).notNull(),
+    // The course seed. 32-bit unsigned, so it does not fit `integer`.
+    seed: bigint("seed", { mode: "number" }).notNull(),
+    /** timeout | all-out | abandoned | aborted */
+    reason: text("reason").notNull(),
+    /** Simulation ticks the match ran for. */
+    ticks: integer("ticks").notNull(),
+    playerCount: integer("player_count").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("idx_matches_created").on(t.createdAt), index("idx_matches_game").on(t.gameId, t.createdAt)]
+);
+
+// One row per runner in a match. user_id is NULL for server bots (M3), which
+// is why the name is snapshotted here rather than joined — a bot has no user
+// row, and a real player's tag at the time of the match is what the history
+// should show.
+export const matchPlayers = pgTable(
+  "match_players",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    matchId: uuid("match_id")
+      .notNull()
+      .references(() => matches.id, { onDelete: "cascade" }),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
+    isBot: boolean("is_bot").notNull().default(false),
+    name: text("name").notNull(),
+    /** 1 = first. Equal results share a placement, so several rows can be 1. */
+    placement: integer("placement").notNull(),
+    score: integer("score").notNull(),
+    forfeit: boolean("forfeit").notNull().default(false),
+    /** Per-game numbers (distance, coins, near misses…). */
+    detail: jsonb("detail").notNull().default({}),
+  },
+  (t) => [
+    index("idx_match_players_match").on(t.matchId),
+    index("idx_match_players_user").on(t.userId),
+    unique("match_players_match_user_key").on(t.matchId, t.userId),
+  ]
+);
+
+// Pre-aggregated career totals: the profile page is opened by a deliberate tap
+// and must stay ONE primary-key read, so the aggregate is maintained at write
+// time rather than computed from match_players on every open.
+export const playerStats = pgTable("player_stats", {
+  userId: uuid("user_id")
+    .primaryKey()
+    .references(() => users.id, { onDelete: "cascade" }),
+  matches: integer("matches").notNull().default(0),
+  wins: integer("wins").notNull().default(0),
+  losses: integer("losses").notNull().default(0),
+  draws: integer("draws").notNull().default(0),
+  /** Best (lowest) placement ever reached. */
+  bestPlacement: integer("best_placement"),
+  totalScore: bigint("total_score", { mode: "number" }).notNull().default(0),
+  coins: bigint("coins", { mode: "number" }).notNull().default(0),
+  distanceMetres: bigint("distance_metres", { mode: "number" }).notNull().default(0),
+  playtimeSeconds: integer("playtime_seconds").notNull().default(0),
+  xp: bigint("xp", { mode: "number" }).notNull().default(0),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});

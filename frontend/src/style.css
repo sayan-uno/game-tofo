@@ -3841,6 +3841,14 @@ body.in-match .chat-panel {
   color: #a7abb4;
   font-size: 12px;
   text-align: right;
+  white-space: nowrap;
+}
+.mr-xp {
+  text-align: right;
+  font-size: 12px;
+  font-weight: 700;
+  color: #46c98a;
+  white-space: nowrap;
 }
 .mr-actions {
   display: flex;

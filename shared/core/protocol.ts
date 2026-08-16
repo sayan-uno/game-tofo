@@ -75,6 +75,8 @@ export interface MatchEnd {
   standings: Standing[];
   /** Ticks the match ran for. */
   ticks: number;
+  /** XP granted per uid, as actually written to the database. */
+  xp?: Record<string, number>;
 }
 
 /** Everything a client needs to (re)join a match already in flight — a page

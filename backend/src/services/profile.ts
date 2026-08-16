@@ -1,5 +1,6 @@
 import { getSocketId } from "../redis.js";
 import { countAcceptedFriends } from "./friends.js";
+import { getPlayerStats } from "./matchResults.js";
 import { toPublicUser, type UserRow } from "./users.js";
 
 /** ---------------------------------------------------------------------------
@@ -43,14 +44,35 @@ const NO_MATCHES_YET: CareerStats = {
   bestPlacement: null,
 };
 
-/** THE seam. Swap the body for the real aggregate once matches exist. */
-async function careerStats(_userId: string): Promise<CareerStats> {
-  return NO_MATCHES_YET;
-}
-
-/** Total career XP. Match rewards land here once games ship. */
-function careerXp(_stats: CareerStats): number {
-  return 0;
+/** THE seam — now pointing at the real aggregate.
+ *
+ *  ONE primary-key read of the pre-aggregated player_stats row (maintained at
+ *  match-write time), returning both the career block and the XP total,
+ *  because reading the same row twice to answer two questions about it is the
+ *  easy way to double the cost of this page for nothing.
+ *
+ *  Kills and deaths stay zero: a runner has neither. They keep their place in
+ *  the shape because the profile UI renders them and a future game may fill
+ *  them. */
+async function career(userId: string): Promise<{ stats: CareerStats; xp: number }> {
+  const row = await getPlayerStats(userId);
+  if (!row) return { stats: NO_MATCHES_YET, xp: 0 };
+  const xp = Number(row.xp);
+  if (row.matches === 0) return { stats: NO_MATCHES_YET, xp };
+  return {
+    stats: {
+      matches: row.matches,
+      wins: row.wins,
+      losses: row.losses,
+      winRate: Math.round((row.wins / row.matches) * 100),
+      kills: 0,
+      deaths: 0,
+      kd: null,
+      playtimeMinutes: Math.round(row.playtimeSeconds / 60),
+      bestPlacement: row.bestPlacement,
+    },
+    xp,
+  };
 }
 
 /** ---------------------------------------------------------------------------
@@ -181,12 +203,13 @@ function achievementsFor(user: UserRow, friends: number, stats: CareerStats): Ac
  *  and a squadmate's, with the owner-only fields blanked for everyone else. */
 export async function buildProfile(user: UserRow, viewerId: string) {
   const isSelf = user.id === viewerId;
-  const [friends, stats, socketId] = await Promise.all([
+  const [friends, careerRow, socketId] = await Promise.all([
     countAcceptedFriends(user.id),
-    careerStats(user.id),
+    career(user.id),
     getSocketId(user.id),
   ]);
-  const xp = progression(careerXp(stats));
+  const stats = careerRow.stats;
+  const xp = progression(careerRow.xp);
   return {
     user: toPublicUser(user),
     isSelf,

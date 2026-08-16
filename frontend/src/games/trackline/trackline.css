@@ -13,7 +13,35 @@
   left: 0;
   right: 0;
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.tl-score {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.tl-score-n {
+  font-family: "Archivo Black", "Arial Black", system-ui, sans-serif;
+  font-size: 20px;
+  color: #fff;
+  text-shadow: 0 2px 6px rgba(0, 0, 0, 0.9);
+}
+.tl-coins {
+  font-size: 14px;
+  font-weight: 700;
+  color: #ffd45e;
+  text-shadow: 0 2px 6px rgba(0, 0, 0, 0.9);
+}
+/* Out of the run: the HUD steps back so the spectated runner reads clearly. */
+.tl-hud.dead .tl-score,
+.tl-hud.dead .tl-hint {
+  opacity: 0.45;
+}
+.tl-hud.dead .tl-timer {
+  opacity: 0.7;
 }
 .tl-timer {
   font-family: "Archivo Black", "Arial Black", system-ui, sans-serif;
@@ -54,6 +82,9 @@
 .tl-row.left,
 .tl-row.out {
   opacity: 0.5;
+}
+.tl-row.out .tl-status {
+  color: #ff8493;
 }
 .tl-name {
   font-weight: 700;

@@ -60,6 +60,11 @@ export const INPUT_LATE_LIMIT_MS = 1000;
 /** Per-runner input rate ceiling per second — a swipe storm is not gameplay. */
 export const INPUT_MAX_PER_SEC = 10;
 
+/** Points awarded per unit, mirrored in scoreOf(). Here so the results screen
+ *  and any future tuning read one place. */
+export const POINTS_PER_COIN = 10;
+export const POINTS_PER_NEAR_MISS = 25;
+
 /** The rules the client must be told (it could read its own copy, but the
  *  server is the authority and a mismatched build should still agree). */
 export function publicRules(): Record<string, number> {
@@ -69,5 +74,7 @@ export function publicRules(): Record<string, number> {
     lanes: LANES,
     laneWidth: LANE_WIDTH,
     countdownMs: COUNTDOWN_MS,
+    pointsPerCoin: POINTS_PER_COIN,
+    pointsPerNearMiss: POINTS_PER_NEAR_MISS,
   };
 }

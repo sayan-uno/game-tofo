@@ -1,18 +1,21 @@
 // The Trackline runner simulation — deterministic, fixed-step, shared.
 //
 // One instance per runner. The same input log produces the same state on every
-// client and on the server, which is the whole netcode: only inputs travel,
-// everybody replays. Rules:
+// client and on the server, which IS the netcode: only inputs travel, everyone
+// replays. The rules that keep that true:
 //
-//  - Never read the wall clock, Math.random, or anything outside `state` and
-//    the inputs. Determinism is the contract.
-//  - Every operation is plain arithmetic on doubles in a fixed order — that IS
-//    reproducible across engines; transcendental functions are avoided.
-//  - Inputs are stamped in ticks. Applying an input for tick T means: it takes
-//    effect at the start of tick T's step.
+//  - Never read the wall clock, Math.random, or anything outside `state`, the
+//    inputs and the seeded course. Determinism is the contract.
+//  - Plain arithmetic in a fixed order. No transcendental functions, so two
+//    engines cannot disagree in the last bit and drift apart over 7,200 ticks.
+//  - Inputs are stamped in ticks. An input stamped T is applied at the start of
+//    tick T's step, on every device, however late it arrived.
 //
-// Milestone 1 ships lanes and distance only; jump / roll / obstacles / coins
-// land in M2 on this same skeleton.
+// The verbs are the genre's: change lane, jump a low barrier, roll under a
+// gantry. Everything else — who crashed, who has how many coins, the final
+// score — falls out of these steps, which is why the server can recompute the
+// whole match from the input logs alone and never has to trust a client.
+import { Course, type Obstacle } from "./course.js";
 import { DURATION_TICKS, LANES, LANE_CHANGE_TICKS, TICK_RATE, distanceAt } from "./rules.js";
 
 export type InputKind = "left" | "right" | "jump" | "roll";
@@ -24,19 +27,59 @@ export interface RunnerInput {
   kind: InputKind;
 }
 
+/** ---------------------------------------------------------------------------
+ *  Movement constants. Tuned against the speed schedule in rules.ts: at
+ *  SPEED_MAX a jump covers ~16 m and a roll ~13 m, both comfortably shorter
+ *  than ROW_SPACING, so neither verb can carry you blindly through the NEXT
+ *  row before you can react to it.
+ * ------------------------------------------------------------------------- */
+export const JUMP_TICKS = 45; // 0.75 s airborne
+export const JUMP_HEIGHT = 1.7; // metres at the apex
+export const ROLL_TICKS = 36; // 0.6 s low
+
+/** Clears a low barrier while the runner is above this. */
+const LOW_CLEAR_Y = 0.55;
+
+/** How close to an obstacle's centre, in LANE UNITS, counts as touching it:
+ *  inside HIT_HALF is a direct hit, the band out to GRAZE_HALF is a graze.
+ *
+ *  GRAZE_HALF must not exceed HALF A LANE. Anything wider makes an obstacle
+ *  bleed into the lanes either side of it, so a runner that has just passed a
+ *  row and starts moving to the next safe lane clips the barrier standing
+ *  beside it — the solvability check found exactly that, on nearly every seed,
+ *  with the 0.62 this used to be. Half a lane reads as "you are clear once
+ *  your centre is out of its half of the track", which is also what a player
+ *  sees. */
+const HIT_HALF = 0.3;
+const GRAZE_HALF = 0.5;
+/** A second graze within this many ticks is a crash rather than a stumble. */
+const STUMBLE_WINDOW = 2 * TICK_RATE;
+
 export interface RunnerState {
   tick: number;
   /** Lane the runner is heading to (0 = leftmost). */
   lane: number;
-  /** Lateral position in LANE UNITS (lane index space, fractional mid-change). */
+  /** Lateral position in LANE UNITS (fractional mid-change). */
   x: number;
-  /** Metres run since tick 0 — a pure function of the tick (see rules). */
+  /** Height above the track, metres. 0 while grounded. */
+  y: number;
+  /** Ticks left of the jump arc; 0 when grounded. */
+  airborne: number;
+  /** Ticks left of the roll; 0 when upright. */
+  rolling: number;
+  /** Metres run since tick 0. Frozen at the moment of death. */
   distance: number;
   alive: boolean;
+  /** Tick the runner crashed on, or -1. Ranks the dead against each other. */
+  deadAtTick: number;
+  coins: number;
+  /** Obstacles cleared by a jump or a roll — the risky way past. */
+  nearMisses: number;
+  /** Tick of the last graze, or -1. */
+  stumbledAtTick: number;
 }
 
-/** Runners start in the middle: lane 1 or 2 by seat, spread so a full lobby
- *  doesn't stack four people in one lane on tick 0. */
+/** Runners start spread across the middle lanes rather than stacked. */
 export function startLane(seat: number): number {
   const order = [1, 2, 0, 3];
   return order[seat % order.length];
@@ -44,15 +87,35 @@ export function startLane(seat: number): number {
 
 export function createState(seat: number): RunnerState {
   const lane = startLane(seat);
-  return { tick: 0, lane, x: lane, distance: 0, alive: true };
+  return {
+    tick: 0,
+    lane,
+    x: lane,
+    y: 0,
+    airborne: 0,
+    rolling: 0,
+    distance: 0,
+    alive: true,
+    deadAtTick: -1,
+    coins: 0,
+    nearMisses: 0,
+    stumbledAtTick: -1,
+  };
 }
 
 /** Lateral speed in lane units per tick — a full lane in LANE_CHANGE_TICKS. */
 const X_STEP = 1 / LANE_CHANGE_TICKS;
 
-/** Apply one input to the state AT its tick. Invalid or impossible inputs are
- *  ignored deterministically (every replayer ignores them the same way), so a
- *  hacked client that sends "left" at lane 0 changes nothing anywhere. */
+/** Height of the jump arc at `t` ticks into it. A parabola through 0 at both
+ *  ends: cheap, exact, and it peaks in the middle where the barrier is. */
+function arc(ticksLeft: number): number {
+  const t = 1 - ticksLeft / JUMP_TICKS;
+  return 4 * JUMP_HEIGHT * t * (1 - t);
+}
+
+/** Apply one input AT its tick. Impossible inputs are ignored the same way on
+ *  every device, so a modified client that spams "left" at lane 0 changes
+ *  nothing anywhere — the server replays the same no-op. */
 export function applyInput(s: RunnerState, kind: InputKind): void {
   if (!s.alive) return;
   switch (kind) {
@@ -63,48 +126,190 @@ export function applyInput(s: RunnerState, kind: InputKind): void {
       if (s.lane < LANES - 1) s.lane += 1;
       return;
     case "jump":
+      // No double jumps; a roll can be cut short by jumping out of it.
+      if (s.airborne === 0) {
+        s.airborne = JUMP_TICKS;
+        s.rolling = 0;
+      }
+      return;
     case "roll":
-      // M2: airborne / sliding states + obstacle interaction.
+      // Rolling in mid-air drops you straight down — the way to duck a gantry
+      // you jumped at by mistake, and how a good player recovers.
+      s.airborne = 0;
+      s.y = 0;
+      s.rolling = ROLL_TICKS;
       return;
   }
 }
 
+/** Can this state pass this obstacle? */
+function clears(s: RunnerState, o: Obstacle): boolean {
+  switch (o.kind) {
+    case "low":
+      return s.y > LOW_CLEAR_Y;
+    case "high":
+      // Only a roll. Being airborne is worse than doing nothing.
+      return s.rolling > 0 && s.airborne === 0;
+    case "full":
+    case "train":
+      return false;
+  }
+}
+
+/** Kill a runner. Idempotent, so a tick that finds two collisions still reads
+ *  as one death at one tick. */
+function kill(s: RunnerState, tick: number): void {
+  if (!s.alive) return;
+  s.alive = false;
+  s.deadAtTick = tick;
+  s.airborne = 0;
+  s.rolling = 0;
+  s.y = 0;
+}
+
 /** Advance exactly one tick. */
-export function step(s: RunnerState): void {
+export function step(s: RunnerState, course: Course): void {
   s.tick += 1;
-  // Slide towards the target lane at a fixed rate; snap when within a step.
+  if (!s.alive) return;
+
+  // Lateral: slide towards the target lane, snapping when within a step.
   const dx = s.lane - s.x;
   if (dx > X_STEP) s.x += X_STEP;
   else if (dx < -X_STEP) s.x -= X_STEP;
   else s.x = s.lane;
-  s.distance = s.alive ? distanceAt(s.tick / TICK_RATE) : s.distance;
-  if (s.tick >= DURATION_TICKS) {
-    // The clock ran out: state freezes here (the match is over).
+
+  // Vertical.
+  if (s.airborne > 0) {
+    s.airborne -= 1;
+    s.y = s.airborne > 0 ? arc(s.airborne) : 0;
+  }
+  if (s.rolling > 0) s.rolling -= 1;
+
+  const from = s.distance;
+  const to = distanceAt(s.tick / TICK_RATE);
+  s.distance = to;
+  if (s.tick >= DURATION_TICKS) return; // the clock ran out; nothing more counts
+
+  // Collisions. Entering an obstacle decides life or death; leaving one you
+  // cleared is what pays the near-miss, so both edges are checked.
+  for (const o of course.obstaclesBetween(from, to)) {
+    const gap = Math.abs(s.x - o.lane);
+    if (gap > GRAZE_HALF) continue;
+    const entering = from <= o.z && to > o.z;
+    const inside = from > o.z && from < o.z + o.length;
+    if ((entering || inside) && !clears(s, o)) {
+      if (gap <= HIT_HALF) {
+        kill(s, s.tick);
+        return;
+      }
+      // A graze: survivable once. Twice inside STUMBLE_WINDOW is a crash —
+      // clipping your way down the track is not a strategy.
+      if (s.stumbledAtTick >= 0 && s.tick - s.stumbledAtTick < STUMBLE_WINDOW) {
+        kill(s, s.tick);
+        return;
+      }
+      s.stumbledAtTick = s.tick;
+    }
+    // Cleared it and just came out the far side.
+    const end = o.z + o.length;
+    if (from < end && to >= end && clears(s, o) && gap <= HIT_HALF) s.nearMisses += 1;
+  }
+
+  for (const c of course.coinsBetween(from, to)) {
+    if (Math.abs(s.x - c.lane) <= 0.55) s.coins += 1;
   }
 }
 
-/** Run a fresh state through an input log up to (and including) `toTick`.
- *  Used for late/out-of-order inputs and for joining mid-match: cheap enough
- *  to redo whole — a full two-minute match is 7,200 trivial steps. */
-export function replay(seat: number, inputs: readonly RunnerInput[], toTick: number): RunnerState {
+/** Points. Coins are the reward for taking the line, near-misses the reward for
+ *  using the verbs, distance the floor everyone shares — computed here so the
+ *  server's replay and the client's live HUD can never disagree. */
+export function scoreOf(s: RunnerState): number {
+  return Math.floor(s.distance) + s.coins * 10 + s.nearMisses * 25;
+}
+
+/** Run a fresh state through an input log up to `toTick`. Cheap enough to redo
+ *  whole (a full match is 7,200 trivial steps), which is what makes late and
+ *  out-of-order inputs a non-event: rewind by replaying. */
+export function replay(seat: number, inputs: readonly RunnerInput[], toTick: number, course: Course): RunnerState {
   const s = createState(seat);
   const sorted = [...inputs].sort((a, b) => a.tick - b.tick);
   let i = 0;
   while (s.tick < toTick) {
-    // Inputs stamped for the NEXT tick take effect before that tick's step.
     const next = s.tick + 1;
     while (i < sorted.length && sorted[i].tick <= next) {
       applyInput(s, sorted[i].kind);
       i++;
     }
-    step(s);
+    step(s, course);
   }
   return s;
 }
 
-/** Score for the results screen — M1: distance only (equal for everyone
- *  alive; M2 adds coins and near-misses). Kept here so the SERVER computes it
- *  from the same code the client shows live. */
-export function scoreOf(s: RunnerState): number {
-  return Math.floor(s.distance);
+/** ---------------------------------------------------------------------------
+ *  RunnerSim — one runner's state, its input log, and the bookkeeping that
+ *  keeps stepping cheap.
+ *
+ *  Shared by the client (which draws it) and the server (which judges it) on
+ *  purpose: an incremental fast path here and a replay there is exactly how
+ *  the two would drift apart, so there is one implementation of both.
+ * ------------------------------------------------------------------------- */
+export class RunnerSim {
+  state: RunnerState;
+  private log: RunnerInput[] = [];
+  /** Index of the next input not yet applied on the incremental path. */
+  private cursor = 0;
+  /** An input arrived for a tick already simulated — rebuild before trusting. */
+  private dirty = false;
+
+  constructor(
+    readonly seat: number,
+    private course: Course
+  ) {
+    this.state = createState(seat);
+  }
+
+  get inputs(): readonly RunnerInput[] {
+    return this.log;
+  }
+
+  /** Record an input. Out-of-order or already-past inputs mark the sim dirty
+   *  rather than being dropped: the rewind happens on the next advance. */
+  addInput(input: RunnerInput): void {
+    const last = this.log.length ? this.log[this.log.length - 1] : null;
+    if (input.tick <= this.state.tick || (last && input.tick < last.tick)) this.dirty = true;
+    this.log.push(input);
+  }
+
+  /** Bring the sim to `tick`. Incremental when it can be, a full replay when
+   *  the log changed behind the current position or the gap is large. */
+  advanceTo(tick: number): void {
+    if (this.state.tick >= tick && !this.dirty) return;
+    if (this.dirty || tick - this.state.tick > 3 * TICK_RATE) {
+      this.log.sort((a, b) => a.tick - b.tick);
+      this.state = replay(this.seat, this.log, tick, this.course);
+      const at = this.log.findIndex((i) => i.tick > tick);
+      this.cursor = at < 0 ? this.log.length : at;
+      this.dirty = false;
+      return;
+    }
+    const s = this.state;
+    while (s.tick < tick) {
+      const next = s.tick + 1;
+      while (this.cursor < this.log.length && this.log[this.cursor].tick <= next) {
+        applyInput(s, this.log[this.cursor].kind);
+        this.cursor++;
+      }
+      step(s, this.course);
+    }
+  }
+
+  /** Apply an input the local player just made, at the next tick, and record
+   *  it — prediction and log stay one operation so they cannot disagree. */
+  predict(kind: InputKind): RunnerInput {
+    const input: RunnerInput = { tick: this.state.tick + 1, kind };
+    applyInput(this.state, kind);
+    this.log.push(input);
+    this.cursor = this.log.length;
+    return input;
+  }
 }

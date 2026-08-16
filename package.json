@@ -8,7 +8,8 @@
     "db:generate": "npm --prefix backend run db:generate",
     "db:migrate": "npm --prefix backend run db:migrate",
     "sync:shared": "node scripts/sync-shared.mjs",
-    "check:shared": "node scripts/sync-shared.mjs --check"
+    "check:shared": "node scripts/sync-shared.mjs --check",
+    "check:sim": "backend/node_modules/.bin/tsx tools/checks/trackline-sim.ts"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"

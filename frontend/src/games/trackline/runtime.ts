@@ -20,25 +20,21 @@ import { Color3, Color4 } from "@babylonjs/core/Maths/math.color";
 import type { GameRuntime, GameRuntimeContext } from "../../platform/types";
 import type { MatchEnd, MatchInputRelay } from "../../shared/core/protocol";
 import {
+  Course,
   DURATION_TICKS,
+  RunnerSim,
   TICK_RATE,
-  applyInput,
-  createState,
-  replay,
-  step,
+  scoreOf,
   type InputKind,
-  type RunnerInput,
-  type RunnerState,
 } from "../../shared/games/trackline/index";
 import { Controls } from "./controls";
 import { TracklineHud } from "./hud";
+import { Props } from "./props";
 import { RunnerView } from "./runnerView";
 import { World, laneToX } from "./world";
 
 /** Ghosts run this many ticks behind the local clock (150 ms). */
 const GHOST_DELAY = 9;
-/** Beyond this gap, catching up steps one at a time is silly — replay. */
-const FAST_FORWARD_TICKS = 180;
 const CAM_BACK = 7.5;
 const CAM_UP = 3.3;
 const CAM_LOOK_AHEAD = 10;
@@ -47,13 +43,9 @@ const CAM_LOOK_UP = 1.0;
 interface Sim {
   uid: string;
   seat: number;
-  state: RunnerState;
-  /** Sorted by tick once dirty is cleared. */
-  log: RunnerInput[];
-  /** Index into log of the next input not yet applied (incremental path). */
-  cursor: number;
-  /** A late/out-of-order input arrived: rebuild from the log. */
-  dirty: boolean;
+  /** THE simulation — the same class the server judges with, so the run drawn
+   *  here and the run scored there cannot drift apart. */
+  sim: RunnerSim;
   left: boolean;
   view: RunnerView;
 }
@@ -62,6 +54,8 @@ export class TracklineRuntime implements GameRuntime {
   private scene: Scene;
   private camera: TargetCamera;
   private world: World | null = null;
+  private props: Props | null = null;
+  private course: Course;
   private hud: TracklineHud | null = null;
   private controls: Controls | null = null;
   private local: Sim;
@@ -83,6 +77,7 @@ export class TracklineRuntime implements GameRuntime {
     if (this.tickRate !== TICK_RATE || this.durationTicks !== DURATION_TICKS) {
       console.warn("[trackline] rules differ from this build's copy — server wins", ctx.rules);
     }
+    this.course = new Course(ctx.seed);
     this.scene = new Scene(ctx.engine);
     const scene = this.scene;
     scene.clearColor = new Color4(0.05, 0.06, 0.1, 1);
@@ -109,10 +104,7 @@ export class TracklineRuntime implements GameRuntime {
     const sims: Sim[] = ctx.roster.map((r, seat) => ({
       uid: r.uid,
       seat,
-      state: createState(seat),
-      log: [],
-      cursor: 0,
-      dirty: false,
+      sim: new RunnerSim(seat, this.course),
       left: false,
       view: new RunnerView(scene, r.uid, r.name, r.uid === ctx.you),
     }));
@@ -129,11 +121,12 @@ export class TracklineRuntime implements GameRuntime {
     const ctx = this.ctx;
     const trackTex = ctx.assets.has("textures/track.webp") ? await ctx.assets.get("textures/track.webp") : null;
     this.world = new World(this.scene, trackTex);
+    this.props = new Props(this.scene, this.course);
     this.hud = new TracklineHud(ctx.hudRoot, ctx.roster, ctx.you);
     // Characters in parallel; each is already in the on-device store from the
     // lobby, so this is a parse, not a download.
     await Promise.all(this.allSims().map((s) => s.view.load(ctx.roster[s.seat].character)));
-    this.placeAll();
+    this.placeAll(0);
     // Compile every material now, behind the curtain, so the first real frame
     // doesn't stall on shader builds.
     await Promise.all(
@@ -149,14 +142,15 @@ export class TracklineRuntime implements GameRuntime {
   onRemoteInput(input: MatchInputRelay): void {
     const sim = this.byUid.get(input.uid);
     if (!sim || sim === this.local || sim.left) return;
-    this.pushInput(sim, { tick: input.tick, kind: input.kind as InputKind });
+    sim.sim.addInput({ tick: input.tick, kind: input.kind as InputKind });
   }
 
   seedInputs(inputs: MatchInputRelay[]): void {
     for (const i of inputs) {
       const sim = this.byUid.get(i.uid);
-      if (!sim) continue;
-      this.pushInput(sim, { tick: i.tick, kind: i.kind as InputKind });
+      // Own inputs included: on a reconnect the log is the only record of what
+      // this player did before the tab went away.
+      if (sim) sim.sim.addInput({ tick: i.tick, kind: i.kind as InputKind });
     }
   }
 
@@ -166,6 +160,47 @@ export class TracklineRuntime implements GameRuntime {
     sim.left = true;
     sim.view.setLeft();
     this.hud?.setStatus(uid, "left", "left");
+  }
+
+  /** Dev-only snapshot (see MatchClient.debug). */
+  debug(): unknown {
+    const pick = (s: Sim) => ({
+      uid: s.uid,
+      seat: s.seat,
+      tick: s.sim.state.tick,
+      lane: s.sim.state.lane,
+      x: Number(s.sim.state.x.toFixed(3)),
+      y: Number(s.sim.state.y.toFixed(2)),
+      distance: Number(s.sim.state.distance.toFixed(2)),
+      alive: s.sim.state.alive,
+      coins: s.sim.state.coins,
+      nearMisses: s.sim.state.nearMisses,
+      score: scoreOf(s.sim.state),
+      inputs: s.sim.inputs.length,
+      left: s.left,
+    });
+    // What the local runner is about to meet — the harness drives the course
+    // with this, which is how jump/roll/lane-change get exercised end to end.
+    const me = this.local.sim.state;
+    const nextIndex = Math.max(0, Course.indexAt(me.distance) + 1);
+    const row = this.course.rowAt(nextIndex);
+    return {
+      startAt: this.startAt,
+      ended: this.ended,
+      local: pick(this.local),
+      ghosts: this.ghosts.map(pick),
+      upcoming: {
+        z: row.z,
+        ahead: Number((row.z - me.distance).toFixed(2)),
+        safeLane: row.safeLane,
+        obstacles: row.obstacles.map((o) => ({ lane: o.lane, kind: o.kind })),
+      },
+      scene: {
+        meshes: this.scene.meshes.length,
+        particleSystems: this.scene.particleSystems.length,
+        activeMeshes: this.scene.getActiveMeshes().length,
+      },
+    };
   }
 
   end(_result: MatchEnd): void {
@@ -180,32 +215,18 @@ export class TracklineRuntime implements GameRuntime {
     this.controls?.dispose();
     this.hud?.dispose();
     for (const s of this.allSims()) s.view.dispose();
+    this.props?.dispose();
     this.world?.dispose();
     this.scene.dispose();
-  }
-
-  /** Dev-only: a snapshot for test harnesses (see MatchClient.debug). */
-  debug(): unknown {
-    const pick = (s: Sim) => ({ uid: s.uid, seat: s.seat, tick: s.state.tick, lane: s.state.lane, x: Number(s.state.x.toFixed(3)), distance: Number(s.state.distance.toFixed(2)), inputs: s.log.length, left: s.left });
-    return {
-      startAt: this.startAt,
-      ended: this.ended,
-      local: pick(this.local),
-      ghosts: this.ghosts.map(pick),
-      scene: {
-        meshes: this.scene.meshes.length,
-        particleSystems: this.scene.particleSystems.length,
-        activeMeshes: this.scene.getActiveMeshes().length,
-      },
-    };
   }
 
   // ---- per frame ----
 
   render(): void {
     if (this.disposed) return;
+    const dt = Math.min(this.scene.getEngine().getDeltaTime(), 100) / 1000;
     if (this.startAt !== null && !this.ended) this.stepToNow();
-    this.placeAll();
+    this.placeAll(dt);
     this.scene.render();
   }
 
@@ -221,77 +242,71 @@ export class TracklineRuntime implements GameRuntime {
 
   private stepToNow(): void {
     const target = this.tickNow();
-    this.advance(this.local, target);
+    this.local.sim.advanceTo(target);
+    // Everyone else runs a little behind, so their inputs have normally landed
+    // before the tick they belong to and their run is drawn smoothly rather
+    // than corrected in front of you.
     const ghostTarget = Math.max(0, target - GHOST_DELAY);
-    for (const g of this.ghosts) this.advance(g, ghostTarget);
+    for (const g of this.ghosts) g.sim.advanceTo(ghostTarget);
     this.hud?.setRemaining((this.durationTicks - target) / this.tickRate);
-  }
-
-  /** Bring one sim to `target` ticks: incrementally when close, by full replay
-   *  when it is dirty or far behind. Inputs stamped for tick T apply just
-   *  before T's step — the same rule replay() uses, so both paths agree. */
-  private advance(sim: Sim, target: number): void {
-    if (sim.state.tick >= target) return;
-    if (sim.dirty || target - sim.state.tick > FAST_FORWARD_TICKS) {
-      sim.log.sort((a, b) => a.tick - b.tick);
-      sim.state = replay(sim.seat, sim.log, target);
-      // The replay consumed everything up to target; the cursor points at the
-      // first input still in the future.
-      sim.cursor = sim.log.findIndex((i) => i.tick > target);
-      if (sim.cursor < 0) sim.cursor = sim.log.length;
-      sim.dirty = false;
-      return;
-    }
-    const s = sim.state;
-    while (s.tick < target) {
-      const next = s.tick + 1;
-      while (sim.cursor < sim.log.length && sim.log[sim.cursor].tick <= next) {
-        applyInput(s, sim.log[sim.cursor].kind);
-        sim.cursor++;
-      }
-      step(s);
-    }
-  }
-
-  private pushInput(sim: Sim, input: RunnerInput): void {
-    // In order and in the future → the incremental path handles it.
-    const last = sim.log.length ? sim.log[sim.log.length - 1] : null;
-    if (input.tick <= sim.state.tick || (last && input.tick < last.tick)) sim.dirty = true;
-    sim.log.push(input);
+    this.paintHud();
   }
 
   private onLocalInput(kind: InputKind): void {
     if (this.startAt === null || this.ended) return;
-    const s = this.local.state;
-    // Before tick 0 (countdown) inputs are ignored — nothing to steer yet.
+    // Before tick 0 (countdown) there is nothing to steer yet.
     if (Date.now() < this.startAt) return;
-    if (s.tick >= this.durationTicks) return;
-    const tick = s.tick + 1;
-    // Predict now; the log keeps the same input so a replay reproduces it.
-    applyInput(s, kind);
-    this.local.log.push({ tick, kind });
-    this.local.cursor = this.local.log.length;
-    this.ctx.sendInput({ tick, kind });
+    const s = this.local.sim.state;
+    if (!s.alive || s.tick >= this.durationTicks) return;
+    // Predicted and logged in one step, then sent: this player never waits for
+    // the server to see their own move.
+    const input = this.local.sim.predict(kind);
+    this.ctx.sendInput(input);
+  }
+
+  /** Scoreboard, repainted from simulation state. The HUD itself only touches
+   *  the DOM when a value actually changed. */
+  private paintHud(): void {
+    if (!this.hud) return;
+    for (const s of [this.local, ...this.ghosts]) {
+      if (s.left) continue;
+      const st = s.sim.state;
+      this.hud.setStatus(s.uid, st.alive ? String(scoreOf(st)) : "out", st.alive ? undefined : "out");
+    }
+    const me = this.local.sim.state;
+    this.hud.setScore(scoreOf(me), me.coins, me.alive);
   }
 
   /** World positions from sim state + camera follow. */
-  private placeAll(): void {
-    const me = this.local.state;
-    const z = me.distance;
-    const x = laneToX(me.x);
-    this.local.view.setPosition(x, z);
-    // Ghosts are truly level with you (same speed schedule); a small stagger
-    // keeps two runners in one lane from z-fighting.
-    let k = 1;
-    for (const g of this.ghosts) {
-      g.view.setPosition(laneToX(g.state.x), z - 0.45 * k);
-      k++;
+  private placeAll(dt: number): void {
+    const me = this.local.sim.state;
+    for (const s of [this.local, ...this.ghosts]) {
+      const st = s.sim.state;
+      s.view.setState(laneToX(st.x), st.y, st.distance, { rolling: st.rolling > 0, alive: st.alive && !s.left });
     }
+
+    // The camera follows whoever you are watching: yourself while you are
+    // running, and the leader once you are out — a spectator with nothing to
+    // look at is the dullest way to spend the rest of a match.
+    const watched = me.alive ? this.local : this.bestAlive() ?? this.local;
+    const ws = watched.sim.state;
+    const z = ws.distance;
+    const x = laneToX(ws.x);
     this.world?.follow(z);
-    // Camera eases sideways toward the runner's lane; forward it is rigid.
+    this.props?.update(z, dt);
     this.camX += (x - this.camX) * 0.12;
-    this.camera.position.set(this.camX * 0.6, CAM_UP, z - CAM_BACK);
-    this.lookAt.set(this.camX * 0.6, CAM_LOOK_UP, z + CAM_LOOK_AHEAD);
+    this.camera.position.set(this.camX * 0.6, CAM_UP + ws.y * 0.35, z - CAM_BACK);
+    this.lookAt.set(this.camX * 0.6, CAM_LOOK_UP + ws.y * 0.5, z + CAM_LOOK_AHEAD);
     this.camera.setTarget(this.lookAt);
+  }
+
+  /** The runner worth watching: alive, furthest ahead on score. */
+  private bestAlive(): Sim | null {
+    let best: Sim | null = null;
+    for (const s of [this.local, ...this.ghosts]) {
+      if (s.left || !s.sim.state.alive) continue;
+      if (!best || scoreOf(s.sim.state) > scoreOf(best.sim.state)) best = s;
+    }
+    return best;
   }
 }

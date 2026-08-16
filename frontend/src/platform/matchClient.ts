@@ -313,6 +313,8 @@ export class MatchClient {
     const headline =
       e.reason === "aborted"
         ? "Match aborted"
+        : e.reason === "all-out" && me?.placement === 1 && e.standings.filter((s) => s.placement === 1).length === 1
+          ? "Last one running"
         : me
           ? me.forfeit
             ? "You left the match"
@@ -324,15 +326,18 @@ export class MatchClient {
           : "Match over";
     const rows = e.standings
       .map((s) => {
-        const detail = Object.entries(s.detail)
-          .filter(([k]) => k === "distance")
-          .map(([, v]) => `${v} m`)
-          .join(" · ");
+        const d = s.detail;
+        const bits: string[] = [];
+        if (typeof d.distance === "number") bits.push(`${d.distance} m`);
+        if (typeof d.coins === "number" && d.coins > 0) bits.push(`🪙 ${d.coins}`);
+        if (d.survived === 1) bits.push("finished");
+        const xp = e.xp?.[s.uid] ?? 0;
         return `<tr class="${s.uid === this.deps.localUid ? "me" : ""}${s.forfeit ? " forfeit" : ""}">
           <td class="mr-place">${s.placement}</td>
           <td class="mr-name"></td>
           <td class="mr-score">${s.score}</td>
-          <td class="mr-detail">${s.forfeit ? "left" : detail}</td>
+          <td class="mr-detail">${s.forfeit ? "left" : bits.join(" · ")}</td>
+          <td class="mr-xp">${xp > 0 ? `+${xp} XP` : ""}</td>
         </tr>`;
       })
       .join("");
@@ -341,7 +346,7 @@ export class MatchClient {
         <div class="mr-kicker">// Results</div>
         <h2 class="mr-title">${headline}</h2>
         <div class="mr-sub">${e.reason === "timeout" ? "Time's up" : e.reason === "all-out" ? "Everyone's out" : ""}</div>
-        <table class="mr-table"><thead><tr><th>#</th><th>Runner</th><th>Score</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+        <table class="mr-table"><thead><tr><th>#</th><th>Runner</th><th>Score</th><th>Run</th><th></th></tr></thead><tbody>${rows}</tbody></table>
         <div class="mr-actions">
           <button class="btn btn-ghost mr-lobby">Back to lobby</button>
           ${this.deps.isPartyLeader() ? '<button class="btn btn-red mr-again">Play again</button>' : ""}

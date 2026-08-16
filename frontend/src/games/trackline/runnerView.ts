@@ -12,7 +12,12 @@ import { CharacterRig } from "../../game/characterRig";
 import { getEmote } from "../../game/assets";
 import { attachAura, type Aura } from "../../game/aura";
 
+/** Clips this game drives, all already in the shared catalog and cached by the
+ *  lobby, so a match adds no download. There is no jump clip yet (M4 asset
+ *  work): the arc itself reads as the jump, and the run cycle keeps playing. */
 const RUN_CLIP = "run";
+const ROLL_CLIP = "roll";
+const CRASH_CLIP = "fall";
 
 export class RunnerView {
   readonly root: TransformNode;
@@ -23,6 +28,10 @@ export class RunnerView {
   private tag: Mesh | null = null;
   private tagTex: DynamicTexture | null = null;
   private disposed = false;
+  /** What is playing, so a clip starts once on transition rather than being
+   *  restarted every frame (which reads as a twitching character). */
+  private clip: string | null = null;
+  private crashed = false;
 
   constructor(
     private scene: Scene,
@@ -46,7 +55,10 @@ export class RunnerView {
       rig.root.parent = this.root;
       // Characters are authored facing +Z... the lobby turns them by PI to
       // face its camera; here the camera is BEHIND, so they run away from it.
-      if (getEmote(RUN_CLIP)) await rig.play(RUN_CLIP, { loop: true });
+      if (getEmote(RUN_CLIP)) {
+        await rig.play(RUN_CLIP, { loop: true });
+        this.clip = RUN_CLIP;
+      }
       // A legendary skin keeps its effect on the track — a cosmetic you own is
       // worth least in the one place people are watching. It is the same
       // module the lobby uses, so this costs no extra download: +2 draw calls
@@ -122,9 +134,27 @@ export class RunnerView {
     if (this.rig) this.rig.root.setEnabled(false);
   }
 
-  setPosition(x: number, z: number): void {
-    this.root.position.x = x;
-    this.root.position.z = z;
+  /** Drive the character from one tick of simulation state. Position is set
+   *  every frame; the clip only when the runner changes what it is doing. */
+  setState(x: number, y: number, z: number, opts: { rolling: boolean; alive: boolean }): void {
+    this.root.position.set(x, y, z);
+    if (!opts.alive) {
+      if (!this.crashed) {
+        this.crashed = true;
+        // Face-plant, once, then stay down: the run is over, and the body is
+        // what the others see as they go past.
+        this.play(CRASH_CLIP, false);
+      }
+      return;
+    }
+    if (opts.rolling) this.play(ROLL_CLIP, false);
+    else this.play(RUN_CLIP, true);
+  }
+
+  private play(clipId: string, loop: boolean): void {
+    if (this.clip === clipId || !this.rig || !getEmote(clipId)) return;
+    this.clip = clipId;
+    void this.rig.play(clipId, { loop });
   }
 
   dispose(): void {

@@ -19,9 +19,10 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import type { Server, Socket } from "socket.io";
 import { getSocketId } from "../redis.js";
+import { recordMatch } from "../services/matchResults.js";
 import { displayName, type UserRow } from "../services/users.js";
 import { resolveCharacter, resolveWeapon } from "../services/catalog.js";
-import type { GameServerDefinition, RankMember } from "./games.js";
+import type { GameServerDefinition, RankMember, ServerRunnerSim } from "./games.js";
 import { bindMatch, unbindMatch } from "./store.js";
 import { deleteMatchVoiceRoom } from "./voice.js";
 import {
@@ -46,6 +47,16 @@ const DISCONNECT_GRACE_MS = 20_000;
  *  and gets a sane answer instead of "unknown match". */
 const LINGER_MS = 30_000;
 
+/** How often the server advances its own simulations to see whether everyone
+ *  is out. Coarse on purpose: a match is decided by the inputs, not by this
+ *  timer, and it only has to notice the end within a moment. Cost is a few
+ *  hundred trivial steps per runner per tick of it. */
+const OUTCOME_POLL_MS = 400;
+/** Late inputs may still arrive for the last second, so the sims are kept
+ *  deliberately BEHIND real time — otherwise a runner could be declared out
+ *  on a tick an input was still allowed to rewrite. */
+const OUTCOME_LAG_MS = 1200;
+
 export interface Runner {
   uid: string;
   /** null for bots (M3). */
@@ -56,6 +67,8 @@ export interface Runner {
   partyLobbyId: string;
   isBot: boolean;
   seat: number;
+  /** The server's own authoritative simulation of this runner. */
+  sim: ServerRunnerSim;
   ready: boolean;
   connected: boolean;
   left: boolean;
@@ -78,7 +91,12 @@ export interface Match {
   /** Party lobby ids involved, for Redis bindings + un-bindings. */
   lobbyIds: string[];
   room: string;
-  timers: { prepare: NodeJS.Timeout | null; end: NodeJS.Timeout | null; linger: NodeJS.Timeout | null };
+  timers: {
+    prepare: NodeJS.Timeout | null;
+    end: NodeJS.Timeout | null;
+    linger: NodeJS.Timeout | null;
+    outcome: NodeJS.Timeout | null;
+  };
 }
 
 const matches = new Map<string, Match>();
@@ -141,7 +159,7 @@ export async function createMatch(io: Server, game: GameServerDefinition, partie
     runners: new Map(),
     lobbyIds: parties.map((p) => p.lobbyId),
     room: `match:${id}`,
-    timers: { prepare: null, end: null, linger: null },
+    timers: { prepare: null, end: null, linger: null, outcome: null },
   };
   let seat = 0;
   for (const party of parties) {
@@ -162,6 +180,7 @@ export async function createMatch(io: Server, game: GameServerDefinition, partie
         inputs: [],
         recent: [],
         graceTimer: null,
+        sim: game.createSim(m.seed, seat - 1),
       });
     }
   }
@@ -211,6 +230,8 @@ async function go(io: Server, m: Match): Promise<void> {
     () => void end(io, m, "timeout"),
     m.game.countdownMs + durationMs + m.game.inputLateLimitMs
   );
+  // Watch for the OTHER ending: everyone crashed before the clock ran out.
+  m.timers.outcome = setInterval(() => void checkAllOut(io, m), OUTCOME_POLL_MS);
 }
 
 /** Validate and relay one input. Returns a reason string when dropped (for a
@@ -237,6 +258,9 @@ export function onInput(io: Server, socket: Socket, m: Match, uid: string, raw: 
 
   const input: MatchInput = { tick, kind };
   r.inputs.push(input);
+  // The server plays the match too — that is what makes the ending, the
+  // scores and the crashes ours rather than the client's.
+  r.sim.addInput(input);
   const relay: MatchInputRelay = { uid, tick, kind };
   socket.to(m.room).emit(EV.input, relay);
   return null;
@@ -310,6 +334,8 @@ export async function end(io: Server, m: Match, reason: MatchEndReason): Promise
   if (m.phase === "ended") return;
   m.phase = "ended";
   m.endedAt = Date.now();
+  if (m.timers.outcome) clearInterval(m.timers.outcome);
+  m.timers.outcome = null;
   for (const t of Object.values(m.timers)) if (t) clearTimeout(t);
   const endTick = reason === "timeout" ? m.game.durationTicks : nowTick(m);
   const members: RankMember[] = [...m.runners.values()].map((r) => ({
@@ -323,12 +349,26 @@ export async function end(io: Server, m: Match, reason: MatchEndReason): Promise
   }));
   let standings;
   try {
-    standings = m.game.rank(members, endTick);
+    standings = m.game.rank(members, endTick, m.seed);
   } catch (err) {
     console.error(`[match ${m.id}] rank failed:`, err);
     standings = members.map((x) => ({ uid: x.uid, name: x.name, placement: 1, score: 0, detail: {}, forfeit: x.left }));
   }
-  const payload: MatchEnd = { matchId: m.id, reason, standings, ticks: endTick };
+  // Record it BEFORE telling anyone: the results screen then shows the XP the
+  // database actually granted, rather than a number the client hoped for. The
+  // write is idempotent and never throws, so a database wobble delays the
+  // screen slightly instead of losing the match.
+  const recorded = await recordMatch({
+    matchKey: m.id,
+    gameId: m.game.id,
+    seed: m.seed,
+    reason,
+    ticks: endTick,
+    tickRate: m.game.tickRate,
+    standings,
+    runners: [...m.runners.values()].map((r) => ({ uid: r.uid, userId: r.userId, isBot: r.isBot })),
+  });
+  const payload: MatchEnd = { matchId: m.id, reason, standings, ticks: endTick, xp: recorded.xp };
   io.to(m.room).emit(EV.end, payload);
 
   // Release everyone: bindings, sockets, voice.
@@ -343,6 +383,27 @@ export async function end(io: Server, m: Match, reason: MatchEndReason): Promise
   }
   void deleteMatchVoiceRoom(m.id);
   m.timers.linger = setTimeout(() => matches.delete(m.id), LINGER_MS);
+}
+
+/** Everyone crashed? Then the match is over now rather than at the clock.
+ *
+ *  The sims are advanced to a tick slightly BEHIND real time so a late input
+ *  can still rewrite the last moment; without that lag a player who dodged at
+ *  the last instant could be declared dead by a packet that had not landed
+ *  yet. Runners who left count as out — a match nobody is playing is over. */
+async function checkAllOut(io: Server, m: Match): Promise<void> {
+  if (m.phase !== "running" && m.phase !== "countdown") return;
+  if (m.startAt === null) return;
+  const tick = Math.floor(((Date.now() - m.startAt - OUTCOME_LAG_MS) * m.game.tickRate) / 1000);
+  if (tick <= 0) return;
+  const upTo = Math.min(tick, m.game.durationTicks);
+  let anyRunning = false;
+  for (const r of m.runners.values()) {
+    if (r.left) continue;
+    r.sim.advanceTo(upTo);
+    if (!r.sim.isOut()) anyRunning = true;
+  }
+  if (!anyRunning) await end(io, m, "all-out");
 }
 
 /** For the voice token route: is this user in a live match, and which. */
