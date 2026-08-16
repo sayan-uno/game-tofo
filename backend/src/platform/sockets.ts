@@ -156,7 +156,7 @@ export function registerPlatformHandlers(io: Server, socket: AuthedSocket, deps:
   socket.on(EV.input, (payload: unknown) => {
     const m = getMatchForUser(userId);
     if (!m) return;
-    const why = onInput(io, socket, m, uid, payload);
+    const why = onInput(socket, m, uid, payload);
     if (why) dropped.set(why, (dropped.get(why) ?? 0) + 1);
   });
 
@@ -182,8 +182,8 @@ export function registerPlatformHandlers(io: Server, socket: AuthedSocket, deps:
 
 /** Called once the connection is set up (presence + lobby). If this user is
  *  mid-match, put the socket back into it and send the catch-up payload. */
-export function platformOnConnect(io: Server, socket: AuthedSocket): void {
-  const resume = onReconnect(io, socket, socket.data.auth.userId);
+export function platformOnConnect(socket: AuthedSocket): void {
+  const resume = onReconnect(socket, socket.data.auth.userId);
   if (resume) socket.emit(EV.resume, resume);
 }
 

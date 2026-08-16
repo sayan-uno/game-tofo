@@ -12,7 +12,7 @@
 //     never shadow an actual player;
 //   * its play comes from the GAME (createBotPlan) and travels as ordinary
 //     inputs, so clients replay it exactly as they replay a human.
-import { inArray, sql } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { users } from "../db/schema.js";
 import { characters, weapons } from "../services/catalog.js";

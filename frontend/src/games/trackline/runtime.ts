@@ -15,6 +15,7 @@ import { Scene } from "@babylonjs/core/scene";
 import { TargetCamera } from "@babylonjs/core/Cameras/targetCamera";
 import { HemisphericLight } from "@babylonjs/core/Lights/hemisphericLight";
 import { DirectionalLight } from "@babylonjs/core/Lights/directionalLight";
+import { PointLight } from "@babylonjs/core/Lights/pointLight";
 import { Vector3 } from "@babylonjs/core/Maths/math.vector";
 import { Color3, Color4 } from "@babylonjs/core/Maths/math.color";
 import type { GameRuntime, GameRuntimeContext } from "../../platform/types";
@@ -22,8 +23,11 @@ import type { MatchEnd, MatchInputRelay } from "../../shared/core/protocol";
 import {
   Course,
   DURATION_TICKS,
+  ROOF_HEIGHT,
+  TRAIN_LENGTH,
   RunnerSim,
   TICK_RATE,
+  onRoof,
   scoreOf,
   type InputKind,
 } from "../../shared/games/trackline/index";
@@ -31,11 +35,16 @@ import { Controls } from "./controls";
 import { TracklineHud } from "./hud";
 import { Props } from "./props";
 import { RunnerView } from "./runnerView";
-import { World, laneToX } from "./world";
+import { loadTracklineModels } from "./models";
+import { FOG_COLOUR, LAMP_WARM, World, laneToX } from "./world";
 
 /** Ghosts run this many ticks behind the local clock (150 ms). */
 const GHOST_DELAY = 9;
 const CAM_BACK = 7.5;
+/** Never blur past this: below it the game stops being readable, and a
+ *  device that cannot hold the budget at this scale should drop frames
+ *  visibly rather than silently turn to mush. */
+const MAX_HARDWARE_SCALE = 1.9;
 const CAM_UP = 3.3;
 const CAM_LOOK_AHEAD = 10;
 const CAM_LOOK_UP = 1.0;
@@ -65,6 +74,17 @@ export class TracklineRuntime implements GameRuntime {
   private ended = false;
   private disposed = false;
   private camX = 0;
+  /** Eased camera height. Climbing onto a carriage roof lifts the whole shot
+   *  by 3.2 m; snapping to it reads as a cut, so it is followed rather than
+   *  set — and the jump arc is only partly followed, so a jump still feels
+   *  like the runner leaving the ground rather than the world dropping. */
+  private camY = CAM_UP;
+  private frameAccum = 0;
+  private frameCount = 0;
+  /** Whatever the lobby set for this device — never sharpen past it. */
+  private baseScale = 1;
+  /** Travels with the runner so the near street always sits in a warm pool. */
+  private streetLight: PointLight | null = null;
   /** Reused every frame — no per-frame allocation in the camera path. */
   private readonly lookAt = new Vector3(0, 0, 0);
   private readonly tickRate: number;
@@ -80,25 +100,49 @@ export class TracklineRuntime implements GameRuntime {
     this.course = new Course(ctx.seed);
     this.scene = new Scene(ctx.engine);
     const scene = this.scene;
-    scene.clearColor = new Color4(0.05, 0.06, 0.1, 1);
+    scene.clearColor = new Color4(FOG_COLOUR.r, FOG_COLOUR.g, FOG_COLOUR.b, 1);
     scene.skipPointerMovePicking = true;
     scene.skipPointerDownPicking = true;
     scene.skipPointerUpPicking = true;
+    // Fog is the depth cue AND the draw-distance budget: it hides the end of
+    // the street, so nothing has to be drawn past it. Its colour is the sky's
+    // horizon, so distance dissolves into the sky rather than into a grey wall.
     scene.fogMode = Scene.FOGMODE_EXP2;
-    scene.fogDensity = 0.0085;
-    scene.fogColor = new Color3(0.05, 0.06, 0.1);
+    scene.fogDensity = 0.0075;
+    scene.fogColor = FOG_COLOUR;
     this.camera = new TargetCamera("cam", new Vector3(0, CAM_UP, -CAM_BACK), scene);
     this.camera.fov = 0.95;
     this.camera.minZ = 0.3;
     this.camera.maxZ = 400;
 
-    const hemi = new HemisphericLight("hemi", new Vector3(0, 1, 0), scene);
-    hemi.intensity = 0.55;
-    hemi.diffuse = new Color3(0.75, 0.8, 1.0);
-    hemi.groundColor = new Color3(0.2, 0.12, 0.1);
-    const key = new DirectionalLight("key", new Vector3(-0.35, -1, 0.4), scene);
-    key.intensity = 0.9;
-    key.diffuse = new Color3(1.0, 0.85, 0.7);
+    // BLUE HOUR in two lights. The sky is a cool fill from above; the street
+    // lamps are a warm key from the side. Everything the player reads as
+    // atmosphere comes from that contrast, so both stay deliberately low —
+    // the bright things here are the emissive lamps, the lit windows and the
+    // wet road's specular, not the lighting.
+    const sky = new HemisphericLight("sky", new Vector3(0, 1, 0), scene);
+    sky.intensity = 0.22; // the blue is the SHADOW colour, not the light
+    sky.diffuse = new Color3(0.36, 0.45, 0.8);
+    sky.groundColor = new Color3(0.08, 0.07, 0.1);
+    sky.specular = new Color3(0.15, 0.18, 0.32);
+    const lamps = new DirectionalLight("lamps", new Vector3(-0.45, -0.7, 0.3), scene);
+    lamps.intensity = 1.05;
+    lamps.diffuse = LAMP_WARM;
+    lamps.specular = new Color3(1.0, 0.78, 0.45);
+    // ONE travelling point light, riding with the runner. The reference's
+    // whole look is pools of sodium light with darkness between them, and a
+    // directional light alone cannot make a pool — it lights everything
+    // equally, however far away. This gives the near street the falloff that
+    // reads as street lighting, for the cost of a single light.
+    //
+    // Intensity is single digits on purpose: Babylon's point-light units are
+    // not photometric, and the first attempt at 260 turned the road into a
+    // sheet of white.
+    this.streetLight = new PointLight("street", new Vector3(0, 10, 0), scene);
+    this.streetLight.diffuse = LAMP_WARM;
+    this.streetLight.specular = new Color3(0.25, 0.18, 0.1);
+    this.streetLight.intensity = 7;
+    this.streetLight.range = 70;
 
     // Sims: one per roster seat, in roster order (the server ranks by seat too).
     const sims: Sim[] = ctx.roster.map((r, seat) => ({
@@ -119,9 +163,24 @@ export class TracklineRuntime implements GameRuntime {
 
   async prepare(): Promise<void> {
     const ctx = this.ctx;
-    const trackTex = ctx.assets.has("textures/track.webp") ? await ctx.assets.get("textures/track.webp") : null;
-    this.world = new World(this.scene, trackTex);
-    this.props = new Props(this.scene, this.course);
+    // The three sheets the street is built from. All are optional: a pack
+    // without them still plays, just untextured.
+    const grab = async (path: string) => (ctx.assets.has(path) ? await ctx.assets.get(path) : null);
+    const [trackTex, facadeTex, trainTex, barrierTex, beamTex, pavementTex, hoardingTex] = await Promise.all([
+      grab("textures/track.webp"),
+      grab("textures/facade.webp"),
+      grab("textures/train.webp"),
+      grab("textures/barrier.webp"),
+      grab("textures/beam.webp"),
+      grab("textures/pavement.webp"),
+      grab("textures/hoarding.webp"),
+    ]);
+    // The 3D kit. Loaded before the scene is built because both the street and
+    // the obstacles are made of it; a pack without models still runs on the
+    // simple shapes.
+    const models = await loadTracklineModels(ctx.assets, this.scene, TRAIN_LENGTH, ROOF_HEIGHT);
+    this.world = new World(this.scene, trackTex, facadeTex, models, pavementTex);
+    this.props = new Props(this.scene, this.course, { train: trainTex, barrier: barrierTex, beam: beamTex, hoarding: hoardingTex }, models);
     this.hud = new TracklineHud(ctx.hudRoot, ctx.roster, ctx.you);
     // Characters in parallel; each is already in the on-device store from the
     // lobby, so this is a parse, not a download.
@@ -132,6 +191,7 @@ export class TracklineRuntime implements GameRuntime {
     await Promise.all(
       this.scene.meshes.map((m) => (m.material ? m.material.forceCompilationAsync(m).catch(() => {}) : Promise.resolve()))
     );
+    this.baseScale = ctx.engine.getHardwareScalingLevel();
     this.controls = new Controls(ctx.canvas, (kind) => this.onLocalInput(kind));
   }
 
@@ -170,6 +230,8 @@ export class TracklineRuntime implements GameRuntime {
       tick: s.sim.state.tick,
       lane: s.sim.state.lane,
       x: Number(s.sim.state.x.toFixed(3)),
+      onRoof: onRoof(s.sim.state),
+      inside: s.sim.state.insideEndZ > 0 && s.sim.state.distance < s.sim.state.insideEndZ,
       y: Number(s.sim.state.y.toFixed(2)),
       distance: Number(s.sim.state.distance.toFixed(2)),
       alive: s.sim.state.alive,
@@ -189,17 +251,30 @@ export class TracklineRuntime implements GameRuntime {
       ended: this.ended,
       local: pick(this.local),
       ghosts: this.ghosts.map(pick),
+      // The row just BEHIND matters as much as the one ahead: a carriage is 8 m
+      // long, so its flank is still beside you while you set up for the next
+      // row, and sliding into it is fatal.
+      passed: (() => {
+        const i = Course.indexAt(me.distance);
+        if (i < 0) return null;
+        const r = this.course.rowAt(i);
+        return { z: r.z, obstacles: r.obstacles.map((o) => ({ lane: o.lane, kind: o.kind, train: o.train ?? null, endZ: o.z + o.length })) };
+      })(),
       upcoming: {
         z: row.z,
         ahead: Number((row.z - me.distance).toFixed(2)),
         safeLane: row.safeLane,
-        obstacles: row.obstacles.map((o) => ({ lane: o.lane, kind: o.kind })),
+        obstacles: row.obstacles.map((o) => ({ lane: o.lane, kind: o.kind, train: o.train ?? null })),
       },
       scene: {
         meshes: this.scene.meshes.length,
         particleSystems: this.scene.particleSystems.length,
         activeMeshes: this.scene.getActiveMeshes().length,
+        hardwareScale: Number(this.scene.getEngine().getHardwareScalingLevel().toFixed(2)),
       },
+      // Where the scenery trains are relative to the runner — the only way a
+      // headless harness can tell "a train went past" from "no train exists".
+      world: this.world?.debug() ?? null,
     };
   }
 
@@ -212,6 +287,8 @@ export class TracklineRuntime implements GameRuntime {
 
   dispose(): void {
     this.disposed = true;
+    // Hand the lobby back the resolution it chose.
+    this.scene.getEngine().setHardwareScalingLevel(this.baseScale);
     this.controls?.dispose();
     this.hud?.dispose();
     for (const s of this.allSims()) s.view.dispose();
@@ -225,9 +302,37 @@ export class TracklineRuntime implements GameRuntime {
   render(): void {
     if (this.disposed) return;
     const dt = Math.min(this.scene.getEngine().getDeltaTime(), 100) / 1000;
+    this.guardFrameRate(dt);
     if (this.startAt !== null && !this.ended) this.stepToNow();
     this.placeAll(dt);
     this.scene.render();
+  }
+
+  /** Keep the frame inside its budget by trading resolution for it.
+   *
+   *  A runner may not stutter: the whole game is reacting to something 6 m
+   *  ahead. So rather than let a slow device drop frames, the internal
+   *  resolution steps down until the frame fits, and climbs back when there is
+   *  headroom. Judged on a two-second average, because reacting to single
+   *  slow frames would make the picture pulse.
+   *
+   *  The simulation is untouched by any of this — it is fixed-step and driven
+   *  by the clock, so a device rendering at 0.7 scale still runs exactly the
+   *  same match as everyone else. */
+  private guardFrameRate(dt: number): void {
+    this.frameAccum += dt;
+    this.frameCount += 1;
+    if (this.frameAccum < 2) return;
+    const avgMs = (this.frameAccum / this.frameCount) * 1000;
+    this.frameAccum = 0;
+    this.frameCount = 0;
+    const engine = this.scene.getEngine();
+    const scale = engine.getHardwareScalingLevel();
+    if (avgMs > 18 && scale < MAX_HARDWARE_SCALE) {
+      engine.setHardwareScalingLevel(Math.min(MAX_HARDWARE_SCALE, scale * 1.12));
+    } else if (avgMs < 13 && scale > this.baseScale) {
+      engine.setHardwareScalingLevel(Math.max(this.baseScale, scale / 1.08));
+    }
   }
 
   private allSims(): Sim[] {
@@ -292,11 +397,15 @@ export class TracklineRuntime implements GameRuntime {
     const ws = watched.sim.state;
     const z = ws.distance;
     const x = laneToX(ws.x);
-    this.world?.follow(z);
+    this.world?.follow(z, dt);
     this.props?.update(z, dt);
+    if (this.streetLight) this.streetLight.position.set(x * 0.4, 10, z + 20);
     this.camX += (x - this.camX) * 0.12;
-    this.camera.position.set(this.camX * 0.6, CAM_UP + ws.y * 0.35, z - CAM_BACK);
-    this.lookAt.set(this.camX * 0.6, CAM_LOOK_UP + ws.y * 0.5, z + CAM_LOOK_AHEAD);
+    const base = onRoof(ws) ? ROOF_HEIGHT : 0;
+    const wantY = CAM_UP + base + (ws.y - base) * 0.35;
+    this.camY += (wantY - this.camY) * Math.min(1, dt * 6);
+    this.camera.position.set(this.camX * 0.6, this.camY, z - CAM_BACK);
+    this.lookAt.set(this.camX * 0.6, this.camY - CAM_UP + CAM_LOOK_UP + (ws.y - base) * 0.4, z + CAM_LOOK_AHEAD);
     this.camera.setTarget(this.lookAt);
   }
 

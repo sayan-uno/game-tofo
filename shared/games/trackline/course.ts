@@ -45,9 +45,26 @@ export const BARRIER_DEPTH = 0.6;
  *   low   — a knee-high barrier: JUMP it (or go round)
  *   high  — an overhead gantry: ROLL under it (jumping into it is a crash)
  *   full  — floor to ceiling: only a lane change gets you past
- *   train — like `full` but TRAIN_LENGTH long, so it also blocks a late swerve
+ *   train — a carriage; what it offers depends on its TrainKind below
  */
 export type ObstacleKind = "low" | "high" | "full" | "train";
+
+/** What a carriage offers a runner who reaches its BACK END head-on:
+ *
+ *   solid — nothing. It is a wall on rails.
+ *   ramp  — a sloped rear you run up onto the ROOF and along it. Up there no
+ *           ground obstacle can touch you, but the carriage ends and you come
+ *           down, so it is a corridor and not a hiding place.
+ *   open  — doors at both ends and a clear aisle: run straight through.
+ *
+ * Reaching one from the SIDE — sliding into it mid-length — is a crash
+ * whatever kind it is. That is what stops "aim at any train" being a free
+ * escape, and keeps a late swerve genuinely dangerous. */
+export type TrainKind = "solid" | "ramp" | "open";
+
+/** Height of a carriage roof, in metres. Shared with the renderer so the thing
+ *  you run along is exactly the thing you see. */
+export const ROOF_HEIGHT = 3.2;
 
 export interface Obstacle {
   lane: number;
@@ -56,11 +73,17 @@ export interface Obstacle {
   z: number;
   /** How far it extends along the track. */
   length: number;
+  /** Only on `train`. */
+  train?: TrainKind;
 }
 
 export interface Coin {
   lane: number;
   z: number;
+  /** 0 = on the track, 1 = on a carriage roof. A roof coin can only be taken
+   *  by a runner who is actually up there, which is what makes taking a ramp
+   *  worth doing rather than merely surviving it. */
+  level: 0 | 1;
 }
 
 export interface Row {
@@ -107,6 +130,15 @@ function kindFor(seed: number, row: number, lane: number): ObstacleKind {
   if (r < hard * 0.72) return "full";
   if (r < hard) return "train";
   return rand(seed, row * 8 + lane, 0x9e17) < 0.6 ? "low" : "high";
+}
+
+/** Which sort of carriage. Most are solid — a ramp or an open car is a chance,
+ *  and a chance you get every time stops being one. */
+function trainKindFor(seed: number, row: number, lane: number): TrainKind {
+  const r = rand(seed, row * 16 + lane, 0x3b7a);
+  if (r < 0.28) return "ramp";
+  if (r < 0.48) return "open";
+  return "solid";
 }
 
 export class Course {
@@ -160,7 +192,9 @@ export class Course {
         if (lane === safe) continue;
         if (rand(this.seed, i * 4 + lane, 0x2f9d) > blockChance(i)) continue;
         const kind = kindFor(this.seed, i, lane);
-        obstacles.push({ lane, kind, z, length: kind === "train" ? TRAIN_LENGTH : BARRIER_DEPTH });
+        const obstacle: Obstacle = { lane, kind, z, length: kind === "train" ? TRAIN_LENGTH : BARRIER_DEPTH };
+        if (kind === "train") obstacle.train = trainKindFor(this.seed, i, lane);
+        obstacles.push(obstacle);
       }
       this.rows.push({ index: i, z, safeLane: safe, obstacles, coins: [] });
     }
@@ -183,7 +217,15 @@ export class Course {
       const t = (i + 1) / (count + 1);
       // Slide across to the next safe lane so the line is also the racing line.
       const lane = Math.round(row.safeLane + (next - row.safeLane) * t);
-      row.coins.push({ lane, z: row.z + ROW_SPACING * t });
+      row.coins.push({ lane, z: row.z + ROW_SPACING * t, level: 0 });
+    }
+    // A ramp carriage pays for the climb: coins along its roof, out of reach
+    // of anyone still running on the track.
+    for (const o of row.obstacles) {
+      if (o.kind !== "train" || o.train !== "ramp") continue;
+      for (let i = 0; i < 4; i++) {
+        row.coins.push({ lane: o.lane, z: o.z + o.length * (0.3 + i * 0.18), level: 1 });
+      }
     }
     return row.coins;
   }

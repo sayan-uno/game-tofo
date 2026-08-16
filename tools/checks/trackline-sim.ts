@@ -218,5 +218,106 @@ console.log("bots");
   ok(maxRate < 9, `bot input rate stays under the server ceiling (peak ${maxRate.toFixed(1)}/s)`);
 }
 
+
+// ---------------------------------------------------------------------------
+// Trains. A carriage met head-on at its back end may be climbable (ramp) or
+// run-through-able (open); met from the SIDE it is a wall whatever it is.
+// These are the moves the reference video is built around, so each one is
+// checked rather than assumed.
+// ---------------------------------------------------------------------------
+console.log("trains");
+{
+  // Find a seed whose row 0 holds a carriage of the wanted kind.
+  const findTrain = (want) => {
+    for (let seed = 1; seed < 6000; seed++) {
+      const sd = seed * 21107;
+      const course = new Course(sd);
+      const o = course.rowAt(0).obstacles.find((x) => x.kind === "train" && x.train === want);
+      if (o) return { sd, course, o };
+    }
+    return null;
+  };
+  // Run straight down a lane from the start, head-on into whatever is there.
+  const headOn = (course, lane, stopAfter) => {
+    const s = createState(0);
+    s.lane = lane; s.x = lane;
+    const trace = [];
+    while (s.tick < DURATION_TICKS && s.alive && s.distance < stopAfter) {
+      step(s, course);
+      trace.push({ d: +s.distance.toFixed(1), y: +s.y.toFixed(2), roof: s.roofEndZ > 0, inside: s.insideEndZ > 0 });
+    }
+    return { s, trace };
+  };
+
+  // NOTE: stop just past the carriage. Running on to the NEXT row without
+  // steering would kill the runner there, and counting that against the train
+  // is exactly the mistake this comment exists to stop being made again.
+  const ramp = findTrain("ramp");
+  if (ramp) {
+    const r = headOn(ramp.course, ramp.o.lane, ramp.o.z + ramp.o.length + 3);
+    const rode = r.trace.some((t) => t.roof && t.y >= 3);
+    const cameDown = r.s.alive && r.s.y < 0.1 && r.s.distance > ramp.o.z + ramp.o.length;
+    ok(r.s.alive, "a ramp carriage taken head-on does not kill you");
+    ok(rode, "you end up ON the roof (y >= 3 m)");
+    ok(cameDown, "and back on the track once the carriage ends");
+  } else ok(false, "no ramp carriage found to test");
+
+  const open = findTrain("open");
+  if (open) {
+    const r = headOn(open.course, open.o.lane, open.o.z + open.o.length + 3);
+    const went = r.trace.some((t) => t.inside);
+    ok(r.s.alive && went, "an open carriage taken head-on is run THROUGH and out the far end");
+    ok(r.trace.every((t) => !t.inside || t.y < 0.6), "and you stay at track level inside it, not on the roof");
+  } else ok(false, "no open carriage found to test");
+
+  const solid = findTrain("solid");
+  if (solid) {
+    const r = headOn(solid.course, solid.o.lane, solid.o.z + 4);
+    ok(!r.s.alive, "a solid carriage still kills you");
+  } else ok(false, "no solid carriage found to test");
+
+  // Side entry: start one lane over and slide across INTO the carriage's flank.
+  const side = findTrain("ramp");
+  if (side) {
+    const from = side.o.lane === 0 ? 1 : side.o.lane - 1;
+    const s = createState(0);
+    s.lane = from; s.x = from;
+    let swerved = false;
+    while (s.tick < DURATION_TICKS && s.alive && s.distance < side.o.z + side.o.length) {
+      // swerve in once already alongside it
+      if (!swerved && s.distance > side.o.z + 2) { applyInput(s, side.o.lane > from ? "right" : "left"); swerved = true; }
+      step(s, side.course);
+    }
+    ok(swerved && !s.alive, "sliding into a carriage's SIDE is still a crash, ramp or not");
+  }
+
+  // Roof coins belong to the roof.
+  const rc = findTrain("ramp");
+  if (rc) {
+    const roofCoins = rc.course.coinsOf(0).filter((c) => c.level === 1);
+    ok(roofCoins.length > 0, `a ramp carriage carries roof coins (${roofCoins.length})`);
+    const rode = headOn(rc.course, rc.o.lane, rc.o.z + rc.o.length + 3);
+    ok(rode.s.coins >= roofCoins.length, `riding the roof collects its coins (${rode.s.coins} of ${roofCoins.length})`);
+    // NOTE: you cannot place a runner by writing `distance` — it is derived
+    // from the TICK, so a hand-set value is overwritten by the next step and
+    // the runner simply starts from the beginning. An earlier version of this
+    // check did exactly that and "proved" a bug that was not there.
+  }
+
+  // Mounting a carriage is a GROUNDED move: jumping at the ramp does not put
+  // you on the roof, it puts you into the back of a train.
+  const air = findTrain("ramp");
+  if (air) {
+    const s3 = createState(0);
+    s3.lane = air.o.lane; s3.x = air.o.lane;
+    let jumped = false;
+    while (s3.tick < DURATION_TICKS && s3.alive && s3.distance < air.o.z + 2) {
+      if (!jumped && air.o.z - s3.distance < 4 && air.o.z - s3.distance > 1) { applyInput(s3, "jump"); jumped = true; }
+      step(s3, air.course);
+    }
+    ok(jumped && !s3.alive, "jumping at a ramp carriage is a crash — the climb is a grounded move");
+  }
+}
+
 console.log(fails === 0 ? "\nALL CHECKS PASSED" : `\n${fails} CHECK(S) FAILED`);
 process.exit(fails === 0 ? 0 : 1);

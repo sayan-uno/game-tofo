@@ -651,7 +651,7 @@ export function registerSockets(io: Server) {
       await ensureLobbyModeOnConnect(soloLobby);
       await moveToLobby(io, socket, soloLobby);
       // Back into a match that is still running for them (page reload, drop).
-      platformOnConnect(io, socket);
+      platformOnConnect(socket);
 
       // Tell online friends I'm here.
       const friendIds = await getFriendIds(userId);

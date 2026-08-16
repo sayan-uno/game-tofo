@@ -289,7 +289,7 @@ async function go(io: Server, m: Match): Promise<void> {
 
 /** Validate and relay one input. Returns a reason string when dropped (for a
  *  counter/log), never throws — the hot path must stay cheap. */
-export function onInput(io: Server, socket: Socket, m: Match, uid: string, raw: unknown): string | null {
+export function onInput(socket: Socket, m: Match, uid: string, raw: unknown): string | null {
   const r = m.runners.get(uid);
   if (!r || r.left) return "not-in-match";
   if (m.phase !== "countdown" && m.phase !== "running") return "phase";
@@ -363,7 +363,7 @@ export function onDisconnect(io: Server, userId: string): void {
 
 /** A socket (re)connected for a user who is in a live match: put it back in
  *  the room and hand it everything needed to catch up. */
-export function onReconnect(io: Server, socket: Socket, userId: string): MatchResume | null {
+export function onReconnect(socket: Socket, userId: string): MatchResume | null {
   const m = getMatchForUser(userId);
   if (!m || !isActive(m)) return null;
   const r = [...m.runners.values()].find((x) => x.userId === userId);

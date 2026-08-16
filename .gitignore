@@ -17,3 +17,17 @@ backend/src/shared/
 
 # Built game packs (uploaded to the CDN, never committed).
 tools/packs/out/
+
+# A pack's binaries — the optimised models and textures it ships, and the raw
+# generator art they are made from. None of it belongs in git: it is 8+ MB of
+# binaries that would double the repo, and every one of those bytes already
+# lives on R2 (the pack payload under games/<id>/<version>/, the raw art under
+# sources/<id>/). Git keeps the CODE that builds them; one command brings the
+# binaries back:
+#
+#   npm run pack:restore trackline
+#
+# This is the same rule the character pipeline already follows above.
+tools/packs/*/src/models/
+tools/packs/*/src/textures/
+tools/packs/*/art/*_raw.*

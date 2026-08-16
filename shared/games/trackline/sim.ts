@@ -15,7 +15,7 @@
 // gantry. Everything else — who crashed, who has how many coins, the final
 // score — falls out of these steps, which is why the server can recompute the
 // whole match from the input logs alone and never has to trust a client.
-import { Course, type Obstacle } from "./course.js";
+import { Course, ROOF_HEIGHT, type Obstacle } from "./course.js";
 import { DURATION_TICKS, LANES, LANE_CHANGE_TICKS, TICK_RATE, distanceAt } from "./rules.js";
 
 export type InputKind = "left" | "right" | "jump" | "roll";
@@ -77,6 +77,12 @@ export interface RunnerState {
   nearMisses: number;
   /** Tick of the last graze, or -1. */
   stumbledAtTick: number;
+  /** While riding a carriage roof: the distance at which that roof ends.
+   *  -1 when on the ground. Up there the runner is above every ground
+   *  obstacle, which is the whole reward for taking the ramp. */
+  roofEndZ: number;
+  /** While running through the inside of an open carriage: where it ends. */
+  insideEndZ: number;
 }
 
 /** Runners start spread across the middle lanes rather than stacked. */
@@ -100,6 +106,8 @@ export function createState(seat: number): RunnerState {
     coins: 0,
     nearMisses: 0,
     stumbledAtTick: -1,
+    roofEndZ: -1,
+    insideEndZ: -1,
   };
 }
 
@@ -142,6 +150,11 @@ export function applyInput(s: RunnerState, kind: InputKind): void {
   }
 }
 
+/** Is the runner up on a carriage roof at this distance? */
+export const onRoof = (s: RunnerState): boolean => s.roofEndZ > 0 && s.distance < s.roofEndZ;
+/** Is the runner inside an open carriage? */
+export const inside = (s: RunnerState): boolean => s.insideEndZ > 0 && s.distance < s.insideEndZ;
+
 /** Can this state pass this obstacle? */
 function clears(s: RunnerState, o: Obstacle): boolean {
   switch (o.kind) {
@@ -151,7 +164,11 @@ function clears(s: RunnerState, o: Obstacle): boolean {
       // Only a roll. Being airborne is worse than doing nothing.
       return s.rolling > 0 && s.airborne === 0;
     case "full":
+      return false;
     case "train":
+      // A carriage taken head-on at its back end may be climbable or
+      // run-through-able; those are handled in step(), because they change
+      // the runner's state rather than merely letting them past.
       return false;
   }
 }
@@ -190,14 +207,64 @@ export function step(s: RunnerState, course: Course): void {
   s.distance = to;
   if (s.tick >= DURATION_TICKS) return; // the clock ran out; nothing more counts
 
+  // Riding a roof, or through a carriage: both end where the carriage does.
+  const wasOnRoof = s.roofEndZ > 0 && from < s.roofEndZ;
+  const wasInside = s.insideEndZ > 0 && from < s.insideEndZ;
+  if (s.roofEndZ > 0 && to >= s.roofEndZ) s.roofEndZ = -1;
+  if (s.insideEndZ > 0 && to >= s.insideEndZ) s.insideEndZ = -1;
+  const riding = onRoof(s);
+  const through = inside(s);
+  // Height: the roof carries the runner; a jump adds to it.
+  const base = riding ? ROOF_HEIGHT : 0;
+  s.y = base + (s.airborne > 0 ? arc(s.airborne) : 0);
+  if (wasOnRoof && !riding) {
+    // Ran off the end — back to the track, and the drop cancels a jump so a
+    // runner cannot glide off a carriage.
+    s.airborne = 0;
+    s.y = 0;
+  }
+  // On a roof or inside a carriage, nothing on the track can reach you.
+  if (riding || through) {
+    for (const c of course.coinsBetween(from, to)) {
+      const wantLevel = riding ? 1 : 0;
+      if (c.level === wantLevel && Math.abs(s.x - c.lane) <= 0.55) s.coins += 1;
+    }
+    return;
+  }
+  // The tick you come OFF the far end is special: the position you started it
+  // at is still inside the carriage, so the ordinary collision pass reads it
+  // as sliding into the train's flank and kills you for finishing the move it
+  // just rewarded. Collisions are skipped for this one tick — the carriage
+  // ends well before the next row, so there is nothing else here to hit.
+  if (wasOnRoof || wasInside) {
+    for (const c of course.coinsBetween(from, to)) {
+      if (c.level === 0 && Math.abs(s.x - c.lane) <= 0.55) s.coins += 1;
+    }
+    return;
+  }
+
   // Collisions. Entering an obstacle decides life or death; leaving one you
   // cleared is what pays the near-miss, so both edges are checked.
   for (const o of course.obstaclesBetween(from, to)) {
     const gap = Math.abs(s.x - o.lane);
     if (gap > GRAZE_HALF) continue;
     const entering = from <= o.z && to > o.z;
-    const inside = from > o.z && from < o.z + o.length;
-    if ((entering || inside) && !clears(s, o)) {
+    const alongside = from > o.z && from < o.z + o.length;
+    // A carriage met head-on at its back end, dead centre of the lane, on the
+    // ground: climb it or run through it. Anything else about a train — a
+    // side entry, or clipping its corner — is what it always was.
+    // Mounting or entering is as forgiving as the lane itself (GRAZE_HALF,
+    // not HIT_HALF): if you met the back of the carriage at all, you took it.
+    // Requiring dead centre meant a runner who swerved in a shade late hit the
+    // very ramp they were aiming at, which reads as the game refusing a move
+    // it had just invited. Side entry stays fatal — that is the real gate.
+    if (o.kind === "train" && entering && gap <= GRAZE_HALF && s.airborne === 0 && o.train && o.train !== "solid") {
+      if (o.train === "ramp") s.roofEndZ = o.z + o.length;
+      else s.insideEndZ = o.z + o.length;
+      s.nearMisses += 1; // taking the line through a train is worth something
+      continue;
+    }
+    if ((entering || alongside) && !clears(s, o)) {
       if (gap <= HIT_HALF) {
         kill(s, s.tick);
         return;
@@ -216,7 +283,7 @@ export function step(s: RunnerState, course: Course): void {
   }
 
   for (const c of course.coinsBetween(from, to)) {
-    if (Math.abs(s.x - c.lane) <= 0.55) s.coins += 1;
+    if (c.level === 0 && Math.abs(s.x - c.lane) <= 0.55) s.coins += 1;
   }
 }
 

@@ -9,7 +9,11 @@
     "db:migrate": "npm --prefix backend run db:migrate",
     "sync:shared": "node scripts/sync-shared.mjs",
     "check:shared": "node scripts/sync-shared.mjs --check",
-    "check:sim": "backend/node_modules/.bin/tsx tools/checks/trackline-sim.ts"
+    "check:sim": "backend/node_modules/.bin/tsx tools/checks/trackline-sim.ts",
+    "pack:build": "node tools/packs/build.mjs",
+    "pack:upload": "node tools/packs/upload.mjs",
+    "pack:sources": "node tools/packs/sources.mjs",
+    "pack:restore": "node tools/packs/restore.mjs"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"

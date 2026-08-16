@@ -20,7 +20,7 @@
 // Lua script so two packers can never hand the same party to two matches, even
 // though only one process runs the ticker today.
 import type { Server } from "socket.io";
-import { redis, getLobbyMembers, getLobbyMode, getSocketId } from "../redis.js";
+import { redis, getLobbyMembers, getSocketId } from "../redis.js";
 import { getUsersByIds, type UserRow } from "../services/users.js";
 import { getGame, listGames, type GameServerDefinition } from "./games.js";
 import { createMatch, type PartyInput } from "./match.js";
@@ -144,14 +144,30 @@ async function claim(gameId: string, size: number, ids: string[]): Promise<boole
 /** One packing attempt for one pool. Returns true when a match was made. */
 async function tryPack(io: Server, game: GameServerDefinition, size: number): Promise<boolean> {
   const entries = await readPool(game.id, size);
-  if (entries.length === 0) return false;
+  if (entries.length === 0) {
+    // The pool can hold members whose SIZE record is missing — the two live in
+    // different Redis keys — and readPool skips those. Left silent, a party
+    // then waits forever with nothing in any log to say why, which is the
+    // worst failure this system can have. Clean them out loudly instead.
+    const orphans = await redis.zrange(poolKey(game.id, size), 0, -1);
+    if (orphans.length > 0) {
+      console.warn(`[mm] ${game.id}/${size}: ${orphans.length} pool entr(ies) with no size record — clearing`);
+      for (const lobbyId of orphans) await dequeue(game.id, size, lobbyId);
+    }
+    return false;
+  }
 
   // Prune the dead before deciding anything.
   const live: WaitingEntry[] = [];
   for (const e of entries) {
     const state = await alive(e);
     if (state.ok) live.push(e);
-    else await dequeue(game.id, size, e.lobbyId);
+    else {
+      // Never silent: a party leaving the queue without a match is something
+      // a player experiences as "the search hung", so it has to be traceable.
+      console.warn(`[mm] dropped ${e.lobbyId} from ${game.id}/${size} — party empty or nobody online`);
+      await dequeue(game.id, size, e.lobbyId);
+    }
   }
   if (live.length === 0) return false;
 
