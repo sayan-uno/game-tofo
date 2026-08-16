@@ -184,4 +184,23 @@ export interface LobbyState {
   /** 6-digit share code, once a member revealed one — null in solo AND in a
    *  fresh party where nobody has asked for the code yet. */
   teamCode: string | null;
+  /** Game the leader picked for the party, or null. Tolerated as absent so a
+   *  client that outlives a backend rollback keeps working. */
+  game?: string | null;
+  /** Download progress per member uid (0–100) for the picked game. */
+  loading?: Record<string, number>;
+}
+
+/** One entry of GET /api/games — what the picker shows and what the pack
+ *  loader downloads. Mirrors backend/src/routes/games.ts. */
+export interface GameInfo {
+  id: string;
+  name: string;
+  tagline: string;
+  matchSizes: Record<LobbyMode, number>;
+  durationSec: number;
+  packVersion: string;
+  packBytes: number;
+  /** null when the CDN isn't configured or the pack hasn't been published. */
+  packUrl: string | null;
 }

@@ -9,6 +9,8 @@ import { FriendsPanel } from "./ui/friends";
 import { ChatPanel } from "./ui/chat";
 import { toast, actionToast } from "./ui/toast";
 import { joinVoice, leaveVoice } from "./voice/livekit";
+import type { LobbyGameController } from "./platform/lobbyGame";
+import type { MatchClient } from "./platform/matchClient";
 import type { LobbyState, User } from "./types";
 
 async function boot() {
@@ -49,6 +51,12 @@ async function enterLobby(user: User) {
   // Kicked off before the entry gate so the chunks download while the player
   // is tapping through it.
   const heavyChunks = Promise.all([import("./game/engine"), import("./game/lobbyScene")]);
+
+  // The game platform (game picker, pack download, match lifecycle) is a
+  // lobby-time concern, so it downloads alongside Babylon rather than sitting
+  // in the login shell. Settled before the socket connects below — it has to
+  // exist by the first lobby:members event.
+  const platformChunk = Promise.all([import("./platform/lobbyGame"), import("./platform/matchClient")]);
 
   // Phones: one-tap gate → fullscreen + landscape (PUBG-style). No-op on desktop.
   const closeGate = await passEntryGate();
@@ -152,6 +160,10 @@ async function enterLobby(user: User) {
 
   const uiRoot = document.getElementById("ui-root")!;
   const friendsPanel = new FriendsPanel(uiRoot);
+  // The game platform's two halves are built once the socket exists (below);
+  // the HUD's buttons reach them through these.
+  let lobbyGame: LobbyGameController | null = null;
+  let matchClient: MatchClient | null = null;
   const hud = new Hud(user, {
     onToggleFriends: () => friendsPanel.toggle(),
     onToggleChat: () => chatPanel.toggle(),
@@ -199,6 +211,8 @@ async function enterLobby(user: User) {
         toast(err instanceof Error ? err.message : "Team code failed", true);
       }
     },
+    onChooseGame: () => void lobbyGame?.openSheet(),
+    onStart: () => void lobbyGame?.start(),
   });
   const chatPanel = new ChatPanel(uiRoot, user, {
     onUnread: (hasUnread) => hud.setChatUnread(hasUnread),
@@ -228,7 +242,43 @@ async function enterLobby(user: User) {
       .catch(() => {});
   }
 
+  const [{ LobbyGameController }, { MatchClient }] = await platformChunk;
   const socket = connectSocket();
+
+  // Party voice: the lobby's room while squadded up, nothing while solo — and
+  // hands off entirely while a match runs (the match client owns voice then:
+  // one room for the whole roster, party room again the moment it ends).
+  const applyPartyVoice = () => {
+    if (matchClient?.active) return;
+    const state = lobbyState;
+    if (state && state.members.length > 1) {
+      void joinVoice(state.lobbyId, (msg, isError) => toast(msg, isError), "party");
+    } else {
+      void leaveVoice();
+    }
+  };
+
+  lobbyGame = new LobbyGameController({ hud, lobby, localUid: user.uid, socket });
+  matchClient = new MatchClient({
+    engine,
+    socket,
+    localUid: user.uid,
+    lobby,
+    restoreLobby: () => startRenderLoop(engine, renderLobby),
+    isPartyLeader: () => lobbyState?.lobbyId === `L${user.uid}`,
+    onEnter: () => {
+      // The lobby chrome steps aside; the game draws its own HUD.
+      document.body.classList.add("in-match");
+      friendsPanel.toggle(false);
+      chatPanel.toggle(false);
+      lobbyGame?.setInMatch(true);
+    },
+    onExit: () => {
+      document.body.classList.remove("in-match");
+      lobbyGame?.setInMatch(false);
+      applyPartyVoice();
+    },
+  });
 
   socket.on("connect_error", (err) => {
     // A session that slipped past the claim screen (stale token from another
@@ -248,12 +298,14 @@ async function enterLobby(user: User) {
     // dies when its last member leaves, not when teammates walk out).
     chatPanel.setTeam(state.mode !== "solo");
     friendsPanel.setLobby(state.lobbyId, state.members.map((m) => m.uid));
-    // Voice: join the lobby's room when squadded up, leave when solo.
-    if (state.members.length > 1) {
-      void joinVoice(state.lobbyId, (msg, isError) => toast(msg, isError));
-    } else {
-      void leaveVoice();
-    }
+    // Game pick + everyone's download progress → buttons and name-plate bars.
+    lobbyGame?.onLobbyState(state);
+    applyPartyVoice();
+  });
+
+  // A squadmate's download moved.
+  socket.on("lobby:loading", (p: { uid?: string; pct?: number } | null) => {
+    if (p && typeof p.uid === "string" && typeof p.pct === "number") lobbyGame?.onLoading(p.uid, p.pct);
   });
 
   socket.on("lobby:error", ({ error }: { error: string }) => toast(error, true));

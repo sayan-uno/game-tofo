@@ -1,0 +1,104 @@
+// The CHOOSE GAME sheet: one card per playable game, tap to pick. Opens over
+// the lobby, closes on pick or dismiss. Members can open it to see what's
+// there but only the leader's taps do anything.
+import type { GameInfo } from "../types";
+
+export interface GameSheetOptions {
+  games: GameInfo[];
+  selectedId: string | null;
+  canPick: boolean;
+  /** Async "is this pack already on the device" — the badge fills in late. */
+  isCached: (game: GameInfo) => Promise<boolean>;
+  /** null clears the selection. */
+  onPick: (gameId: string | null) => void;
+}
+
+const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
+
+function fmtBytes(n: number): string {
+  if (n <= 0) return "—";
+  if (n < 1024 * 1024) return `${Math.max(1, Math.round(n / 1024))} KB`;
+  return `${(n / (1024 * 1024)).toFixed(n < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+}
+
+let open: HTMLElement | null = null;
+
+export function openGameSheet(opts: GameSheetOptions): void {
+  if (open) return;
+  const root = document.createElement("div");
+  root.className = "gs-backdrop";
+  const cards = opts.games
+    .map((g) => {
+      const selected = g.id === opts.selectedId;
+      const players =
+        g.matchSizes.duo === g.matchSizes.squad
+          ? `${g.matchSizes.squad} players`
+          : `${g.matchSizes.duo}–${g.matchSizes.squad} players`;
+      const mins = Math.round(g.durationSec / 60);
+      return `
+        <button class="gs-card${selected ? " selected" : ""}" data-id="${esc(g.id)}" ${!g.packUrl ? 'data-unavailable="1"' : ""}>
+          <span class="gs-art" aria-hidden="true"><span class="gs-art-name">${esc(g.name)}</span></span>
+          <span class="gs-body">
+            <span class="gs-name">${esc(g.name)}</span>
+            <span class="gs-tag">${esc(g.tagline)}</span>
+            <span class="gs-meta">${players} · ${mins} min · <span class="gs-size">${fmtBytes(g.packBytes)}</span>
+              <span class="gs-badge hidden">Downloaded</span>
+              ${!g.packUrl ? '<span class="gs-badge warn">Not published</span>' : ""}
+            </span>
+          </span>
+          ${selected ? '<span class="gs-check" aria-hidden="true">✓</span>' : ""}
+        </button>`;
+    })
+    .join("");
+  root.innerHTML = `
+    <div class="gs-sheet" role="dialog" aria-label="Choose game">
+      <div class="gs-head">
+        <span class="gs-kicker">// Games</span>
+        <h2 class="gs-title">CHOOSE GAME</h2>
+        <button class="gs-close" type="button" aria-label="Close">✕</button>
+      </div>
+      <div class="gs-list">${cards || '<div class="gs-empty">No games available yet.</div>'}</div>
+      ${
+        opts.canPick && opts.selectedId
+          ? '<div class="gs-foot"><button class="btn btn-ghost btn-small gs-clear">Remove selection</button></div>'
+          : !opts.canPick
+            ? '<div class="gs-foot gs-note">Only the party leader can pick.</div>'
+            : ""
+      }
+    </div>`;
+  document.getElementById("ui-root")!.appendChild(root);
+  open = root;
+
+  const close = () => {
+    root.remove();
+    if (open === root) open = null;
+  };
+  root.querySelector<HTMLButtonElement>(".gs-close")!.onclick = close;
+  root.addEventListener("pointerdown", (e) => {
+    if (e.target === root) close();
+  });
+  root.querySelector<HTMLButtonElement>(".gs-clear")?.addEventListener("click", () => {
+    opts.onPick(null);
+    close();
+  });
+  root.querySelectorAll<HTMLButtonElement>(".gs-card").forEach((card) => {
+    const id = card.dataset.id!;
+    const game = opts.games.find((g) => g.id === id)!;
+    void opts.isCached(game).then((cached) => {
+      if (cached) card.querySelector(".gs-badge")?.classList.remove("hidden");
+    });
+    if (!opts.canPick || card.dataset.unavailable) {
+      card.classList.add("readonly");
+      return;
+    }
+    card.onclick = () => {
+      opts.onPick(id === opts.selectedId ? id : id); // re-picking the same game is harmless
+      close();
+    };
+  });
+}
+
+export function closeGameSheet(): void {
+  open?.remove();
+  open = null;
+}

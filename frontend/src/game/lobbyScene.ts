@@ -196,6 +196,9 @@ interface CharacterInstance {
   bubble: Rectangle;
   bubbleText: TextBlock;
   bubbleTimer: number;
+  /** Game-pack download bar under the plate: track + fill, built on first
+   *  use and shown only while a game is picked. -1 = failed. */
+  loadBar: { track: Rectangle; fill: Rectangle; pct: number } | null;
   isLeader: boolean;
   disposables: { dispose: () => void }[];
   uid: string;
@@ -543,6 +546,7 @@ export class LobbyScene {
         // session with a lot of coming and going would pay a little more every
         // time somebody left.
         this.glow.removeExcludedMesh(character.pad);
+        character.loadBar?.track.dispose();
         character.anchor.dispose();
         character.disposables.forEach((d) => d.dispose());
         this.characters.delete(uid);
@@ -746,6 +750,59 @@ export class LobbyScene {
     makeLimb(`legR_${uid}`, 0.13, 0.45, 0.9, 0.1);
   }
 
+  /** Download progress for the picked game, under this member's name plate.
+   *
+   *  `pct` 0–100 fills a slim bar (crimson while loading, green at 100), -1
+   *  paints it as failed, null hides it. Costs a GUI repaint only when the
+   *  value changes — and callers already throttle to a few updates a second,
+   *  only ever during the loading phase, never in gameplay. */
+  setLoading(uid: string, pct: number | null) {
+    const character = this.characters.get(uid);
+    if (!character) return;
+    if (pct === null) {
+      if (character.loadBar) character.loadBar.track.isVisible = false;
+      return;
+    }
+    let bar = character.loadBar;
+    if (!bar) {
+      const track = new Rectangle(`load_${uid}`);
+      track.width = "150px";
+      track.height = "6px";
+      track.cornerRadius = 3;
+      track.thickness = 1;
+      track.color = "rgba(255,255,255,0.18)";
+      track.background = "rgba(8, 5, 8, 0.85)";
+      track.isHitTestVisible = false;
+      this.gui.addControl(track);
+      track.linkWithMesh(character.pad);
+      // Just under the plate (plate: 30px tall around offset 10).
+      track.linkOffsetY = 32;
+      const fill = new Rectangle(`loadFill_${uid}`);
+      fill.horizontalAlignment = Rectangle.HORIZONTAL_ALIGNMENT_LEFT;
+      fill.height = "100%";
+      fill.width = "0%";
+      fill.thickness = 0;
+      fill.cornerRadius = 3;
+      fill.background = ACCENT;
+      fill.isHitTestVisible = false;
+      track.addControl(fill);
+      bar = { track, fill, pct: -2 };
+      character.loadBar = bar;
+    }
+    bar.track.isVisible = true;
+    if (bar.pct === pct) return;
+    bar.pct = pct;
+    if (pct < 0) {
+      bar.fill.width = "100%";
+      bar.fill.background = "#7a1e2a";
+      bar.track.color = "#ff6b7a";
+    } else {
+      bar.fill.width = `${Math.max(0, Math.min(100, pct))}%`;
+      bar.fill.background = pct >= 100 ? "#46c98a" : ACCENT;
+      bar.track.color = pct >= 100 ? "rgba(70,201,138,0.5)" : "rgba(255,255,255,0.18)";
+    }
+  }
+
   /** Free Fire-style team chat callout: a truncated preview of the message in
    *  a bubble over the sender's head, so teammates notice who is talking even
    *  with the chat panel closed. Repeat messages replace the text and restart
@@ -932,6 +989,7 @@ export class LobbyScene {
       bubble,
       bubbleText,
       bubbleTimer: 0,
+      loadBar: null,
       isLeader: member.isLeader,
       disposables,
       slotX: x,

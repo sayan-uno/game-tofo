@@ -259,6 +259,87 @@ export async function fetchAsset(url: string, opts: { pack?: string } = {}): Pro
   return new Uint8Array(bytes);
 }
 
+/** Is this URL already on the device? A metadata read only — no body is
+ *  touched — so a pack of forty files can be checked in a few milliseconds
+ *  (the game picker's "Downloaded" badge, and instant 100 % for a returning
+ *  player). */
+export async function hasAsset(url: string): Promise<boolean> {
+  const db = await openDb();
+  if (!db) return false;
+  const meta = await run<MetaRecord | undefined>(db, [META], "readonly", (tx) => tx.objectStore(META).get(url), undefined);
+  return !!meta;
+}
+
+/** Fetch with byte-level progress, for pack downloads with a visible bar.
+ *
+ *  Same store contract as fetchAsset (hit → served locally, miss → downloaded
+ *  through the concurrency gate and stored) plus: `onBytes` is called with the
+ *  bytes received so far — a cache hit reports the full size once — and an
+ *  AbortSignal cancels a download the moment the party un-picks a game.
+ *
+ *  Streams the response body when the browser exposes it; a body without a
+ *  reader (older WebViews) still works, just without intermediate progress. */
+export async function fetchAssetProgress(
+  url: string,
+  opts: { pack?: string; signal?: AbortSignal; onBytes?: (received: number) => void; expectedBytes?: number } = {}
+): Promise<Uint8Array> {
+  const cached = await readBody(url).catch(() => null);
+  if (cached) {
+    scheduleTouch(url);
+    opts.onBytes?.(cached.byteLength);
+    return new Uint8Array(cached);
+  }
+  const bytes = await withDownloadSlot(async () => {
+    const res = await fetch(url, { cache: "no-store", signal: opts.signal });
+    if (!res.ok) throw new Error(`Asset fetch failed: ${res.status} ${url}`);
+    const reader = res.body?.getReader();
+    if (!reader) {
+      const buf = await res.arrayBuffer();
+      opts.onBytes?.(buf.byteLength);
+      return buf;
+    }
+    const total = Number(res.headers.get("content-length")) || opts.expectedBytes || 0;
+    const chunks: Uint8Array[] = [];
+    let received = 0;
+    // A known length lets us allocate once and skip the final concat.
+    const direct = total > 0 ? new Uint8Array(total) : null;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (direct && received + value.byteLength <= total) direct.set(value, received);
+      else chunks.push(value);
+      received += value.byteLength;
+      opts.onBytes?.(received);
+    }
+    if (direct && chunks.length === 0 && received === total) return direct.buffer;
+    // Length was unknown or lied — assemble.
+    const all = new Uint8Array(received);
+    let off = 0;
+    if (direct) {
+      all.set(direct.subarray(0, Math.min(received, total)), 0);
+      off = Math.min(received, total);
+    }
+    for (const c of chunks) {
+      all.set(c, off);
+      off += c.byteLength;
+    }
+    return all.buffer;
+  });
+  void writeAsset(url, bytes, opts.pack).catch(() => {});
+  return new Uint8Array(bytes);
+}
+
+/** Drop every stored file whose pack tag starts with `prefix` but isn't
+ *  `keep` — how an old version of a game's pack is reclaimed the moment the
+ *  new one is adopted, without waiting a month for the age rule. */
+export async function clearPacksExcept(prefix: string, keep: string): Promise<number> {
+  const db = await openDb();
+  if (!db) return 0;
+  const doomed = (await allMeta(db)).filter((r) => r.pack && r.pack.startsWith(prefix) && r.pack !== keep);
+  await deleteUrls(db, doomed.map((r) => r.url));
+  return doomed.length;
+}
+
 /** ---------------------------------------------------------------------------
  *  Pinning
  * ------------------------------------------------------------------------- */

@@ -30,6 +30,8 @@ import {
 import { areFriends, displayName, getFriendIds, getUserById, getUserByUid, getUsersByIds } from "../services/users.js";
 import { registerChatHandlers, syncTeamChatSession } from "./chat.js";
 import { canPerform, resolveCharacter, resolveWeapon } from "../services/catalog.js";
+import { platformOnConnect, platformOnDisconnect, registerPlatformHandlers } from "../platform/sockets.js";
+import { clearLobbyGameState, getLoading, getLobbyGame, getLobbyMatch, moveLobbyGameState } from "../platform/store.js";
 
 interface AuthedSocket extends Socket {
   data: { auth: AuthPayload };
@@ -45,7 +47,14 @@ const EMOTE_COOLDOWN_MS = 1200;
  *  collection route re-broadcasts through this same path. */
 export async function broadcastLobby(io: Server, lobbyId: string) {
   const memberIds = await getLobbyMembers(lobbyId);
-  const [users, mode] = await Promise.all([getUsersByIds(memberIds), getLobbyMode(lobbyId)]);
+  const [users, mode, game, loadingAll] = await Promise.all([
+    getUsersByIds(memberIds),
+    getLobbyMode(lobbyId),
+    getLobbyGame(lobbyId),
+    getLoading(lobbyId),
+  ]);
+  // The party is gone — its game pick and download progress go with it.
+  if (memberIds.length === 0 && game) await clearLobbyGameState(lobbyId);
   // Codes are created on demand (lobby:teamCode below), never here — this
   // broadcast only carries the current one so joiners and re-renders stay in
   // sync, and releases it when the party dissolves (solo / emptied out).
@@ -69,7 +78,32 @@ export async function broadcastLobby(io: Server, lobbyId: string) {
     // retired weapon leaves an empty hand rather than a broken model URL.
     weapon: resolveWeapon(u.equippedWeapon),
   }));
-  io.to(`room:${lobbyId}`).emit("lobby:members", { lobbyId, mode, members, teamCode });
+  // Download progress only for people still in the party (a member who left
+  // may have a stale row until the pick changes).
+  const loading: Record<string, number> = {};
+  for (const m of members) if (loadingAll[m.uid] !== undefined) loading[m.uid] = loadingAll[m.uid];
+  io.to(`room:${lobbyId}`).emit("lobby:members", {
+    lobbyId,
+    mode,
+    members,
+    teamCode,
+    game: memberIds.length > 0 ? game : null,
+    loading,
+  });
+}
+
+/** A party that is searching for / playing a match takes no membership
+ *  changes — joins are refused, and leaving means leaving the match first. */
+async function inMatch(lobbyId: string): Promise<boolean> {
+  return (await getLobbyMatch(lobbyId)) !== null;
+}
+
+/** Why `userId` may not move into `targetLobbyId` right now, or null if they
+ *  may. Checked by every join path before moveToLobby. */
+async function joinBlockedReason(userId: string, uid: string, targetLobbyId: string): Promise<string | null> {
+  if (await inMatch(targetLobbyId)) return "That party is in a match right now";
+  if (await inMatch((await getUserLobby(userId)) ?? `L${uid}`)) return "Leave your match first";
+  return null;
 }
 
 async function moveToLobby(io: Server, socket: AuthedSocket, lobbyId: string): Promise<boolean> {
@@ -117,6 +151,7 @@ async function rehomeMembers(
 ): Promise<void> {
   await migrateLobbyMembers(oldLobbyId, newLobbyId, memberIds, joinTimes);
   await moveTeamSession(oldLobbyId, newLobbyId);
+  await moveLobbyGameState(oldLobbyId, newLobbyId);
   for (const memberId of memberIds) {
     const socketId = await getSocketId(memberId);
     const memberSocket = socketId ? io.sockets.sockets.get(socketId) : null;
@@ -203,6 +238,7 @@ export function registerSockets(io: Server) {
     // Register ALL event handlers before any awaited setup below — events a
     // fast client emits right after connecting would otherwise be dropped.
     registerChatHandlers(io, socket);
+    registerPlatformHandlers(io, socket, { broadcastLobby });
 
     // Invite a friend to my CURRENT lobby.
     socket.on("lobby:invite", async (payload: { friendUid?: string } | null, ack?: (r: object) => void) => {
@@ -256,6 +292,8 @@ export function registerSockets(io: Server) {
         if (typeof lobbyId !== "string" || !lobbyId.startsWith("L")) return ack?.({ error: "Bad lobby id" });
         const members = await getLobbyMembers(lobbyId);
         if (lobbyId !== soloLobby && members.length === 0) return ack?.({ error: "That lobby no longer exists" });
+        const blocked = await joinBlockedReason(userId, uid, lobbyId);
+        if (blocked) return ack?.({ error: blocked });
         const ok = await moveToLobby(io, socket, lobbyId);
         ack?.(ok ? { ok: true, lobbyId } : { error: "Lobby is full" });
       } catch (err) {
@@ -306,6 +344,8 @@ export function registerSockets(io: Server) {
           return ack?.({ error: "Invalid team code" });
         }
         if (members.length >= lobbyCapacity(mode)) return ack?.({ error: "That group is full" });
+        const blocked = await joinBlockedReason(userId, uid, lobbyId);
+        if (blocked) return ack?.({ error: blocked });
         const joined = await moveToLobby(io, socket, lobbyId);
         if (!joined) return ack?.({ error: "That group is full" });
         ack?.({ ok: true, lobbyId });
@@ -372,6 +412,8 @@ export function registerSockets(io: Server) {
 
           const myLobby = (await getUserLobby(userId)) ?? soloLobby;
           if ((await getUserLobby(requester.id)) === myLobby) return ack?.({ ok: true });
+          const blocked = await joinBlockedReason(requester.id, requester.uid, myLobby);
+          if (blocked) return ack?.({ error: blocked === "Leave your match first" ? `${displayName(requester)} is in a match` : "Finish the match first" });
           // Approving while solo forms the group.
           if ((await getLobbyMode(myLobby)) === "solo") await setLobbyMode(myLobby, "squad");
           const joined = await moveToLobby(io, requesterSocket as AuthedSocket, myLobby);
@@ -434,6 +476,7 @@ export function registerSockets(io: Server) {
         if (mode !== "solo" && mode !== "duo" && mode !== "squad") return ack?.({ error: "Unknown mode" });
         const lobbyId = (await getUserLobby(userId)) ?? soloLobby;
         if (lobbyId !== soloLobby) return ack?.({ error: "Only the party leader can change the mode" });
+        if (await inMatch(lobbyId)) return ack?.({ error: "Finish the match first" });
         const members = await getLobbyMembers(lobbyId);
         if (members.length > lobbyCapacity(mode)) {
           return ack?.({
@@ -466,6 +509,7 @@ export function registerSockets(io: Server) {
         if ((await getUserLobby(userId)) !== soloLobby) {
           return ack?.({ error: "Only the group leader can transfer leadership" });
         }
+        if (await inMatch(soloLobby)) return ack?.({ error: "Finish the match first" });
         const members = await getLobbyMembers(soloLobby);
         if (!members.includes(target.id)) return ack?.({ error: "That player isn't in your group" });
 
@@ -493,6 +537,7 @@ export function registerSockets(io: Server) {
         if ((await getUserLobby(userId)) !== soloLobby) {
           return ack?.({ error: "Only the group leader can kick players" });
         }
+        if (await inMatch(soloLobby)) return ack?.({ error: "Finish the match first" });
         if ((await getUserLobby(target.id)) !== soloLobby) {
           return ack?.({ error: "That player isn't in your group" });
         }
@@ -521,6 +566,7 @@ export function registerSockets(io: Server) {
     // Works even when alone in a duo/squad party — it drops you back to solo.
     socket.on("lobby:leave", async (ack?: (r: object) => void) => {
       try {
+        if (await inMatch((await getUserLobby(userId)) ?? soloLobby)) return ack?.({ error: "Leave the match first" });
         const migrated = await migrateGroupOnLeaderLeave(io, socket);
         if (!migrated) {
           await setLobbyMode(soloLobby, "solo");
@@ -539,6 +585,8 @@ export function registerSockets(io: Server) {
         const current = await getSocketId(userId);
         if (current !== socket.id) return;
 
+        // Mid-match: keep their seat for the grace period (platform/match.ts).
+        platformOnDisconnect(io, socket);
         await setOffline(userId);
         const lobbyId = await leaveLobby(userId);
         if (lobbyId) {
@@ -570,6 +618,8 @@ export function registerSockets(io: Server) {
       // Fire) — unless their squad is still alive and waiting for them.
       await ensureLobbyModeOnConnect(soloLobby);
       await moveToLobby(io, socket, soloLobby);
+      // Back into a match that is still running for them (page reload, drop).
+      platformOnConnect(io, socket);
 
       // Tell online friends I'm here.
       const friendIds = await getFriendIds(userId);

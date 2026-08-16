@@ -3363,3 +3363,499 @@ body {
   .em-grid { max-height: 38vh; grid-template-columns: repeat(auto-fit, minmax(78px, 104px)); gap: 8px; }
   .em-hint { display: none; }
 }
+
+/* ---------- Game platform: pick / start (lobby, bottom-right stack) ---------- */
+/* START above CHOOSE GAME above the party row — the game controls stack over
+   the mode card instead of pushing it sideways. */
+.hud-bottom {
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+.hud-party-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.game-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  min-width: 176px;
+}
+.game-start-btn {
+  font-family: var(--display-font);
+  font-size: 18px;
+  letter-spacing: 0.12em;
+  color: #fff;
+  border: 1px solid rgba(255, 90, 110, 0.6);
+  border-radius: 12px;
+  padding: 11px 18px;
+  background: linear-gradient(135deg, #ff2f43, #b40f22);
+  box-shadow: 0 4px 18px rgba(229, 24, 46, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  cursor: pointer;
+  transition: transform 0.1s ease, filter 0.25s ease, opacity 0.25s ease;
+}
+.game-start-btn:active {
+  transform: scale(0.97);
+}
+/* "Blurry all the time" until every member is ready — inert, not just dim. */
+.game-start-btn.is-blur {
+  filter: blur(1.6px) saturate(0.6);
+  opacity: 0.55;
+  cursor: default;
+  pointer-events: none;
+  box-shadow: none;
+}
+.game-start-btn.busy {
+  animation: startPulse 1s ease-in-out infinite;
+}
+@keyframes startPulse {
+  50% { opacity: 0.7; }
+}
+.game-start-hint {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  font-size: 11.5px;
+  color: #c9c1c4;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+  padding: 0 2px;
+  min-height: 14px;
+}
+.game-retry {
+  border: 1px solid rgba(229, 24, 46, 0.6);
+  background: rgba(229, 24, 46, 0.18);
+  color: #fff;
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: inherit;
+}
+.game-pick-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(13, 6, 8, 0.78);
+  border: 1px solid rgba(229, 24, 46, 0.45);
+  border-radius: 12px;
+  padding: 8px 12px 8px 14px;
+  color: #fff;
+  font-family: inherit;
+  cursor: pointer;
+  backdrop-filter: blur(10px);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+  text-align: left;
+}
+.game-pick-btn .gp-label {
+  font-family: var(--display-font);
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
+  color: var(--red);
+}
+.game-pick-btn .gp-name {
+  flex: 1;
+  font-weight: 800;
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
+}
+.game-pick-btn.picked .gp-name {
+  text-transform: uppercase;
+}
+.game-pick-btn .gp-caret {
+  color: var(--red);
+  font-size: 11px;
+}
+.game-pick-btn.readonly {
+  cursor: default;
+  opacity: 0.85;
+}
+/* The mode popover used to sit just above the mode card; it now opens beside
+   the stack so it never covers START. */
+.mode-pop {
+  right: calc(16px + 176px + 12px);
+  bottom: max(16px, env(safe-area-inset-bottom));
+}
+@media (max-height: 480px) {
+  .game-start-btn {
+    padding: 8px 14px;
+    font-size: 15px;
+  }
+  .game-pick-btn {
+    padding: 6px 10px 6px 12px;
+  }
+  .game-stack {
+    min-width: 160px;
+    gap: 4px;
+  }
+  .mode-pop {
+    right: calc(16px + 160px + 12px);
+  }
+}
+
+/* ---------- Game sheet ---------- */
+.gs-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 45;
+  display: grid;
+  place-items: center;
+  background: rgba(4, 2, 3, 0.62);
+  backdrop-filter: blur(6px);
+  animation: em-fade 0.15s ease;
+}
+.gs-sheet {
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  background: rgba(13, 6, 8, 0.96);
+  border: 1px solid rgba(229, 24, 46, 0.4);
+  border-radius: 18px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+  padding: 14px 14px 12px;
+}
+.gs-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.gs-kicker {
+  font-family: var(--display-font);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--red);
+}
+.gs-title {
+  flex: 1;
+  font-family: var(--display-font);
+  font-size: 18px;
+  letter-spacing: 0.06em;
+  margin: 0;
+}
+.gs-close {
+  background: rgba(255, 255, 255, 0.08);
+  border: none;
+  color: #fff;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 14px;
+}
+.gs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.gs-card {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  padding: 8px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: #fff;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.gs-card:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+.gs-card.selected {
+  border-color: var(--red);
+  background: rgba(229, 24, 46, 0.12);
+}
+.gs-card.readonly {
+  cursor: default;
+}
+.gs-art {
+  flex: 0 0 132px;
+  min-height: 74px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  background:
+    radial-gradient(120% 90% at 20% 100%, rgba(229, 24, 46, 0.55), transparent 60%),
+    linear-gradient(160deg, #2a0f16, #0b0507 70%);
+  border: 1px solid rgba(229, 24, 46, 0.3);
+}
+.gs-art-name {
+  font-family: var(--display-font);
+  font-size: 15px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #fff;
+  text-shadow: 0 2px 10px rgba(229, 24, 46, 0.6);
+}
+.gs-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  justify-content: center;
+  min-width: 0;
+}
+.gs-name {
+  font-weight: 800;
+  font-size: 15px;
+  letter-spacing: 0.04em;
+}
+.gs-tag {
+  font-size: 12.5px;
+  color: #c9c1c4;
+}
+.gs-meta {
+  font-size: 11.5px;
+  color: #a7abb4;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.gs-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #46c98a;
+  border: 1px solid rgba(70, 201, 138, 0.5);
+  border-radius: 6px;
+  padding: 1px 6px;
+}
+.gs-badge.warn {
+  color: #f0a13a;
+  border-color: rgba(240, 161, 58, 0.5);
+}
+.gs-check {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  color: var(--red);
+  font-weight: 900;
+}
+.gs-foot {
+  margin-top: 10px;
+  display: flex;
+  justify-content: flex-end;
+}
+.gs-note {
+  justify-content: flex-start;
+  font-size: 12px;
+  color: #a7abb4;
+}
+.gs-empty {
+  padding: 24px;
+  text-align: center;
+  color: #a7abb4;
+}
+
+/* ---------- Match layer (platform overlays above any game) ---------- */
+/* While a match runs the lobby chrome steps aside; toasts stay. */
+body.in-match .hud,
+body.in-match .chat-fab,
+body.in-match .friends-panel,
+body.in-match .chat-panel {
+  display: none !important;
+}
+/* `#ui-root > *` near the top of this file sets pointer-events with an ID's
+   specificity, so a plain `.match-layer { pointer-events: none }` LOSES to it
+   and this full-screen layer swallows every touch meant for the canvas —
+   which is exactly what stopped swipes working on phones while the keyboard
+   (which goes to window) kept working. The id selector here beats it back. */
+#ui-root > .match-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 35;
+  pointer-events: none;
+}
+.match-layer > * {
+  pointer-events: auto;
+}
+.match-hud-root {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.match-hud-root > * {
+  pointer-events: auto;
+}
+/* Platform-owned in-match controls: voice and leaving belong to the platform,
+   not to any one game, so every game gets both without reimplementing them.
+   Above the results card so the squad can still mute while it is open. */
+.match-controls {
+  position: absolute;
+  top: max(10px, env(safe-area-inset-top));
+  right: max(12px, env(safe-area-inset-right));
+  z-index: 5;
+  display: flex;
+  gap: 8px;
+}
+.match-controls button {
+  background: rgba(8, 5, 8, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #e8ecf8;
+  border-radius: 10px;
+  padding: 7px 12px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+}
+.match-controls button:active {
+  transform: scale(0.96);
+}
+.match-controls .mx-mic.muted {
+  color: #ff8493;
+  border-color: rgba(255, 132, 147, 0.5);
+}
+.match-curtain {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 14px;
+  background: #0b0507;
+  color: #e8ecf8;
+  font-family: var(--display-font);
+  letter-spacing: 0.08em;
+  font-size: 14px;
+  z-index: 3;
+}
+.match-curtain img {
+  animation: curtainPulse 1.4s ease-in-out infinite;
+}
+@keyframes curtainPulse {
+  50% { opacity: 0.55; transform: scale(0.96); }
+}
+.match-countdown {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  z-index: 2;
+}
+.mcd-num {
+  font-family: var(--display-font);
+  font-size: clamp(64px, 18vh, 140px);
+  color: #fff;
+  text-shadow: 0 0 30px rgba(229, 24, 46, 0.85), 0 4px 18px rgba(0, 0, 0, 0.7);
+  letter-spacing: 0.06em;
+}
+.mcd-num.pop {
+  animation: mcdPop 0.5s cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+@keyframes mcdPop {
+  from { transform: scale(1.6); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+.match-results {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: grid;
+  place-items: center;
+  background: rgba(4, 2, 3, 0.66);
+  backdrop-filter: blur(8px);
+  animation: em-fade 0.2s ease;
+}
+.mr-card {
+  width: min(520px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  background: rgba(13, 6, 8, 0.97);
+  border: 1px solid rgba(229, 24, 46, 0.45);
+  border-radius: 18px;
+  padding: 18px 18px 14px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+}
+.mr-kicker {
+  font-family: var(--display-font);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--red);
+}
+.mr-title {
+  font-family: var(--display-font);
+  font-size: 30px;
+  letter-spacing: 0.04em;
+  margin: 4px 0 0;
+}
+.mr-sub {
+  color: #a7abb4;
+  font-size: 12.5px;
+  margin-bottom: 12px;
+}
+.mr-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+.mr-table th {
+  text-align: left;
+  font-family: var(--display-font);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: #a7abb4;
+  font-weight: 400;
+  padding: 6px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.mr-table td {
+  padding: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+.mr-table tr.me td {
+  color: #fff;
+  background: rgba(229, 24, 46, 0.1);
+}
+.mr-table tr.forfeit td {
+  color: #7d7378;
+}
+.mr-place {
+  font-family: var(--display-font);
+  color: var(--red);
+  width: 36px;
+}
+.mr-score {
+  text-align: right;
+  font-weight: 700;
+}
+.mr-detail {
+  color: #a7abb4;
+  font-size: 12px;
+  text-align: right;
+}
+.mr-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+@media (max-height: 520px) {
+  .mr-card {
+    padding: 12px 14px 10px;
+  }
+  .mr-title {
+    font-size: 22px;
+  }
+  .mr-table td {
+    padding: 5px 8px;
+  }
+}

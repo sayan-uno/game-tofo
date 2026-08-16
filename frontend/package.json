@@ -4,8 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "node ../scripts/sync-shared.mjs --target=frontend",
     "dev": "vite",
+    "prebuild": "node ../scripts/sync-shared.mjs --target=frontend",
     "build": "tsc --noEmit && vite build",
+    "pretypecheck": "node ../scripts/sync-shared.mjs --target=frontend",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview"
   },

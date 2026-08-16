@@ -1,6 +1,7 @@
 import { clearSession } from "../api/http";
 import { disconnectSocket } from "../api/socket";
 import { isMicEnabled, toggleMic } from "../voice/livekit";
+import { toast } from "./toast";
 import { setAvatar } from "./avatar";
 import { setNameView } from "./nameview";
 import type { LobbyMode, User } from "../types";
@@ -18,6 +19,20 @@ export interface HudCallbacks {
   onJoinByCode: (code: string) => Promise<void>;
   /** Reveal the party's code (created on first ask); reset=true mints a new one. */
   onTeamCode: (reset: boolean) => Promise<void>;
+  /** CHOOSE GAME — opens the game sheet (members can look, leader picks). */
+  onChooseGame: () => void;
+  /** START — leader only, lit once every member has the game downloaded. */
+  onStart: () => void;
+}
+
+export interface StartState {
+  enabled: boolean;
+  /** A request is in flight — keep the button lit but inert. */
+  busy?: boolean;
+  /** Small line under the button explaining why it isn't lit (or who we wait for). */
+  hint: string | null;
+  /** When the local download failed: a retry affordance in the hint line. */
+  retry?: () => void;
 }
 
 /** Free Fire-style lobby HUD: player chip + actions on top, round chat
@@ -43,6 +58,10 @@ export class Hud {
   private goBtn: HTMLButtonElement;
   private teamCode: string | null = null;
   private isLeader = false;
+  private startBtn: HTMLButtonElement;
+  private pickBtn: HTMLButtonElement;
+  private pickName: HTMLElement;
+  private startHint: HTMLElement;
 
   constructor(user: User, callbacks: HudCallbacks) {
     this.root = document.createElement("div");
@@ -82,11 +101,22 @@ export class Hud {
       </div>
       <button class="chat-fab" title="Chat">💬<span class="chat-dot hidden"></span></button>
       <div class="hud-bottom">
-        <button class="btn btn-ghost leave-btn hidden">Leave</button>
-        <button class="mode-card" title="Change party mode">
-          <span class="mode-info"><span class="mode-name">SOLO</span><span class="mode-count">1/1</span></span>
-          <span class="mode-caret">▲</span>
-        </button>
+        <div class="game-stack">
+          <button class="game-start-btn is-blur" type="button" disabled>START</button>
+          <div class="game-start-hint"></div>
+          <button class="game-pick-btn" type="button" title="Choose game">
+            <span class="gp-label">GAME</span>
+            <span class="gp-name">Choose game</span>
+            <span class="gp-caret">▸</span>
+          </button>
+        </div>
+        <div class="hud-party-row">
+          <button class="btn btn-ghost leave-btn hidden">Leave</button>
+          <button class="mode-card" title="Change party mode">
+            <span class="mode-info"><span class="mode-name">SOLO</span><span class="mode-count">1/1</span></span>
+            <span class="mode-caret">▲</span>
+          </button>
+        </div>
       </div>
       <div class="mode-pop hidden">
         <button data-mode="solo" class="mode-opt"><strong>SOLO</strong><span>Play on your own</span></button>
@@ -104,6 +134,14 @@ export class Hud {
     this.modeName = this.root.querySelector(".mode-name")!;
     this.modeCount = this.root.querySelector(".mode-count")!;
     this.modePop = this.root.querySelector(".mode-pop")!;
+    this.startBtn = this.root.querySelector(".game-start-btn")!;
+    this.pickBtn = this.root.querySelector(".game-pick-btn")!;
+    this.pickName = this.root.querySelector(".gp-name")!;
+    this.startHint = this.root.querySelector(".game-start-hint")!;
+    this.pickBtn.onclick = callbacks.onChooseGame;
+    this.startBtn.onclick = () => {
+      if (!this.startBtn.disabled) callbacks.onStart();
+    };
 
     // The whole chip is the door to the profile; the copy button inside it
     // keeps its own job (a nested <button> would be invalid markup, hence
@@ -185,10 +223,15 @@ export class Hud {
     this.root.querySelector<HTMLButtonElement>(".friends-btn")!.onclick = callbacks.onToggleFriends;
     this.root.querySelector<HTMLButtonElement>(".chat-fab")!.onclick = callbacks.onToggleChat;
     this.leaveBtn.onclick = callbacks.onLeaveLobby;
-    this.micBtn.onclick = async () => {
-      const enabled = await toggleMic();
-      this.micBtn.textContent = enabled ? "🎙 On" : "🎙 Off";
-      this.micBtn.classList.toggle("muted", !enabled);
+    this.micBtn.onclick = () => {
+      this.micBtn.disabled = true;
+      void toggleMic()
+        .catch(() => toast("Couldn't switch your microphone", true))
+        .finally(() => {
+          this.micBtn.disabled = false;
+          this.micBtn.textContent = isMicEnabled() ? "🎙 On" : "🎙 Off";
+          this.micBtn.classList.toggle("muted", !isMicEnabled());
+        });
     };
     this.micBtn.textContent = isMicEnabled() ? "🎙 On" : "🎙 Off";
     this.micBtn.classList.toggle("muted", !isMicEnabled());
@@ -217,6 +260,39 @@ export class Hud {
       disconnectSocket();
       location.reload();
     };
+  }
+
+  /** Which game the party picked (null = none). Members see the pick too;
+   *  only the leader's button reads as pressable. */
+  setGame(state: { name: string | null; isLeader: boolean }) {
+    this.pickName.textContent = state.name ?? "Choose game";
+    this.pickBtn.classList.toggle("picked", state.name !== null);
+    this.pickBtn.classList.toggle("readonly", !state.isLeader);
+    this.pickBtn.title = state.isLeader ? "Choose game" : "The party leader picks the game";
+  }
+
+  /** START: blurred and inert until the leader may press it. */
+  setStart(state: StartState) {
+    const lit = state.enabled || !!state.busy;
+    this.startBtn.disabled = !state.enabled;
+    this.startBtn.classList.toggle("is-blur", !lit);
+    this.startBtn.classList.toggle("busy", !!state.busy);
+    this.startBtn.textContent = state.busy ? "STARTING…" : "START";
+    this.startHint.replaceChildren();
+    if (state.hint) {
+      const span = document.createElement("span");
+      span.textContent = state.hint;
+      this.startHint.appendChild(span);
+      if (state.retry) {
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.className = "game-retry";
+        retry.textContent = "Retry";
+        retry.onclick = state.retry;
+        this.startHint.appendChild(retry);
+      }
+    }
+    this.startHint.classList.toggle("hidden", !state.hint);
   }
 
   setChatUnread(show: boolean) {

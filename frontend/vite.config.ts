@@ -1,9 +1,25 @@
 import { defineConfig } from "vite";
 
+// Dev/test only: with TOFO_CDN_PROXY=https://cdn.tofo.in the dev server
+// proxies /__cdn/* to the CDN, so a headless browser on a localhost origin
+// (which the CDN's CORS rules don't list) can still fetch assets. Pair it with
+// CDN_BASE_URL=http://localhost:<port>/__cdn on the backend. Never set in
+// production — the CDN is fetched directly there.
+const cdnProxy = process.env.TOFO_CDN_PROXY;
+
 export default defineConfig({
   server: {
     port: 5173,
     host: true,
+    proxy: cdnProxy
+      ? {
+          "/__cdn": {
+            target: cdnProxy,
+            changeOrigin: true,
+            rewrite: (path) => path.replace(/^\/__cdn/, ""),
+          },
+        }
+      : undefined,
   },
   build: {
     target: "es2022",

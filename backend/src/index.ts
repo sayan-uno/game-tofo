@@ -10,6 +10,9 @@ import { voiceRouter } from "./routes/voice.js";
 import { chatRouter } from "./routes/chat.js";
 import { profileRouter } from "./routes/profile.js";
 import { collectionRouter } from "./routes/collection.js";
+import { gamesRouter } from "./routes/games.js";
+// Registers every game with the platform (one import per game folder).
+import "./games/index.js";
 import { registerSockets } from "./sockets/index.js";
 import { startChatRetention } from "./services/chat.js";
 
@@ -46,6 +49,7 @@ app.use("/api/voice", voiceRouter);
 app.use("/api/chat", chatRouter);
 app.use("/api/profile", profileRouter);
 app.use("/api/collection", collectionRouter(io));
+app.use("/api/games", gamesRouter);
 
 registerSockets(io);
 

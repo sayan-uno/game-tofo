@@ -1,0 +1,81 @@
+/* Trackline in-match HUD. Scoped by .tl-* so nothing here reaches another
+   game or the lobby. Shipped inside the game's own chunk. */
+.tl-hud {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: #f2f5ff;
+}
+.tl-top {
+  position: absolute;
+  top: max(10px, env(safe-area-inset-top));
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: center;
+}
+.tl-timer {
+  font-family: "Archivo Black", "Arial Black", system-ui, sans-serif;
+  font-size: 22px;
+  letter-spacing: 0.08em;
+  padding: 4px 14px;
+  border-radius: 10px;
+  background: rgba(8, 5, 8, 0.6);
+  border: 1px solid rgba(229, 24, 46, 0.45);
+  font-variant-numeric: tabular-nums;
+}
+.tl-timer.urgent {
+  color: #ff6b7a;
+  border-color: #ff6b7a;
+}
+.tl-board {
+  position: absolute;
+  top: max(10px, env(safe-area-inset-top));
+  left: max(12px, env(safe-area-inset-left));
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 150px;
+}
+.tl-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  background: rgba(8, 5, 8, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 12.5px;
+}
+.tl-row.me {
+  border-color: rgba(229, 24, 46, 0.6);
+}
+.tl-row.left,
+.tl-row.out {
+  opacity: 0.5;
+}
+.tl-name {
+  font-weight: 700;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tl-status {
+  color: #a7abb4;
+  font-variant-numeric: tabular-nums;
+}
+.tl-hint {
+  position: absolute;
+  bottom: max(14px, env(safe-area-inset-bottom));
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 12px;
+  color: rgba(232, 236, 248, 0.7);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+}
+.tl-hud.ended .tl-hint {
+  display: none;
+}

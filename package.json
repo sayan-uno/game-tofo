@@ -3,10 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "concurrently -n backend,frontend -c blue,green \"npm --prefix backend run dev\" \"npm --prefix frontend run dev\"",
+    "dev": "concurrently -n shared,backend,frontend -c magenta,blue,green \"node scripts/sync-shared.mjs --watch\" \"npm --prefix backend run dev\" \"npm --prefix frontend run dev\"",
     "install:all": "npm install && npm --prefix backend install && npm --prefix frontend install",
     "db:generate": "npm --prefix backend run db:generate",
-    "db:migrate": "npm --prefix backend run db:migrate"
+    "db:migrate": "npm --prefix backend run db:migrate",
+    "sync:shared": "node scripts/sync-shared.mjs",
+    "check:shared": "node scripts/sync-shared.mjs --check"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"
