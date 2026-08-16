@@ -7,6 +7,10 @@ const lobbyGameKey = (lobbyId: string) => `lobby:${lobbyId}:game`;
 const lobbyReadyKey = (lobbyId: string) => `lobby:${lobbyId}:ready`;
 const lobbyMatchKey = (lobbyId: string) => `lobby:${lobbyId}:match`;
 const userMatchKey = (userId: string) => `user:match:${userId}`;
+/** Set while a party is in the matchmaking pool. Kept separate from the match
+ *  binding so the two states can be told apart in messages ("searching" vs
+ *  "in a match"), while both block the same things. */
+const lobbySearchKey = (lobbyId: string) => `lobby:${lobbyId}:mm`;
 
 /** A party's game selection lives as long as the party is used; the backstop
  *  is generous because a leader picking a game and coming back tomorrow to a
@@ -50,6 +54,7 @@ export async function moveLobbyGameState(oldLobbyId: string, newLobbyId: string)
     [lobbyGameKey(oldLobbyId), lobbyGameKey(newLobbyId)],
     [lobbyReadyKey(oldLobbyId), lobbyReadyKey(newLobbyId)],
     [lobbyMatchKey(oldLobbyId), lobbyMatchKey(newLobbyId)],
+    [lobbySearchKey(oldLobbyId), lobbySearchKey(newLobbyId)],
   ]) {
     if (await redis.exists(from)) await redis.rename(from, to);
   }
@@ -80,8 +85,42 @@ export async function unbindMatch(matchId: string, lobbyIds: string[], userIds: 
 }
 
 export const getLobbyMatch = (lobbyId: string): Promise<string | null> => redis.get(lobbyMatchKey(lobbyId));
+
+export async function setSearching(lobbyId: string, pool: string | null): Promise<void> {
+  if (pool) await redis.set(lobbySearchKey(lobbyId), pool, "EX", 15 * 60);
+  else await redis.del(lobbySearchKey(lobbyId));
+}
+export const getSearching = (lobbyId: string): Promise<string | null> => redis.get(lobbySearchKey(lobbyId));
 export const getUserMatch = (userId: string): Promise<string | null> => redis.get(userMatchKey(userId));
 export const clearUserMatch = (userId: string): Promise<number> => redis.del(userMatchKey(userId));
+
+/** Wipe every match and search binding. Called ONCE at boot.
+ *
+ *  Match runtimes live in this process's memory while their bindings live in
+ *  Redis, so a restart leaves bindings pointing at matches that no longer
+ *  exist — and a party holding one can never start again ("already in a
+ *  match") until the TTL expires hours later. Nothing can legitimately be in a
+ *  match at the moment the server starts, so clearing is always correct.
+ *
+ *  SCAN rather than KEYS: this runs against the same Redis the lobby uses, and
+ *  KEYS blocks the whole server while it walks the keyspace. */
+export async function clearStaleMatchState(): Promise<number> {
+  let cursor = "0";
+  let removed = 0;
+  const patterns = ["lobby:*:match", "lobby:*:mm", "user:match:*", "mm:*"];
+  for (const pattern of patterns) {
+    cursor = "0";
+    do {
+      const [next, keys] = await redis.scan(cursor, "MATCH", pattern, "COUNT", 200);
+      cursor = next;
+      if (keys.length > 0) {
+        await redis.del(...keys);
+        removed += keys.length;
+      }
+    } while (cursor !== "0");
+  }
+  return removed;
+}
 
 /** One start / pick per few seconds per player. */
 export async function throttle(kind: string, userId: string, seconds: number): Promise<boolean> {

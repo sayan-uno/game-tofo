@@ -52,6 +52,11 @@ export interface GameServerDefinition {
    *  match is over because everyone has crashed — the server must know that
    *  itself rather than believe a client that says "I'm out". */
   createSim(seed: number, seat: number): ServerRunnerSim;
+  /** Every input a bot will make, planned up front. Planned rather than
+   *  reacted to because the server's own sims deliberately lag real time, and
+   *  a bot deciding at that lag would emit inputs too late for clients to
+   *  apply without a visible rewind. See games/<id>/bot.ts. */
+  planBot(seed: number, seat: number, skill: number): MatchInput[];
   /** Authoritative results: replays the shared sim over the input logs, on the
    *  course the match's seed produced. Nothing a client sent is trusted here
    *  beyond the inputs themselves. */

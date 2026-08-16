@@ -24,6 +24,7 @@ import {
   type MatchInputRelay,
   type MatchPrepare,
   type MatchResume,
+  type MatchSearching,
 } from "../shared/core/protocol";
 
 export interface MatchClientDeps {
@@ -49,6 +50,8 @@ export class MatchClient {
   private countdownEl: HTMLElement | null = null;
   private countdownRaf = 0;
   private resultsEl: HTMLElement | null = null;
+  private searchEl: HTMLElement | null = null;
+  private searchTimer = 0;
   private controls: HTMLElement | null = null;
   private micBtn: HTMLButtonElement | null = null;
   private inputBuffer: MatchInputRelay[] = [];
@@ -68,7 +71,10 @@ export class MatchClient {
     // is the one the lobby left behind (it survives the room switch), so a
     // player who muted in the lobby stays muted into the match.
     this.controls = document.createElement("div");
-    this.controls.className = "match-controls";
+    // Hidden until a match is actually being played. The layer also carries
+    // the matchmaking screen, and these belong to a RUNNING match — showing
+    // them while searching put a second mic button over the lobby's own.
+    this.controls.className = "match-controls hidden";
     this.controls.innerHTML = `<button class="mx-mic" type="button"></button><button class="mx-leave" type="button">Leave</button>`;
     this.micBtn = this.controls.querySelector<HTMLButtonElement>(".mx-mic")!;
     this.paintMic();
@@ -87,7 +93,13 @@ export class MatchClient {
     document.getElementById("ui-root")!.appendChild(this.layer);
 
     const s = deps.socket;
+    s.on(EV.searching, (p: MatchSearching | null) => {
+      if (p) this.showSearching(p);
+    });
+    s.on(EV.searchEnded, () => this.hideSearching());
     s.on(EV.prepare, (p: MatchPrepare | null) => {
+      // Found — the search screen gives way to the match.
+      this.hideSearching();
       if (p?.matchId) void this.enter(p);
     });
     s.on(EV.resume, (p: MatchResume | null) => {
@@ -119,6 +131,25 @@ export class MatchClient {
     return this.matchId !== null;
   }
 
+  /** True while the party is queued — the lobby uses it to keep START busy. */
+  get searching(): boolean {
+    return this.searchEl !== null;
+  }
+
+  /** Called by the lobby when the leader presses START and the server answers
+   *  "searching": the screen appears immediately rather than on the first
+   *  server tick, so the press feels answered. */
+  beginSearch(size: number, found: number): void {
+    this.showSearching({ found, size, elapsedMs: 0, deadlineMs: 10_000 });
+  }
+
+  cancelSearch(): void {
+    this.hideSearching();
+    void emitAck(EV.cancel).then((res) => {
+      if (res.error) toast(res.error, true);
+    });
+  }
+
   /** Dev-only introspection (stripped from production by the DEV guard below):
    *  what the running game says about itself, for headless test harnesses. */
   debug(): unknown {
@@ -143,6 +174,7 @@ export class MatchClient {
   private async build(p: MatchPrepare | MatchResume): Promise<void> {
     this.deps.onEnter();
     this.layer.classList.remove("hidden");
+    this.controls?.classList.remove("hidden");
     this.paintMic();
     this.showCurtain("Preparing match…");
     // Clock samples run alongside scene construction — both take a moment.
@@ -226,6 +258,8 @@ export class MatchClient {
   }
 
   private teardown(): void {
+    this.hideSearching();
+    this.controls?.classList.add("hidden");
     this.stopCountdown();
     this.hideCurtain();
     this.resultsEl?.remove();
@@ -241,6 +275,57 @@ export class MatchClient {
   }
 
   // ---- overlays ----
+
+  /** "Searching for players" — a count that fills, an honest clock, and a way
+   *  out. No mention of bots: the seats simply fill. */
+  private showSearching(p: MatchSearching): void {
+    if (this.matchId) return; // already in a match; a stale tick, ignore
+    this.layer.classList.remove("hidden");
+    if (!this.searchEl) {
+      const el = document.createElement("div");
+      el.className = "match-search";
+      el.innerHTML = `
+        <div class="ms-card">
+          <div class="ms-kicker">// Matchmaking</div>
+          <h2 class="ms-title">FINDING PLAYERS</h2>
+          <div class="ms-dots"></div>
+          <div class="ms-count"><span class="ms-found">1</span><span class="ms-of">/</span><span class="ms-size">4</span></div>
+          <div class="ms-elapsed">0:00</div>
+          ${this.deps.isPartyLeader() ? '<button class="btn btn-ghost ms-cancel" type="button">Cancel</button>' : '<div class="ms-note">Waiting for your leader</div>'}
+        </div>`;
+      this.layer.appendChild(el);
+      this.searchEl = el;
+      el.querySelector<HTMLButtonElement>(".ms-cancel")?.addEventListener("click", () => this.cancelSearch());
+      // The clock runs locally between server ticks so it never looks stuck.
+      const startedAt = Date.now() - p.elapsedMs;
+      this.searchTimer = window.setInterval(() => {
+        const secs = Math.floor((Date.now() - startedAt) / 1000);
+        const t = el.querySelector<HTMLElement>(".ms-elapsed");
+        if (t) t.textContent = `0:${String(secs).padStart(2, "0")}`;
+      }, 250);
+    }
+    const el = this.searchEl;
+    el.querySelector<HTMLElement>(".ms-found")!.textContent = String(p.found);
+    el.querySelector<HTMLElement>(".ms-size")!.textContent = String(p.size);
+    const dots = el.querySelector<HTMLElement>(".ms-dots")!;
+    if (dots.childElementCount !== p.size) {
+      dots.replaceChildren();
+      for (let i = 0; i < p.size; i++) {
+        const d = document.createElement("span");
+        d.className = "ms-dot";
+        dots.appendChild(d);
+      }
+    }
+    dots.querySelectorAll<HTMLElement>(".ms-dot").forEach((d, i) => d.classList.toggle("on", i < p.found));
+  }
+
+  private hideSearching(): void {
+    clearInterval(this.searchTimer);
+    this.searchTimer = 0;
+    this.searchEl?.remove();
+    this.searchEl = null;
+    if (!this.matchId) this.layer.classList.add("hidden");
+  }
 
   private paintMic(): void {
     const btn = this.micBtn;

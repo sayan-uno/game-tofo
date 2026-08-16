@@ -144,6 +144,10 @@ export class RunnerView {
         // Face-plant, once, then stay down: the run is over, and the body is
         // what the others see as they go past.
         this.play(CRASH_CLIP, false);
+        // Drop the name tag with them. A tag is a fixed-size plane, so on the
+        // body you spectate past it fills half the screen — and a runner who
+        // is out is already reported on the scoreboard.
+        if (this.tag) this.tag.setEnabled(false);
       }
       return;
     }

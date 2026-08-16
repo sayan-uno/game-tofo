@@ -22,6 +22,8 @@ export interface LobbyGameDeps {
   lobby: LobbyScene;
   localUid: string;
   socket: Socket;
+  /** Shows the "finding players" screen when the server queues the party. */
+  onSearching: (size: number, found: number) => void;
 }
 
 export class LobbyGameController {
@@ -109,8 +111,9 @@ export class LobbyGameController {
     this.starting = true;
     this.paintStart();
     try {
-      const res = await emitAck(EV.start);
+      const res = await emitAck<{ ok?: boolean; error?: string; searching?: boolean; size?: number }>(EV.start);
       if (res.error) toast(res.error, true);
+      else if (res.searching) this.deps.onSearching(res.size ?? 0, this.members.length);
     } catch (err) {
       toast(err instanceof Error ? err.message : "Could not start", true);
     } finally {

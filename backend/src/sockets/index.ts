@@ -31,7 +31,15 @@ import { areFriends, displayName, getFriendIds, getUserById, getUserByUid, getUs
 import { registerChatHandlers, syncTeamChatSession } from "./chat.js";
 import { canPerform, resolveCharacter, resolveWeapon } from "../services/catalog.js";
 import { platformOnConnect, platformOnDisconnect, registerPlatformHandlers } from "../platform/sockets.js";
-import { clearLobbyGameState, getLoading, getLobbyGame, getLobbyMatch, moveLobbyGameState } from "../platform/store.js";
+import {
+  clearLobbyGameState,
+  getLoading,
+  getLobbyGame,
+  getLobbyMatch,
+  getSearching,
+  moveLobbyGameState,
+} from "../platform/store.js";
+import { dequeue, updateSize } from "../platform/matchmaking.js";
 
 interface AuthedSocket extends Socket {
   data: { auth: AuthPayload };
@@ -90,19 +98,43 @@ export async function broadcastLobby(io: Server, lobbyId: string) {
     game: memberIds.length > 0 ? game : null,
     loading,
   });
+  // Membership just changed; if this party is queued, the pool must be told.
+  await repriceSearch(lobbyId);
 }
 
-/** A party that is searching for / playing a match takes no membership
- *  changes — joins are refused, and leaving means leaving the match first. */
+/** A party that is playing a match takes no membership changes. */
 async function inMatch(lobbyId: string): Promise<boolean> {
   return (await getLobbyMatch(lobbyId)) !== null;
+}
+
+/** Searching counts as busy for joins too — a party whose size changes mid-
+ *  queue would be promised a seat count it no longer has. Members may still
+ *  LEAVE (that is handled below by re-pricing or dropping the entry). */
+async function isBusy(lobbyId: string): Promise<string | null> {
+  if (await getLobbyMatch(lobbyId)) return "in a match";
+  if (await getSearching(lobbyId)) return "searching for a match";
+  return null;
+}
+
+/** The party's size changed while queued: keep its place in the pool but at
+ *  the new size, or drop it entirely once nobody is left. */
+async function repriceSearch(lobbyId: string): Promise<void> {
+  const pool = await getSearching(lobbyId);
+  if (!pool) return;
+  const [gameId, sizeText] = pool.split(":");
+  const size = Number(sizeText);
+  const members = await getLobbyMembers(lobbyId);
+  if (members.length === 0) await dequeue(gameId, size, lobbyId);
+  else await updateSize(gameId, size, lobbyId, members.length);
 }
 
 /** Why `userId` may not move into `targetLobbyId` right now, or null if they
  *  may. Checked by every join path before moveToLobby. */
 async function joinBlockedReason(userId: string, uid: string, targetLobbyId: string): Promise<string | null> {
-  if (await inMatch(targetLobbyId)) return "That party is in a match right now";
-  if (await inMatch((await getUserLobby(userId)) ?? `L${uid}`)) return "Leave your match first";
+  const target = await isBusy(targetLobbyId);
+  if (target) return `That party is ${target} right now`;
+  const mine = await isBusy((await getUserLobby(userId)) ?? `L${uid}`);
+  if (mine) return mine === "in a match" ? "Leave your match first" : "Cancel your search first";
   return null;
 }
 

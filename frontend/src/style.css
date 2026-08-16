@@ -3867,3 +3867,81 @@ body.in-match .chat-panel {
     padding: 5px 8px;
   }
 }
+
+/* ---------- Matchmaking: finding players ---------- */
+.match-search {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: grid;
+  place-items: center;
+  background: rgba(4, 2, 3, 0.72);
+  backdrop-filter: blur(8px);
+  animation: em-fade 0.2s ease;
+}
+.ms-card {
+  width: min(420px, calc(100vw - 32px));
+  text-align: center;
+  background: rgba(13, 6, 8, 0.97);
+  border: 1px solid rgba(229, 24, 46, 0.45);
+  border-radius: 18px;
+  padding: 20px 22px 16px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+}
+.ms-kicker {
+  font-family: var(--display-font);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--red);
+}
+.ms-title {
+  font-family: var(--display-font);
+  font-size: 22px;
+  letter-spacing: 0.06em;
+  margin: 4px 0 14px;
+}
+/* One dot per seat; they light up as the match fills. */
+.ms-dots {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.ms-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.05);
+  transition: background 0.25s ease, border-color 0.25s ease, transform 0.25s ease;
+}
+.ms-dot.on {
+  background: var(--red);
+  border-color: var(--red-hot);
+  transform: scale(1.12);
+  box-shadow: 0 0 12px rgba(229, 24, 46, 0.6);
+}
+.ms-count {
+  font-family: var(--display-font);
+  font-size: 26px;
+  font-variant-numeric: tabular-nums;
+}
+.ms-of {
+  color: var(--red);
+  margin: 0 2px;
+}
+.ms-elapsed {
+  color: #a7abb4;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 12px;
+}
+.ms-note {
+  color: #a7abb4;
+  font-size: 12.5px;
+}
+@media (max-height: 520px) {
+  .ms-card { padding: 12px 16px 10px; }
+  .ms-title { font-size: 18px; margin-bottom: 8px; }
+  .ms-count { font-size: 20px; }
+}

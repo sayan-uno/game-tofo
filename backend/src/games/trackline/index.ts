@@ -22,6 +22,7 @@ import {
   type RunnerInput,
 } from "../../shared/games/trackline/index.js";
 import { PACK } from "./pack.js";
+import { planBotRun } from "./bot.js";
 
 /** The authoritative result: every runner's inputs replayed over the course
  *  the seed produced. Nothing the client reported about its own run is used —
@@ -107,5 +108,6 @@ registerGame({
   inputMaxPerSec: INPUT_MAX_PER_SEC,
   isValidInputKind: (kind) => isInputKind(kind),
   createSim,
+  planBot: planBotRun,
   rank,
 });

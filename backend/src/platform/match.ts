@@ -23,6 +23,7 @@ import { recordMatch } from "../services/matchResults.js";
 import { displayName, type UserRow } from "../services/users.js";
 import { resolveCharacter, resolveWeapon } from "../services/catalog.js";
 import type { GameServerDefinition, RankMember, ServerRunnerSim } from "./games.js";
+import { recordBotOutcome, type BotIdentity } from "./bots.js";
 import { bindMatch, unbindMatch } from "./store.js";
 import { deleteMatchVoiceRoom } from "./voice.js";
 import {
@@ -57,6 +58,13 @@ const OUTCOME_POLL_MS = 400;
  *  on a tick an input was still allowed to rewrite. */
 const OUTCOME_LAG_MS = 1200;
 
+/** How often planned bot inputs are released, and how far ahead of their tick.
+ *  Sent slightly EARLY so clients apply them without rewinding — the opposite
+ *  end of the window from a human's input, which always arrives a little
+ *  late. A touch of jitter keeps the release from being metronomic. */
+const BOT_RELEASE_MS = 120;
+const BOT_LEAD_MS = 260;
+
 export interface Runner {
   uid: string;
   /** null for bots (M3). */
@@ -69,6 +77,9 @@ export interface Runner {
   seat: number;
   /** The server's own authoritative simulation of this runner. */
   sim: ServerRunnerSim;
+  /** Bots only: the rest of their planned inputs, oldest first. */
+  plan: MatchInput[];
+  planCursor: number;
   ready: boolean;
   connected: boolean;
   left: boolean;
@@ -96,6 +107,7 @@ export interface Match {
     end: NodeJS.Timeout | null;
     linger: NodeJS.Timeout | null;
     outcome: NodeJS.Timeout | null;
+    bots: NodeJS.Timeout | null;
   };
 }
 
@@ -146,7 +158,12 @@ function prepareFor(m: Match, r: Runner): MatchPrepare {
 }
 
 /** Assemble a match from one or more parties and tell everyone to prepare. */
-export async function createMatch(io: Server, game: GameServerDefinition, parties: PartyInput[]): Promise<Match> {
+export async function createMatch(
+  io: Server,
+  game: GameServerDefinition,
+  parties: PartyInput[],
+  bots: BotIdentity[] = []
+): Promise<Match> {
   const id = randomUUID().slice(0, 12);
   const m: Match = {
     id,
@@ -159,7 +176,7 @@ export async function createMatch(io: Server, game: GameServerDefinition, partie
     runners: new Map(),
     lobbyIds: parties.map((p) => p.lobbyId),
     room: `match:${id}`,
-    timers: { prepare: null, end: null, linger: null, outcome: null },
+    timers: { prepare: null, end: null, linger: null, outcome: null, bots: null },
   };
   let seat = 0;
   for (const party of parties) {
@@ -181,8 +198,41 @@ export async function createMatch(io: Server, game: GameServerDefinition, partie
         recent: [],
         graceTimer: null,
         sim: game.createSim(m.seed, seat - 1),
+        plan: [],
+        planCursor: 0,
       });
     }
+  }
+  // Bots take the remaining seats. From here on they are runners like any
+  // other: same roster shape, same input stream, same rows in the results.
+  for (const bot of bots) {
+    const seat2 = seat++;
+    let plan: MatchInput[] = [];
+    try {
+      plan = game.planBot(m.seed, seat2, bot.skill);
+    } catch (err) {
+      console.error(`[match ${id}] bot plan failed:`, err);
+    }
+    m.runners.set(bot.uid, {
+      uid: bot.uid,
+      userId: null,
+      name: bot.name,
+      character: bot.character,
+      weapon: bot.weapon,
+      partyLobbyId: "",
+      isBot: true,
+      seat: seat2,
+      ready: true, // nothing to download, nothing to wait for
+      connected: true,
+      left: false,
+      leftAtTick: null,
+      inputs: [],
+      recent: [],
+      graceTimer: null,
+      sim: game.createSim(m.seed, seat2),
+      plan,
+      planCursor: 0,
+    });
   }
   matches.set(id, m);
   const userIds = humans(m).map((r) => r.userId!);
@@ -232,6 +282,9 @@ async function go(io: Server, m: Match): Promise<void> {
   );
   // Watch for the OTHER ending: everyone crashed before the clock ran out.
   m.timers.outcome = setInterval(() => void checkAllOut(io, m), OUTCOME_POLL_MS);
+  if ([...m.runners.values()].some((r) => r.isBot)) {
+    m.timers.bots = setInterval(() => releaseBotInputs(io, m), BOT_RELEASE_MS);
+  }
 }
 
 /** Validate and relay one input. Returns a reason string when dropped (for a
@@ -336,6 +389,8 @@ export async function end(io: Server, m: Match, reason: MatchEndReason): Promise
   m.endedAt = Date.now();
   if (m.timers.outcome) clearInterval(m.timers.outcome);
   m.timers.outcome = null;
+  if (m.timers.bots) clearInterval(m.timers.bots);
+  m.timers.bots = null;
   for (const t of Object.values(m.timers)) if (t) clearTimeout(t);
   const endTick = reason === "timeout" ? m.game.durationTicks : nowTick(m);
   const members: RankMember[] = [...m.runners.values()].map((r) => ({
@@ -368,6 +423,15 @@ export async function end(io: Server, m: Match, reason: MatchEndReason): Promise
     standings,
     runners: [...m.runners.values()].map((r) => ({ uid: r.uid, userId: r.userId, isBot: r.isBot })),
   });
+  // Difficulty tuning needs evidence, not guesswork: how often bots win and
+  // how far they get is the only way to know whether they are set right.
+  recordBotOutcome(
+    standings.map((st) => ({
+      isBot: m.runners.get(st.uid)?.isBot ?? false,
+      placement: st.placement,
+      distance: Number((st.detail as Record<string, number>).distance ?? 0),
+    }))
+  );
   const payload: MatchEnd = { matchId: m.id, reason, standings, ticks: endTick, xp: recorded.xp };
   io.to(m.room).emit(EV.end, payload);
 
@@ -383,6 +447,29 @@ export async function end(io: Server, m: Match, reason: MatchEndReason): Promise
   }
   void deleteMatchVoiceRoom(m.id);
   m.timers.linger = setTimeout(() => matches.delete(m.id), LINGER_MS);
+}
+
+/** Send the bot inputs whose tick is nearly here.
+ *
+ *  Each one goes onto the bot's own log and sim exactly like a human's, so the
+ *  end-of-match replay treats the two identically and a bot's score is
+ *  computed by the same code as everyone else's. */
+function releaseBotInputs(io: Server, m: Match): void {
+  if (m.phase !== "countdown" && m.phase !== "running") return;
+  if (m.startAt === null) return;
+  const horizon = Date.now() + BOT_LEAD_MS - m.startAt;
+  for (const r of m.runners.values()) {
+    if (!r.isBot || r.left) continue;
+    while (r.planCursor < r.plan.length) {
+      const input = r.plan[r.planCursor];
+      if ((input.tick * 1000) / m.game.tickRate > horizon) break;
+      r.planCursor++;
+      r.inputs.push(input);
+      r.sim.addInput(input);
+      const relay: MatchInputRelay = { uid: r.uid, tick: input.tick, kind: input.kind };
+      io.to(m.room).emit(EV.input, relay);
+    }
+  }
 }
 
 /** Everyone crashed? Then the match is over now rather than at the clock.

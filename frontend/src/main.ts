@@ -258,7 +258,13 @@ async function enterLobby(user: User) {
     }
   };
 
-  lobbyGame = new LobbyGameController({ hud, lobby, localUid: user.uid, socket });
+  lobbyGame = new LobbyGameController({
+    hud,
+    lobby,
+    localUid: user.uid,
+    socket,
+    onSearching: (size, found) => matchClient?.beginSearch(size, found),
+  });
   matchClient = new MatchClient({
     engine,
     socket,

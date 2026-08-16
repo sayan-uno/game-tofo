@@ -8,7 +8,8 @@ import { getLobbyMembers, getLobbyMode, getUserLobby } from "../redis.js";
 import { getUsersByIds } from "../services/users.js";
 import { getGame } from "./games.js";
 import { createMatch, getMatchForUser, isActive, leave, markReady, onDisconnect, onInput, onReconnect } from "./match.js";
-import { getLoading, getLobbyGame, getLobbyMatch, setLoading, setLobbyGame, throttle } from "./store.js";
+import { getLoading, getLobbyGame, getLobbyMatch, getSearching, setLoading, setLobbyGame, throttle } from "./store.js";
+import { FILL_DEADLINE_MS, dequeue, enqueue, packNow } from "./matchmaking.js";
 import { EV, PROGRESS_MAX_HZ, type TimePong } from "../shared/core/protocol.js";
 
 interface AuthedSocket extends Socket {
@@ -102,14 +103,44 @@ export function registerPlatformHandlers(io: Server, socket: AuthedSocket, deps:
         return reply?.({ error: `Waiting for ${notReady.length === 1 ? notReady[0].username ?? "a teammate" : `${notReady.length} teammates`} to finish downloading` });
       }
       if (users.length > game.matchSizeFor(mode)) return reply?.({ error: "Your party is too big for this mode" });
+      if (await getSearching(lobbyId)) return reply?.({ error: "Already searching" });
       if (!(await throttle("start", userId, 3))) return reply?.({ error: "Hold on a moment" });
-      // Milestone 1: the party alone. Matchmaking (fill from the pool, then
-      // bots) slots in here in M3 — createMatch already takes several parties.
-      const match = await createMatch(io, game, [{ lobbyId, users }]);
-      reply?.({ ok: true, matchId: match.id });
+
+      const size = game.matchSizeFor(mode);
+      if (users.length >= size) {
+        // A full party needs nobody: start at once rather than queue for a
+        // pool that has nothing to add.
+        const match = await createMatch(io, game, [{ lobbyId, users }]);
+        return reply?.({ ok: true, matchId: match.id });
+      }
+      // Otherwise wait to be topped up — by other parties, and then by bots
+      // once the deadline passes. The client shows the search from this ack.
+      await enqueue(gameId, size, lobbyId, users.length);
+      io.to(`room:${lobbyId}`).emit(EV.searching, { found: users.length, size, elapsedMs: 0, deadlineMs: FILL_DEADLINE_MS });
+      reply?.({ ok: true, searching: true, size });
+      // Try immediately: someone may already be waiting.
+      await packNow(io, gameId, size);
     } catch (err) {
       console.error("lobby:start error:", err);
       reply?.({ error: "Could not start" });
+    }
+  });
+
+  // ---- lobby: cancel the search (leader) ----
+  socket.on(EV.cancel, async (_payload: unknown, ack?: (r: object) => void) => {
+    const reply = typeof _payload === "function" ? (_payload as (r: object) => void) : ack;
+    try {
+      const lobbyId = (await getUserLobby(userId)) ?? soloLobby;
+      if (lobbyId !== soloLobby) return reply?.({ error: "Only the party leader can cancel" });
+      const pool = await getSearching(lobbyId);
+      if (!pool) return reply?.({ ok: true }); // already out of the queue
+      const [gameId, sizeText] = pool.split(":");
+      await dequeue(gameId, Number(sizeText), lobbyId);
+      io.to(`room:${lobbyId}`).emit(EV.searchEnded, { reason: "cancelled" });
+      reply?.({ ok: true });
+    } catch (err) {
+      console.error("lobby:cancelSearch error:", err);
+      reply?.({ error: "Could not cancel" });
     }
   });
 

@@ -90,6 +90,17 @@ export interface MatchResume extends MatchPrepare {
   left: string[];
 }
 
+/** Progress while a party waits for a match to fill. */
+export interface MatchSearching {
+  /** Humans found so far, including your own party. */
+  found: number;
+  /** Runners the match needs. */
+  size: number;
+  elapsedMs: number;
+  /** After this long the empty seats are filled and the match starts. */
+  deadlineMs: number;
+}
+
 /** Server-side clock probe answer for offset estimation. */
 export interface TimePong {
   serverNow: number;
@@ -102,6 +113,9 @@ export const EV = {
   progress: "game:progress", // client→server {pct}
   loading: "lobby:loading", // server→room {uid, pct}
   start: "lobby:start", // client→server (leader)
+  cancel: "lobby:cancelSearch", // client→server (leader)
+  searching: "match:searching", // server→room  MatchSearching
+  searchEnded: "match:searchEnded", // server→room {reason}
   // match lifecycle (match scope)
   prepare: "match:prepare", // server→participants  MatchPrepare
   ready: "match:ready", // client→server

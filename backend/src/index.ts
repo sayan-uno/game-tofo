@@ -14,6 +14,8 @@ import { gamesRouter } from "./routes/games.js";
 // Registers every game with the platform (one import per game folder).
 import "./games/index.js";
 import { registerSockets } from "./sockets/index.js";
+import { startMatchmaker } from "./platform/matchmaking.js";
+import { clearStaleMatchState } from "./platform/store.js";
 import { startChatRetention } from "./services/chat.js";
 
 const missing = assertConfig();
@@ -52,10 +54,16 @@ app.use("/api/collection", collectionRouter(io));
 app.use("/api/games", gamesRouter);
 
 registerSockets(io);
+// The packer: fills waiting parties from the pool, then with bots.
+startMatchmaker(io);
 
 async function start() {
   await redis.connect();
   console.log("✔ Redis connected");
+  // Matches live in this process; their Redis bindings do not. Anything left
+  // from a previous run points at a match that no longer exists.
+  const stale = await clearStaleMatchState();
+  if (stale > 0) console.log(`✔ Cleared ${stale} stale match/matchmaking key(s) from a previous run`);
   startChatRetention();
   server.listen(config.port, () => {
     console.log(`✔ TOFO Games backend listening on http://localhost:${config.port}`);

@@ -27,6 +27,9 @@
 import { Course, ROW_SPACING } from "../../shared/games/trackline/course.js";
 import { createState, step, applyInput, replay, scoreOf, RunnerSim, JUMP_TICKS } from "../../shared/games/trackline/sim.js";
 import { DURATION_TICKS, TICK_RATE, distanceAt, EMPTY_START_METRES } from "../../shared/games/trackline/rules.js";
+// The bot policy is server-side (it is not part of the deterministic sim), but
+// its OUTPUT is ordinary inputs, so it is checked with exactly the same tools.
+import { planBotRun } from "../../backend/src/games/trackline/bot.js";
 
 let fails = 0;
 const ok = (cond, msg) => { if (!cond) { console.log("  ✗ " + msg); fails++; } else console.log("  ✓ " + msg); };
@@ -168,6 +171,51 @@ console.log("cost");
   for (let i = 0; i < 4; i++) replay(i, [], DURATION_TICKS, course);
   const ms = Number(process.hrtime.bigint() - t0) / 1e6;
   ok(ms < 120, `replaying a full 4-runner match takes ${ms.toFixed(1)} ms`);
+}
+
+
+// ---------------------------------------------------------------------------
+// Bots. Their whole job is to be indistinguishable, so what matters is the
+// SPREAD: bots that all die at the first row, or all survive to the clock, are
+// equally obvious. Skill also has to actually mean something.
+// ---------------------------------------------------------------------------
+console.log("bots");
+{
+  const runOne = (seed, seat, skill) => {
+    const course = new Course(seed);
+    const plan = planBotRun(seed, seat, skill);
+    const s = createState(seat);
+    let i = 0;
+    while (s.tick < DURATION_TICKS && s.alive) {
+      const next = s.tick + 1;
+      while (i < plan.length && plan[i].tick <= next) { applyInput(s, plan[i].kind); i++; }
+      step(s, course);
+    }
+    return { distance: s.distance, alive: s.alive, coins: s.coins, near: s.nearMisses, inputs: plan.length };
+  };
+
+  const byTier = { weak: [], mid: [], strong: [] };
+  let maxRate = 0;
+  for (let seed = 1; seed <= 120; seed++) {
+    for (const [tier, skill] of [["weak", 0.15], ["mid", 0.5], ["strong", 0.9]]) {
+      const r = runOne(seed * 7717, seed % 4, skill);
+      byTier[tier].push(r);
+      const secs = Math.max(1, r.distance / 14);
+      maxRate = Math.max(maxRate, r.inputs / secs);
+    }
+  }
+  const avg = (a, f) => a.reduce((n, r) => n + f(r), 0) / a.length;
+  const survived = (a) => a.filter((r) => r.alive).length / a.length;
+  for (const tier of ["weak", "mid", "strong"]) {
+    const a = byTier[tier];
+    console.log(`    ${tier.padEnd(6)} avg ${avg(a, (r) => r.distance).toFixed(0)}m · survived ${(survived(a) * 100).toFixed(0)}% · coins ${avg(a, (r) => r.coins).toFixed(1)} · near-miss ${avg(a, (r) => r.near).toFixed(1)}`);
+  }
+  ok(avg(byTier.strong, (r) => r.distance) > avg(byTier.weak, (r) => r.distance) * 1.3, "skill matters: strong bots get meaningfully further than weak ones");
+  ok(survived(byTier.weak) < 0.5, "weak bots usually crash before the clock");
+  ok(survived(byTier.strong) > 0.15, "strong bots sometimes go the distance");
+  ok(avg(byTier.mid, (r) => r.distance) > 200, "a mid bot is not dying at the first row");
+  ok(byTier.mid.some((r) => r.near > 0), "bots take the risky line sometimes (jump/roll for the bonus)");
+  ok(maxRate < 9, `bot input rate stays under the server ceiling (peak ${maxRate.toFixed(1)}/s)`);
 }
 
 console.log(fails === 0 ? "\nALL CHECKS PASSED" : `\n${fails} CHECK(S) FAILED`);
