@@ -19,10 +19,13 @@ import { PointLight } from "@babylonjs/core/Lights/pointLight";
 import { Vector3 } from "@babylonjs/core/Maths/math.vector";
 import { Color3, Color4 } from "@babylonjs/core/Maths/math.color";
 import type { GameRuntime, GameRuntimeContext } from "../../platform/types";
-import type { MatchEnd, MatchInputRelay } from "../../shared/core/protocol";
+import { QUICK_CHAT, type MatchEnd, type MatchInputRelay } from "../../shared/core/protocol";
 import {
   Course,
   DURATION_TICKS,
+  INPUT_MAX_PER_SEC,
+  POINTS_PER_COIN,
+  POINTS_PER_NEAR_MISS,
   ROOF_HEIGHT,
   TRAIN_LENGTH,
   RunnerSim,
@@ -44,13 +47,20 @@ const CAM_BACK = 7.5;
 /** Never blur past this: below it the game stops being readable, and a
  *  device that cannot hold the budget at this scale should drop frames
  *  visibly rather than silently turn to mush. */
-const MAX_HARDWARE_SCALE = 1.9;
+const MAX_HARDWARE_SCALE = 2.4;
+/** Over this many milliseconds a frame is costing the player reaction time. */
+const BUDGET_MS = 18;
+/** Under this there is room to sharpen again — with a gap between the two so
+ *  the guard cannot chase its own tail. */
+const RELAX_MS = 12;
 const CAM_UP = 3.3;
 const CAM_LOOK_AHEAD = 10;
 const CAM_LOOK_UP = 1.0;
 
 interface Sim {
   uid: string;
+  /** For the spectator banner: whose run you are watching. */
+  name: string;
   seat: number;
   /** THE simulation — the same class the server judges with, so the run drawn
    *  here and the run scored there cannot drift apart. */
@@ -79,7 +89,13 @@ export class TracklineRuntime implements GameRuntime {
    *  set — and the jump arc is only partly followed, so a jump still feels
    *  like the runner leaving the ground rather than the world dropping. */
   private camY = CAM_UP;
-  private frameAccum = 0;
+  /** Whose run the camera is on. Only meaningful once you are out. */
+  private watching = "";
+  /** Last values the juice has already reacted to, so one event fires once. */
+  private lastNearMiss = 0;
+  private lastCoins = 0;
+  private wasOnRoof = false;
+  private frameMs = 0;
   private frameCount = 0;
   /** Whatever the lobby set for this device — never sharpen past it. */
   private baseScale = 1;
@@ -89,11 +105,16 @@ export class TracklineRuntime implements GameRuntime {
   private readonly lookAt = new Vector3(0, 0, 0);
   private readonly tickRate: number;
   private readonly durationTicks: number;
+  private readonly inputMaxPerSec: number;
+  /** Timestamps of inputs sent in the last second — the client's copy of the
+   *  server's rate ceiling, so the two never disagree about what happened. */
+  private recentInputs: number[] = [];
 
   constructor(private ctx: GameRuntimeContext) {
     // The server's numbers win; the shared copy is what we were built with.
     this.tickRate = ctx.rules.tickRate ?? TICK_RATE;
     this.durationTicks = ctx.rules.durationTicks ?? DURATION_TICKS;
+    this.inputMaxPerSec = ctx.rules.inputMaxPerSec ?? INPUT_MAX_PER_SEC;
     if (this.tickRate !== TICK_RATE || this.durationTicks !== DURATION_TICKS) {
       console.warn("[trackline] rules differ from this build's copy — server wins", ctx.rules);
     }
@@ -147,8 +168,12 @@ export class TracklineRuntime implements GameRuntime {
     // Sims: one per roster seat, in roster order (the server ranks by seat too).
     const sims: Sim[] = ctx.roster.map((r, seat) => ({
       uid: r.uid,
+      name: r.name,
       seat,
-      sim: new RunnerSim(seat, this.course),
+      // The clock comes from the server (ctx.rules), so a longer match needs
+      // no client change — but BOTH sides must step with the same number, so
+      // it goes into the sim here rather than being read only by the HUD.
+      sim: new RunnerSim(seat, this.course, this.durationTicks),
       left: false,
       view: new RunnerView(scene, r.uid, r.name, r.uid === ctx.you),
     }));
@@ -182,6 +207,13 @@ export class TracklineRuntime implements GameRuntime {
     this.world = new World(this.scene, trackTex, facadeTex, models, pavementTex);
     this.props = new Props(this.scene, this.course, { train: trainTex, barrier: barrierTex, beam: beamTex, hoarding: hoardingTex }, models);
     this.hud = new TracklineHud(ctx.hudRoot, ctx.roster, ctx.you);
+    // Show your own message immediately rather than waiting for the server to
+    // echo it back: at a hundred milliseconds' round trip the button feels
+    // broken otherwise, and the server's copy simply repaints the same bubble.
+    this.hud.onSay = (kind, id) => {
+      this.onQuick(ctx.you, kind, id);
+      ctx.sendQuick(kind, id);
+    };
     // Characters in parallel; each is already in the on-device store from the
     // lobby, so this is a parse, not a download.
     await Promise.all(this.allSims().map((s) => s.view.load(ctx.roster[s.seat].character)));
@@ -249,6 +281,10 @@ export class TracklineRuntime implements GameRuntime {
     return {
       startAt: this.startAt,
       ended: this.ended,
+      /** The clock this match is running on — the SERVER's number, not this
+       *  build's constant, which is the whole point of it being sent. */
+      durationTicks: this.durationTicks,
+      tickRate: this.tickRate,
       local: pick(this.local),
       ghosts: this.ghosts.map(pick),
       // The row just BEHIND matters as much as the one ahead: a carriage is 8 m
@@ -301,8 +337,16 @@ export class TracklineRuntime implements GameRuntime {
 
   render(): void {
     if (this.disposed) return;
-    const dt = Math.min(this.scene.getEngine().getDeltaTime(), 100) / 1000;
-    this.guardFrameRate(dt);
+    // TWO deltas, on purpose. The raw one is how long the frame actually took
+    // and is what the resolution guard must judge; the clamped one is what the
+    // world and camera may move by, so a stall cannot teleport the scenery.
+    // Feeding the clamped value to the guard was a real bug: on a device
+    // rendering at 1.5 fps every frame measured as exactly 100 ms, so the
+    // guard thought it was mildly over budget and crept down at 12% every
+    // thirteen seconds instead of rescuing the frame at once.
+    const rawMs = this.scene.getEngine().getDeltaTime();
+    const dt = Math.min(rawMs, 100) / 1000;
+    this.guardFrameRate(rawMs);
     if (this.startAt !== null && !this.ended) this.stepToNow();
     this.placeAll(dt);
     this.scene.render();
@@ -313,25 +357,38 @@ export class TracklineRuntime implements GameRuntime {
    *  A runner may not stutter: the whole game is reacting to something 6 m
    *  ahead. So rather than let a slow device drop frames, the internal
    *  resolution steps down until the frame fits, and climbs back when there is
-   *  headroom. Judged on a two-second average, because reacting to single
-   *  slow frames would make the picture pulse.
+   *  headroom.
+   *
+   *  Down FAST, up SLOW. A player on a struggling phone should be rescued
+   *  within a second of the trouble starting, so the step down is sized by how
+   *  far out of budget the frame is — pixel count goes with the square of the
+   *  scaling level, hence the square root. Coming back up is deliberately
+   *  timid: a device that is only just coping would otherwise oscillate
+   *  between sharp and soft every second, which reads worse than simply
+   *  staying soft.
+   *
+   *  The window closes on whichever comes first, a second of wall clock or
+   *  thirty frames — one second so a fast device still averages over enough
+   *  frames to ignore a single hitch, thirty frames so a device managing two
+   *  frames a second is not judged on a sample of two.
    *
    *  The simulation is untouched by any of this — it is fixed-step and driven
-   *  by the clock, so a device rendering at 0.7 scale still runs exactly the
+   *  by the clock, so a device rendering at 0.5 scale still runs exactly the
    *  same match as everyone else. */
-  private guardFrameRate(dt: number): void {
-    this.frameAccum += dt;
+  private guardFrameRate(rawMs: number): void {
+    this.frameMs += rawMs;
     this.frameCount += 1;
-    if (this.frameAccum < 2) return;
-    const avgMs = (this.frameAccum / this.frameCount) * 1000;
-    this.frameAccum = 0;
+    if (this.frameMs < 1000 && this.frameCount < 30) return;
+    const avgMs = this.frameMs / this.frameCount;
+    this.frameMs = 0;
     this.frameCount = 0;
     const engine = this.scene.getEngine();
     const scale = engine.getHardwareScalingLevel();
-    if (avgMs > 18 && scale < MAX_HARDWARE_SCALE) {
-      engine.setHardwareScalingLevel(Math.min(MAX_HARDWARE_SCALE, scale * 1.12));
-    } else if (avgMs < 13 && scale > this.baseScale) {
-      engine.setHardwareScalingLevel(Math.max(this.baseScale, scale / 1.08));
+    if (avgMs > BUDGET_MS && scale < MAX_HARDWARE_SCALE) {
+      const step = Math.min(1.4, Math.sqrt(avgMs / BUDGET_MS));
+      engine.setHardwareScalingLevel(Math.min(MAX_HARDWARE_SCALE, scale * step));
+    } else if (avgMs < RELAX_MS && scale > this.baseScale) {
+      engine.setHardwareScalingLevel(Math.max(this.baseScale, scale / 1.06));
     }
   }
 
@@ -362,11 +419,38 @@ export class TracklineRuntime implements GameRuntime {
     // Before tick 0 (countdown) there is nothing to steer yet.
     if (Date.now() < this.startAt) return;
     const s = this.local.sim.state;
-    if (!s.alive || s.tick >= this.durationTicks) return;
+    // Out of the run: the same left/right that steered now picks who to
+    // watch. Reusing the controls rather than adding new ones means it works
+    // on a phone (swipe) and a keyboard without either learning anything.
+    if (!s.alive) {
+      if (kind === "left" || kind === "right") this.cycleWatch(kind === "right" ? 1 : -1);
+      return;
+    }
+    if (s.tick >= this.durationTicks) return;
+    // Self-limit to the SERVER's ceiling, and drop the input entirely rather
+    // than predicting it locally and letting the server refuse it.
+    //
+    // The server caps inputs per second because a swipe storm is not
+    // gameplay. But a client that predicts an input the server then drops has
+    // just made its own run different from the run being scored — the player
+    // watches themselves clear a barrier and is told afterwards they hit it.
+    // Refusing here keeps the two simulations identical, which is the whole
+    // basis of this netcode; a real player never reaches this rate anyway.
+    const now = Date.now();
+    while (this.recentInputs.length && this.recentInputs[0] <= now - 1000) this.recentInputs.shift();
+    if (this.recentInputs.length >= this.inputMaxPerSec) return;
+    this.recentInputs.push(now);
     // Predicted and logged in one step, then sent: this player never waits for
     // the server to see their own move.
     const input = this.local.sim.predict(kind);
     this.ctx.sendInput(input);
+  }
+
+  /** Someone said something — theirs or ours. */
+  onQuick(uid: string, kind: string, id: string): void {
+    const text = kind === "emote" ? id : (QUICK_CHAT.find((q) => q.id === id)?.text ?? "");
+    if (!text) return;
+    this.byUid.get(uid)?.view.say(text);
   }
 
   /** Scoreboard, repainted from simulation state. The HUD itself only touches
@@ -380,20 +464,46 @@ export class TracklineRuntime implements GameRuntime {
     }
     const me = this.local.sim.state;
     this.hud.setScore(scoreOf(me), me.coins, me.alive);
+
+    // Juice. Driven off the simulation's own counters rather than off the
+    // events that changed them, because the sim is also fast-forwarded on a
+    // resume and replayed on a rewind — reacting to the counters means a
+    // rewind cannot fire a shower of "NEAR MISS" for things that already
+    // happened, while a genuine one still lands the frame it occurs.
+    if (me.alive) {
+      if (me.nearMisses > this.lastNearMiss) {
+        this.hud.flash(`NEAR MISS +${POINTS_PER_NEAR_MISS}`, "near");
+      } else if (me.coins > this.lastCoins && me.coins - this.lastCoins <= 3) {
+        this.hud.flash(`+${(me.coins - this.lastCoins) * POINTS_PER_COIN}`, "coin");
+      }
+      const roof = onRoof(me);
+      if (roof && !this.wasOnRoof) this.hud.flash("ROOF RUN", "roof");
+      this.wasOnRoof = roof;
+    }
+    this.lastNearMiss = me.nearMisses;
+    this.lastCoins = me.coins;
+
+    // Who you are watching, once you are out of it yourself.
+    if (me.alive || this.ended) {
+      this.hud.setSpectating(null);
+    } else {
+      const w = [this.local, ...this.ghosts].find((s) => s.uid === this.watching);
+      this.hud.setSpectating(w && w !== this.local ? w.name : null);
+    }
   }
 
   /** World positions from sim state + camera follow. */
   private placeAll(dt: number): void {
-    const me = this.local.sim.state;
     for (const s of [this.local, ...this.ghosts]) {
       const st = s.sim.state;
       s.view.setState(laneToX(st.x), st.y, st.distance, { rolling: st.rolling > 0, alive: st.alive && !s.left });
     }
 
     // The camera follows whoever you are watching: yourself while you are
-    // running, and the leader once you are out — a spectator with nothing to
-    // look at is the dullest way to spend the rest of a match.
-    const watched = me.alive ? this.local : this.bestAlive() ?? this.local;
+    // running, and once you are out whoever you picked — a spectator with
+    // nothing to look at is the dullest way to spend the rest of a match.
+    const watched = this.watched();
+    this.watching = watched.uid;
     const ws = watched.sim.state;
     const z = ws.distance;
     const x = laneToX(ws.x);
@@ -410,6 +520,26 @@ export class TracklineRuntime implements GameRuntime {
   }
 
   /** The runner worth watching: alive, furthest ahead on score. */
+  /** Move the spectator camera to the next runner still going. */
+  private cycleWatch(step: number): void {
+    const alive = [this.local, ...this.ghosts].filter((s) => !s.left && s.sim.state.alive);
+    if (alive.length === 0) return;
+    const at = alive.findIndex((s) => s.uid === this.watching);
+    const next = alive[(((at < 0 ? 0 : at + step) % alive.length) + alive.length) % alive.length];
+    this.watching = next.uid;
+  }
+
+  /** Whoever the camera should be on: yourself while you are running, and
+   *  otherwise whoever you last chose — falling back to the leader when that
+   *  runner crashes too, so a spectator is never left staring at a corpse. */
+  private watched(): Sim {
+    if (this.local.sim.state.alive) return this.local;
+    const chosen = [this.local, ...this.ghosts].find(
+      (s) => s.uid === this.watching && !s.left && s.sim.state.alive
+    );
+    return chosen ?? this.bestAlive() ?? this.local;
+  }
+
   private bestAlive(): Sim | null {
     let best: Sim | null = null;
     for (const s of [this.local, ...this.ghosts]) {

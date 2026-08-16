@@ -216,6 +216,29 @@ console.log("bots");
   ok(avg(byTier.mid, (r) => r.distance) > 200, "a mid bot is not dying at the first row");
   ok(byTier.mid.some((r) => r.near > 0), "bots take the risky line sometimes (jump/roll for the bonus)");
   ok(maxRate < 9, `bot input rate stays under the server ceiling (peak ${maxRate.toFixed(1)}/s)`);
+
+  // THE number bot difficulty is actually judged on: how often a match
+  // contains a bot that went the whole distance. Skill tiers can all look
+  // sensible on their own while three of them together still finish nearly
+  // every match, which is what makes surviving the clock feel worthless — it
+  // was 69.5% before this was tuned, and nothing here would have caught it.
+  // Bots are drawn from the same triangular distribution the server uses.
+  let rng = 12345;
+  const rnd = () => ((rng = (rng * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  const MATCHES = 300;
+  let withFinisher = 0;
+  for (let m = 0; m < MATCHES; m++) {
+    const seed = ((m * 2654435761) >>> 0) % 4294967295;
+    let any = false;
+    for (let seat = 1; seat <= 3; seat++) {
+      if (runOne(seed, seat, (rnd() + rnd()) / 2).alive) any = true;
+    }
+    if (any) withFinisher++;
+  }
+  const share = withFinisher / MATCHES;
+  console.log(`    a bot goes the distance in ${(share * 100).toFixed(0)}% of matches`);
+  ok(share > 0.2, `bots are still worth beating (${(share * 100).toFixed(0)}% of matches have a finisher)`);
+  ok(share < 0.55, `surviving the clock usually wins (${(share * 100).toFixed(0)}% of matches have a bot finisher)`);
 }
 
 

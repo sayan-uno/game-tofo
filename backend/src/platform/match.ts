@@ -36,6 +36,11 @@ import {
   type MatchPhase,
   type MatchPrepare,
   type MatchResume,
+  QUICK_CHAT,
+  QUICK_EMOTE,
+  QUICK_MAX,
+  QUICK_WINDOW_MS,
+  type QuickRelay,
   type RosterEntry,
 } from "../shared/core/protocol.js";
 
@@ -46,7 +51,13 @@ const PREPARE_TIMEOUT_MS = 10_000;
 const DISCONNECT_GRACE_MS = 20_000;
 /** Ended matches linger this long so a late `match:leave`/`ready` finds them
  *  and gets a sane answer instead of "unknown match". */
-const LINGER_MS = 30_000;
+/** How long a finished match stays in memory after its results go out.
+ *
+ *  Long enough to outlive the results screen, because that screen asks the
+ *  server questions about the match it is showing — who you can add as a
+ *  friend, for one — and a match that has already been collected can only
+ *  answer "nobody". */
+const LINGER_MS = 5 * 60_000;
 
 /** How often the server advances its own simulations to see whether everyone
  *  is out. Coarse on purpose: a match is decided by the inputs, not by this
@@ -87,6 +98,8 @@ export interface Runner {
   inputs: MatchInput[];
   /** Timestamps of recent inputs, for the per-second ceiling. */
   recent: number[];
+  /** Timestamps of recent quick messages — the chat wheel's own rate window. */
+  recentQuick: number[];
   graceTimer: NodeJS.Timeout | null;
 }
 
@@ -116,6 +129,16 @@ const matches = new Map<string, Match>();
 const byUser = new Map<string, string>();
 
 export const getMatch = (id: string): Match | undefined => matches.get(id);
+
+/** The real people in a match, as uid → userId. Bots are simply absent, which
+ *  is what keeps them out of every list built from this. */
+export function humansIn(id: string): Map<string, string> {
+  const m = matches.get(id);
+  const out = new Map<string, string>();
+  if (!m) return out;
+  for (const r of m.runners.values()) if (!r.isBot && r.userId) out.set(r.uid, r.userId);
+  return out;
+}
 export function getMatchForUser(userId: string): Match | undefined {
   const id = byUser.get(userId);
   return id ? matches.get(id) : undefined;
@@ -196,6 +219,7 @@ export async function createMatch(
         leftAtTick: null,
         inputs: [],
         recent: [],
+      recentQuick: [],
         graceTimer: null,
         sim: game.createSim(m.seed, seat - 1),
         plan: [],
@@ -228,6 +252,7 @@ export async function createMatch(
       leftAtTick: null,
       inputs: [],
       recent: [],
+      recentQuick: [],
       graceTimer: null,
       sim: game.createSim(m.seed, seat2),
       plan,
@@ -316,6 +341,34 @@ export function onInput(socket: Socket, m: Match, uid: string, raw: unknown): st
   r.sim.addInput(input);
   const relay: MatchInputRelay = { uid, tick, kind };
   socket.to(m.room).emit(EV.input, relay);
+  return null;
+}
+
+/** Relay one quick message to the rest of the match.
+ *
+ *  Server-checked on both axes a client cannot be trusted with: the id has to
+ *  be one this build actually offers (so nobody injects text into other
+ *  players' screens through the message channel), and the rate has to be a
+ *  human one. Over the ceiling the message is dropped, not queued — a late
+ *  "watch out!" is worse than none.
+ *
+ *  Returns a reason when dropped, for the same counter the input path uses. */
+export function onQuick(io: Server, m: Match, uid: string, raw: unknown): string | null {
+  const r = m.runners.get(uid);
+  if (!r || r.left) return "not-in-match";
+  if (m.phase !== "countdown" && m.phase !== "running") return "phase";
+  const { kind, id } = (raw ?? {}) as { kind?: unknown; id?: unknown };
+  if (typeof id !== "string" || (kind !== "chat" && kind !== "emote")) return "shape";
+  const known =
+    kind === "chat" ? QUICK_CHAT.some((q) => q.id === id) : (QUICK_EMOTE as readonly string[]).includes(id);
+  if (!known) return "unknown";
+  const now = Date.now();
+  const cutoff = now - QUICK_WINDOW_MS;
+  while (r.recentQuick.length && r.recentQuick[0] < cutoff) r.recentQuick.shift();
+  if (r.recentQuick.length >= QUICK_MAX) return "rate";
+  r.recentQuick.push(now);
+  const relay: QuickRelay = { uid, kind, id };
+  io.to(m.room).emit(EV.quick, relay);
   return null;
 }
 

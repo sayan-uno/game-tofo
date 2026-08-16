@@ -40,6 +40,27 @@ function roll(seed: number, seat: number, row: number, salt: number): number {
   return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
 }
 
+/** How often a bot fumbles a row, as `MISTAKE_SLOPE * (1 - skill) +
+ *  MISTAKE_FLOOR`. Two knobs, both overridable without a deploy, because the
+ *  right values are a matter of evidence rather than of design: the number
+ *  that matters is how often a MATCH contains a bot that goes the whole
+ *  distance, and that is only visible from real results (see /ops/bots).
+ *
+ *  The floor is the interesting one. It is what a bot of perfect skill still
+ *  gets wrong, and therefore what stops the strongest bots finishing every
+ *  time — the failure that makes surviving the clock feel worthless because a
+ *  bot did it too.
+ *
+ *  Tuned 2026-08-16 from 400 simulated matches. The old values (slope 0.03,
+ *  floor 0.002) put a bot across the finish in 69.5% of matches, so a player
+ *  who survived the full two minutes still had to share the win seven times in
+ *  ten — surviving barely paid. These bring that to 42%, which leaves the
+ *  strongest bots finishing about one run in five and a surviving player
+ *  usually winning outright, without making any bot look like it stopped
+ *  trying (average run 945 m, and the skill tiers stay in order). */
+const MISTAKE_SLOPE = Number(process.env.TRACKLINE_BOT_MISTAKE_SLOPE) || 0.045;
+const MISTAKE_FLOOR = Number(process.env.TRACKLINE_BOT_MISTAKE_FLOOR) || 0.008;
+
 /** Skill 0..1 → behaviour. A weak bot errs often and mistimes its jumps; a
  *  strong one is precise. Ranges chosen so the best bot is still beatable and
  *  the worst still looks like it is trying.
@@ -53,7 +74,7 @@ function profile(skill: number) {
      *  row has been cleared and the runner has settled into its lane. */
     lead: 6 + skill * 7,
     /** Chance of fumbling a given row entirely. */
-    mistake: 0.03 * (1 - skill) + 0.002,
+    mistake: MISTAKE_SLOPE * (1 - skill) + MISTAKE_FLOOR,
     /** Chance of taking the risky line over a clearable barrier. */
     bravado: 0.15 + skill * 0.5,
     /** How far the trigger can be off, as a fraction of the ideal. A weak bot

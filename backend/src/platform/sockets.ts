@@ -7,10 +7,22 @@ import type { AuthPayload } from "../middleware/auth.js";
 import { getLobbyMembers, getLobbyMode, getUserLobby } from "../redis.js";
 import { getUsersByIds } from "../services/users.js";
 import { getGame } from "./games.js";
-import { createMatch, getMatchForUser, isActive, leave, markReady, onDisconnect, onInput, onReconnect } from "./match.js";
+import { findFriendshipBetween } from "../services/friends.js";
+import {
+  createMatch,
+  getMatchForUser,
+  humansIn,
+  isActive,
+  leave,
+  markReady,
+  onDisconnect,
+  onInput,
+  onQuick,
+  onReconnect,
+} from "./match.js";
 import { getLoading, getLobbyGame, getLobbyMatch, getSearching, setLoading, setLobbyGame, throttle } from "./store.js";
 import { FILL_DEADLINE_MS, dequeue, enqueue, packNow } from "./matchmaking.js";
-import { EV, PROGRESS_MAX_HZ, type TimePong } from "../shared/core/protocol.js";
+import { EV, PROGRESS_MAX_HZ, type MatchAddable, type MatchSync, type TimePong } from "../shared/core/protocol.js";
 
 interface AuthedSocket extends Socket {
   data: { auth: AuthPayload; lastProgressAt?: number };
@@ -34,6 +46,7 @@ setInterval(() => {
 export function registerPlatformHandlers(io: Server, socket: AuthedSocket, deps: PlatformDeps): void {
   const { userId, uid } = socket.data.auth;
   const soloLobby = `L${uid}`;
+  registerSync(socket);
 
   // ---- lobby: game selection ----
   socket.on(EV.pickGame, async (payload: { gameId?: unknown } | null, ack?: (r: object) => void) => {
@@ -160,6 +173,37 @@ export function registerPlatformHandlers(io: Server, socket: AuthedSocket, deps:
     if (why) dropped.set(why, (dropped.get(why) ?? 0) + 1);
   });
 
+  socket.on(EV.quick, (payload: unknown) => {
+    const m = getMatchForUser(userId);
+    if (!m) return;
+    const why = onQuick(io, m, uid, payload);
+    if (why) dropped.set(`quick:${why}`, (dropped.get(`quick:${why}`) ?? 0) + 1);
+  });
+
+  // Who from the match just finished can I still send a friend request to?
+  //
+  // Answered per asker and only on request, never folded into the broadcast
+  // result: a uid is absent from this list whether it belonged to a bot, to
+  // someone already on your friend list, or to someone you already have a
+  // request with — so the list can never be read backwards to work out which
+  // opponents were real.
+  socket.on(EV.addable, async (payload: unknown, ack?: (r: MatchAddable) => void) => {
+    const reply = typeof payload === "function" ? (payload as (r: MatchAddable) => void) : ack;
+    try {
+      const { matchId } = (payload ?? {}) as { matchId?: unknown };
+      if (typeof matchId !== "string") return reply?.({ uids: [] });
+      const people = humansIn(matchId);
+      // Only someone who was actually in the match may ask about it.
+      if (![...people.values()].includes(userId)) return reply?.({ uids: [] });
+      const others = [...people.entries()].filter(([, id]) => id !== userId);
+      const known = await Promise.all(others.map(([, id]) => findFriendshipBetween(userId, id)));
+      reply?.({ uids: others.filter((_, i) => !known[i]).map(([theirUid]) => theirUid) });
+    } catch (err) {
+      console.error("match:addable error:", err);
+      reply?.({ uids: [] });
+    }
+  });
+
   socket.on(EV.leave, async (_payload: unknown, ack?: (r: object) => void) => {
     const reply = typeof _payload === "function" ? (_payload as (r: object) => void) : ack;
     try {
@@ -185,6 +229,22 @@ export function registerPlatformHandlers(io: Server, socket: AuthedSocket, deps:
 export function platformOnConnect(socket: AuthedSocket): void {
   const resume = onReconnect(socket, socket.data.auth.userId);
   if (resume) socket.emit(EV.resume, resume);
+}
+
+/** The other half of reconnecting: a client that believes it is in a match
+ *  asks, and gets a straight answer either way.
+ *
+ *  The push above only fires when there IS a match, so on its own it leaves
+ *  the bad case silent — the seat was forfeited while the player had no
+ *  signal, and their screen carries on showing a run that is no longer theirs.
+ *  This is asked by the client, so it does not depend on the server having
+ *  guessed what the client still has on screen. */
+function registerSync(socket: AuthedSocket): void {
+  socket.on(EV.sync, (_p: unknown, ack?: (r: MatchSync) => void) => {
+    const reply = typeof _p === "function" ? (_p as (r: MatchSync) => void) : ack;
+    const resume = onReconnect(socket, socket.data.auth.userId);
+    reply?.(resume ? { in: true, resume } : { in: false, reason: "gone" });
+  });
 }
 
 /** Called from the lobby's disconnect handler, only when this socket still

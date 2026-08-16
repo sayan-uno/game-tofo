@@ -185,7 +185,7 @@ function kill(s: RunnerState, tick: number): void {
 }
 
 /** Advance exactly one tick. */
-export function step(s: RunnerState, course: Course): void {
+export function step(s: RunnerState, course: Course, durationTicks: number = DURATION_TICKS): void {
   s.tick += 1;
   if (!s.alive) return;
 
@@ -205,7 +205,11 @@ export function step(s: RunnerState, course: Course): void {
   const from = s.distance;
   const to = distanceAt(s.tick / TICK_RATE);
   s.distance = to;
-  if (s.tick >= DURATION_TICKS) return; // the clock ran out; nothing more counts
+  // The clock is a PARAMETER, not a constant, so the match length can be
+  // raised on the server without shipping a new client — the server sends it
+  // in MatchPrepare.rules and both sides step with the same number. Defaulting
+  // to the shared constant keeps every existing caller correct.
+  if (s.tick >= durationTicks) return; // the clock ran out; nothing more counts
 
   // Riding a roof, or through a carriage: both end where the carriage does.
   const wasOnRoof = s.roofEndZ > 0 && from < s.roofEndZ;
@@ -297,7 +301,13 @@ export function scoreOf(s: RunnerState): number {
 /** Run a fresh state through an input log up to `toTick`. Cheap enough to redo
  *  whole (a full match is 7,200 trivial steps), which is what makes late and
  *  out-of-order inputs a non-event: rewind by replaying. */
-export function replay(seat: number, inputs: readonly RunnerInput[], toTick: number, course: Course): RunnerState {
+export function replay(
+  seat: number,
+  inputs: readonly RunnerInput[],
+  toTick: number,
+  course: Course,
+  durationTicks: number = DURATION_TICKS
+): RunnerState {
   const s = createState(seat);
   const sorted = [...inputs].sort((a, b) => a.tick - b.tick);
   let i = 0;
@@ -307,7 +317,7 @@ export function replay(seat: number, inputs: readonly RunnerInput[], toTick: num
       applyInput(s, sorted[i].kind);
       i++;
     }
-    step(s, course);
+    step(s, course, durationTicks);
   }
   return s;
 }
@@ -330,7 +340,11 @@ export class RunnerSim {
 
   constructor(
     readonly seat: number,
-    private course: Course
+    private course: Course,
+    /** Match length in ticks. Comes from the server so the clock can be raised
+     *  without a client release; both sides must use the SAME number or the
+     *  two simulations stop agreeing about when scoring ends. */
+    private durationTicks: number = DURATION_TICKS
   ) {
     this.state = createState(seat);
   }
@@ -353,7 +367,7 @@ export class RunnerSim {
     if (this.state.tick >= tick && !this.dirty) return;
     if (this.dirty || tick - this.state.tick > 3 * TICK_RATE) {
       this.log.sort((a, b) => a.tick - b.tick);
-      this.state = replay(this.seat, this.log, tick, this.course);
+      this.state = replay(this.seat, this.log, tick, this.course, this.durationTicks);
       const at = this.log.findIndex((i) => i.tick > tick);
       this.cursor = at < 0 ? this.log.length : at;
       this.dirty = false;
@@ -366,7 +380,7 @@ export class RunnerSim {
         applyInput(s, this.log[this.cursor].kind);
         this.cursor++;
       }
-      step(s, this.course);
+      step(s, this.course, this.durationTicks);
     }
   }
 

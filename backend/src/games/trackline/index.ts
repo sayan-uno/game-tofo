@@ -35,7 +35,7 @@ function rank(members: RankMember[], endTick: number, seed: number): Standing[] 
   const course = courseFor(seed);
   const rows = members.map((mbr) => {
     const upTo = mbr.left && mbr.leftAtTick !== null ? Math.min(mbr.leftAtTick, endTick) : endTick;
-    const state = replay(mbr.seat, mbr.inputs as RunnerInput[], upTo, course);
+    const state = replay(mbr.seat, mbr.inputs as RunnerInput[], upTo, course, durationTicks());
     const survived = state.alive && !mbr.left;
     return {
       uid: mbr.uid,
@@ -86,12 +86,29 @@ const courseFor = (seed: number): Course => {
 };
 
 function createSim(seed: number, seat: number): ServerRunnerSim {
-  const sim = new RunnerSim(seat, courseFor(seed));
+  const sim = new RunnerSim(seat, courseFor(seed), durationTicks());
   return {
     addInput: (input) => sim.addInput({ tick: input.tick, kind: input.kind as InputKind }),
     advanceTo: (tick) => sim.advanceTo(tick),
     isOut: () => !sim.state.alive,
   };
+}
+
+/** The match clock, in ticks — read from the environment at call time.
+ *
+ *  This is THE one place the match length is decided. It reaches the client in
+ *  MatchPrepare.rules and is passed into every simulation on both sides, so
+ *  raising it is a server restart with TRACKLINE_MATCH_SECONDS set and nothing
+ *  else: no client release, no pack rebuild, no migration. Read per call
+ *  rather than captured once so it also follows a config reload.
+ *
+ *  Guarded, because a clock of nought or of a week are both ways to break
+ *  every match at once. */
+function durationTicks(): number {
+  const raw = Number(process.env.TRACKLINE_MATCH_SECONDS);
+  if (!Number.isFinite(raw) || raw <= 0) return DURATION_TICKS;
+  const seconds = Math.min(900, Math.max(30, Math.round(raw)));
+  return seconds * TICK_RATE;
 }
 
 registerGame({
@@ -100,9 +117,11 @@ registerGame({
   tagline: "Four rails. Two minutes. Last one running wins.",
   matchSizeFor: (mode) => MATCH_SIZE[mode],
   pack: { key: PACK.key, version: PACK.version, bytes: PACK.bytes },
-  rules: publicRules,
+  rules: () => ({ ...publicRules(), durationTicks: durationTicks() }),
   tickRate: TICK_RATE,
-  durationTicks: DURATION_TICKS,
+  get durationTicks() {
+    return durationTicks();
+  },
   countdownMs: COUNTDOWN_MS,
   inputLateLimitMs: INPUT_LATE_LIMIT_MS,
   inputMaxPerSec: INPUT_MAX_PER_SEC,

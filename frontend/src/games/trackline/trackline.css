@@ -110,3 +110,143 @@
 .tl-hud.ended .tl-hint {
   display: none;
 }
+
+/* ---- juice ---------------------------------------------------------------
+   One line, dead centre, gone in under a second. It sits above the runner's
+   head rather than over the track so it never hides the thing you are about
+   to hit — which is the only reason the HUD exists at all. */
+.tl-flash {
+  position: absolute;
+  top: 34%;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-family: "Archivo Black", system-ui, sans-serif;
+  font-size: clamp(20px, 5vw, 34px);
+  letter-spacing: 0.04em;
+  opacity: 0;
+  transform: translateY(6px) scale(0.94);
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.85);
+}
+.tl-flash.show {
+  animation: tl-pop 0.9s ease-out forwards;
+}
+.tl-flash.near {
+  color: #ffd45e;
+}
+.tl-flash.roof {
+  color: #6ad2ff;
+}
+.tl-flash.coin {
+  color: #ffe89a;
+  font-size: clamp(16px, 3.4vw, 24px);
+}
+@keyframes tl-pop {
+  0% { opacity: 0; transform: translateY(10px) scale(0.9); }
+  18% { opacity: 1; transform: translateY(0) scale(1.06); }
+  40% { transform: translateY(0) scale(1); }
+  100% { opacity: 0; transform: translateY(-14px) scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tl-flash.show { animation: none; opacity: 1; transform: none; }
+}
+
+/* ---- spectating ---------------------------------------------------------- */
+.tl-spectate {
+  position: absolute;
+  top: 24%;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-family: "Archivo Black", system-ui, sans-serif;
+  font-size: 13px;
+  letter-spacing: 0.16em;
+  color: rgba(232, 236, 248, 0.72);
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.9);
+}
+.tl-spectate b {
+  color: #e5182e;
+  margin-left: 6px;
+}
+.tl-spectate-hint {
+  display: block;
+  margin-top: 4px;
+  font-family: system-ui, sans-serif;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: rgba(232, 236, 248, 0.45);
+}
+
+/* ---- quick chat ----------------------------------------------------------
+   Bottom-right, thumb-reachable on a phone held in either hand, and the only
+   part of this HUD that takes pointer events — everything else must let a
+   swipe through to the canvas. */
+.tl-say {
+  position: absolute;
+  right: max(12px, env(safe-area-inset-right));
+  bottom: max(52px, calc(env(safe-area-inset-bottom) + 46px));
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  pointer-events: none;
+}
+.tl-say-btn {
+  pointer-events: auto;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(12, 8, 11, 0.72);
+  color: #f2f5ff;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+}
+.tl-say-btn.open {
+  border-color: #e5182e;
+  background: rgba(229, 24, 46, 0.22);
+}
+.tl-wheel {
+  pointer-events: auto;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  padding: 10px;
+  width: min(74vw, 280px);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 14px;
+  background: rgba(10, 6, 9, 0.9);
+  backdrop-filter: blur(10px);
+}
+.tl-wheel[hidden] {
+  display: none;
+}
+.tl-wheel button {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #f2f5ff;
+  padding: 8px 4px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.tl-wheel .tl-wheel-emote {
+  font-size: 21px;
+  padding: 6px 0;
+}
+.tl-wheel .tl-wheel-chat {
+  grid-column: span 3;
+  text-align: left;
+  padding-left: 10px;
+}
+.tl-wheel button:active {
+  background: rgba(229, 24, 46, 0.3);
+  border-color: #e5182e;
+}
+/* Once the match is over the wheel has nothing to reach. */
+.tl-hud.ended .tl-say {
+  display: none;
+}

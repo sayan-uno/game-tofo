@@ -7,7 +7,7 @@
 // and one function to send an input. Nothing else crosses the line, so a
 // change inside a game can't reach another game or the lobby.
 import type { Engine } from "@babylonjs/core/Engines/engine";
-import type { MatchEnd, MatchInput, MatchInputRelay, RosterEntry } from "../shared/core/protocol";
+import type { MatchEnd, MatchInput, MatchInputRelay, QuickKind, RosterEntry } from "../shared/core/protocol";
 
 /** The game's downloaded pack: files by manifest path, read from the
  *  on-device store (already downloaded by the time a match starts). */
@@ -33,6 +33,9 @@ export interface GameRuntimeContext {
   /** Send one of my inputs. Fire-and-forget; the platform stamps nothing —
    *  the game decides the tick. */
   sendInput(input: MatchInput): void;
+  /** Say one of the fixed phrases or emotes. The platform relays it; the game
+   *  decides where a message appears (over a runner's head, in a feed). */
+  sendQuick(kind: QuickKind, id: string): void;
   /** The player wants out (game HUD's leave button). */
   requestLeave(): void;
   /** A DOM layer above the canvas for the game's own HUD. Emptied on dispose. */
@@ -50,6 +53,8 @@ export interface GameRuntime {
   /** Inputs that happened before this client joined (resume). */
   seedInputs(inputs: MatchInputRelay[]): void;
   onLeft(uid: string): void;
+  /** Someone in this match sent a quick message. */
+  onQuick?(uid: string, kind: QuickKind, id: string): void;
   /** The match is over: freeze the world (the platform shows the results). */
   end(result: MatchEnd): void;
   /** One frame. Installed as the engine's render loop by the platform. */

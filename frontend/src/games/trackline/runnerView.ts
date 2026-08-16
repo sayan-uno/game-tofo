@@ -27,6 +27,9 @@ export class RunnerView {
   private aura: Aura | null = null;
   private tag: Mesh | null = null;
   private tagTex: DynamicTexture | null = null;
+  private bubble: Mesh | null = null;
+  private bubbleTex: DynamicTexture | null = null;
+  private bubbleTimer: number | null = null;
   private disposed = false;
   /** What is playing, so a clip starts once on transition rather than being
    *  restarted every frame (which reads as a twitching character). */
@@ -125,6 +128,69 @@ export class RunnerView {
     this.tag = plane;
   }
 
+  /** Show what this runner just said, in a bubble over their head.
+   *
+   *  Built exactly like the name tag — a canvas on an unbillboarded plane —
+   *  because the same two facts hold: the chase camera never rolls, so a plane
+   *  in the XY plane already faces it, and V has to be flipped or the text
+   *  comes out upside down. The plane is made once and reused; a message
+   *  during a run must not allocate.
+   *
+   *  It sits ABOVE the name tag rather than replacing it: you need to know who
+   *  is shouting at you, which is the whole point of the message. */
+  say(text: string, ms = 2600): void {
+    if (this.disposed) return;
+    if (!this.bubble) this.buildBubble();
+    if (!this.bubble || !this.bubbleTex) return;
+    const w = 320;
+    const h = 80;
+    const ctx = this.bubbleTex.getContext() as CanvasRenderingContext2D;
+    ctx.clearRect(0, 0, w, h);
+    // Emoji come through as a couple of characters and want to be big; a
+    // phrase wants to fit. One measurement decides, so neither is clipped.
+    const big = text.length <= 3;
+    ctx.font = big
+      ? '46px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", system-ui, sans-serif'
+      : 'bold 24px "Archivo Black", system-ui, sans-serif';
+    const tw = Math.min(w - 24, ctx.measureText(text).width + 34);
+    ctx.fillStyle = "rgba(229,24,46,0.92)";
+    roundRect(ctx, (w - tw) / 2, 12, tw, h - 30, 16);
+    ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, w / 2, h / 2 - 2, w - 30);
+    this.bubbleTex.update(false);
+    this.bubble.setEnabled(true);
+    if (this.bubbleTimer !== null) clearTimeout(this.bubbleTimer);
+    this.bubbleTimer = window.setTimeout(() => {
+      this.bubble?.setEnabled(false);
+      this.bubbleTimer = null;
+    }, ms);
+  }
+
+  private buildBubble(): void {
+    const w = 320;
+    const h = 80;
+    const tex = new DynamicTexture(`say_${this.uid}`, { width: w, height: h }, this.scene, false);
+    tex.hasAlpha = true;
+    tex.vScale = -1;
+    tex.vOffset = 1;
+    const mat = new StandardMaterial(`sayMat_${this.uid}`, this.scene);
+    mat.diffuseTexture = tex;
+    mat.emissiveColor = new Color3(1, 1, 1);
+    mat.disableLighting = true;
+    mat.useAlphaFromDiffuseTexture = true;
+    const plane = MeshBuilder.CreatePlane(`say_${this.uid}`, { width: 1.4, height: 0.35 }, this.scene);
+    plane.material = mat;
+    plane.position.y = 2.62;
+    plane.isPickable = false;
+    plane.parent = this.root;
+    plane.setEnabled(false);
+    this.bubble = plane;
+    this.bubbleTex = tex;
+  }
+
   /** Grey out a runner who left the match — their effect goes with them. */
   setLeft(): void {
     if (this.tag) this.tag.visibility = 0.35;
@@ -163,11 +229,15 @@ export class RunnerView {
 
   dispose(): void {
     this.disposed = true;
+    if (this.bubbleTimer !== null) clearTimeout(this.bubbleTimer);
     this.aura?.dispose();
     this.rig?.dispose();
     this.tagTex?.dispose();
     this.tag?.material?.dispose();
     this.tag?.dispose();
+    this.bubbleTex?.dispose();
+    this.bubble?.material?.dispose();
+    this.bubble?.dispose();
     this.root.dispose();
   }
 }

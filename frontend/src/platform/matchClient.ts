@@ -8,6 +8,7 @@
 // again the moment it ends). The game runtime only draws and decides ticks.
 import type { Engine } from "@babylonjs/core/Engines/engine";
 import type { Socket } from "socket.io-client";
+import { api } from "../api/http";
 import { emitAck } from "../api/socket";
 import { startRenderLoop } from "../game/engine";
 import type { LobbyScene } from "../game/lobbyScene";
@@ -25,6 +26,10 @@ import {
   type MatchPrepare,
   type MatchResume,
   type MatchSearching,
+  type MatchAddable,
+  type MatchSync,
+  type QuickKind,
+  type QuickRelay,
 } from "../shared/core/protocol";
 
 export interface MatchClientDeps {
@@ -93,10 +98,24 @@ export class MatchClient {
     document.getElementById("ui-root")!.appendChild(this.layer);
 
     const s = deps.socket;
+    // Every time the transport comes back, settle the one question a client
+    // cannot answer on its own: am I still in this match?
+    //
+    // The server pushes a resume when there IS one, so silence is ambiguous —
+    // it means either "not in a match" or "the push has not arrived yet", and
+    // a client that assumes the wrong one either drops a player out of a live
+    // run or leaves them watching a run they were forfeited from. Asking
+    // removes the ambiguity: away long enough and the answer is a plain no.
+    s.on("connect", () => void this.resync());
     s.on(EV.searching, (p: MatchSearching | null) => {
       if (p) this.showSearching(p);
     });
     s.on(EV.searchEnded, () => this.hideSearching());
+    s.on(EV.quick, (q: QuickRelay | null) => {
+      if (!q || typeof q.uid !== "string") return;
+      (this.runtime as (GameRuntime & { onQuick?: (u: string, k: QuickKind, i: string) => void }) | null)
+        ?.onQuick?.(q.uid, q.kind, q.id);
+    });
     s.on(EV.prepare, (p: MatchPrepare | null) => {
       // Found — the search screen gives way to the match.
       this.hideSearching();
@@ -199,6 +218,7 @@ export class MatchClient {
         seed: p.seed,
         rules: p.rules,
         sendInput: (input) => this.deps.socket.emit(EV.input, input),
+        sendQuick: (kind, id) => this.deps.socket.emit(EV.quick, { kind, id }),
         requestLeave: () => void this.leave(),
         hudRoot: this.hudRoot,
       };
@@ -252,6 +272,68 @@ export class MatchClient {
   }
 
   /** Back to the lobby: dispose the game, restore the lobby scene + chrome. */
+  /** Reconcile with the server after the socket comes back. */
+  private async resync(): Promise<void> {
+    if (!this.matchId) return;
+    const mine = this.matchId;
+    try {
+      const res = await emitAck<MatchSync>(EV.sync);
+      if (this.matchId !== mine) return; // moved on while we asked
+      if (res.in) {
+        // Still ours. A different id means the party started another match
+        // while we were away, so take that one instead.
+        if (res.resume.matchId !== mine) void this.enter(res.resume);
+        return;
+      }
+      toast("You were offline too long — the match went on without you", true);
+      this.exit();
+    } catch {
+      // No answer at all: the connection is still unhealthy. Leave the match
+      // on screen and try again on the next connect rather than throwing a
+      // player out of a run over one failed round trip.
+    }
+  }
+
+  /** Put an "Add" button next to the people from this match you could befriend.
+   *
+   *  Asked after the table is drawn rather than before, so the results appear
+   *  the instant the match ends and the buttons arrive a moment later —
+   *  waiting on a round trip to show a scoreboard would be the wrong trade.
+   *  Nothing is shown at all if the answer is empty, which is also the answer
+   *  for a lobby full of bots. */
+  private offerFriendRequests(el: HTMLElement, matchId: string): void {
+    void emitAck<MatchAddable>(EV.addable, { matchId })
+      .then(({ uids }) => {
+        for (const uid of uids ?? []) {
+          const cell = el.querySelector<HTMLElement>(`tr[data-uid="${CSS.escape(uid)}"] .mr-add`);
+          if (!cell) continue;
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "mr-add-btn";
+          btn.textContent = "+ Add";
+          btn.onclick = () => {
+            btn.disabled = true;
+            btn.textContent = "…";
+            void api
+              .post("/api/friends/request", { uid })
+              .then(() => {
+                btn.textContent = "Sent";
+                btn.classList.add("sent");
+              })
+              .catch((err: unknown) => {
+                btn.remove();
+                toast(err instanceof Error ? err.message : "Could not send the request", true);
+              });
+          };
+          cell.appendChild(btn);
+        }
+      })
+      .catch(() => {
+        // No answer: leave the table as it is. A missing button is a
+        // non-event; a broken results screen is not.
+      });
+  }
+
   private exit(): void {
     this.teardown();
     this.deps.onExit();
@@ -417,12 +499,13 @@ export class MatchClient {
         if (typeof d.coins === "number" && d.coins > 0) bits.push(`🪙 ${d.coins}`);
         if (d.survived === 1) bits.push("finished");
         const xp = e.xp?.[s.uid] ?? 0;
-        return `<tr class="${s.uid === this.deps.localUid ? "me" : ""}${s.forfeit ? " forfeit" : ""}">
+        return `<tr class="${s.uid === this.deps.localUid ? "me" : ""}${s.forfeit ? " forfeit" : ""}" data-uid="${s.uid}">
           <td class="mr-place">${s.placement}</td>
           <td class="mr-name"></td>
           <td class="mr-score">${s.score}</td>
           <td class="mr-detail">${s.forfeit ? "left" : bits.join(" · ")}</td>
           <td class="mr-xp">${xp > 0 ? `+${xp} XP` : ""}</td>
+          <td class="mr-add"></td>
         </tr>`;
       })
       .join("");
@@ -431,7 +514,7 @@ export class MatchClient {
         <div class="mr-kicker">// Results</div>
         <h2 class="mr-title">${headline}</h2>
         <div class="mr-sub">${e.reason === "timeout" ? "Time's up" : e.reason === "all-out" ? "Everyone's out" : ""}</div>
-        <table class="mr-table"><thead><tr><th>#</th><th>Runner</th><th>Score</th><th>Run</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+        <table class="mr-table"><thead><tr><th>#</th><th>Runner</th><th>Score</th><th>Run</th><th></th><th></th></tr></thead><tbody>${rows}</tbody></table>
         <div class="mr-actions">
           <button class="btn btn-ghost mr-lobby">Back to lobby</button>
           ${this.deps.isPartyLeader() ? '<button class="btn btn-red mr-again">Play again</button>' : ""}
@@ -440,6 +523,7 @@ export class MatchClient {
     // Names through textContent — never innerHTML — a username is user input.
     const nameCells = el.querySelectorAll<HTMLElement>(".mr-name");
     e.standings.forEach((s, i) => (nameCells[i].textContent = s.name));
+    this.offerFriendRequests(el, e.matchId);
     el.querySelector<HTMLButtonElement>(".mr-lobby")!.onclick = () => this.exit();
     el.querySelector<HTMLButtonElement>(".mr-again")?.addEventListener("click", () => {
       this.exit();

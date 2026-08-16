@@ -135,6 +135,9 @@ export interface ProfileStats {
   kills: number;
   deaths: number;
   kd: number | null;
+  distanceMetres: number;
+  coins: number;
+  totalScore: number;
   playtimeMinutes: number;
   bestPlacement: number | null;
 }

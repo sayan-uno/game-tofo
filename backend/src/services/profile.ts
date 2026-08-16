@@ -27,6 +27,12 @@ export interface CareerStats {
   kills: number;
   deaths: number;
   kd: number | null;
+  /** Runner career: everything a match actually produces. Kept alongside the
+   *  shooter fields above rather than replacing them, because a later game may
+   *  well have eliminations and the card should not need re-plumbing then. */
+  distanceMetres: number;
+  coins: number;
+  totalScore: number;
   playtimeMinutes: number;
   /** Best finishing position ever reached, null before the first match. */
   bestPlacement: number | null;
@@ -40,6 +46,9 @@ const NO_MATCHES_YET: CareerStats = {
   kills: 0,
   deaths: 0,
   kd: null,
+  distanceMetres: 0,
+  coins: 0,
+  totalScore: 0,
   playtimeMinutes: 0,
   bestPlacement: null,
 };
@@ -68,6 +77,9 @@ async function career(userId: string): Promise<{ stats: CareerStats; xp: number 
       kills: 0,
       deaths: 0,
       kd: null,
+      distanceMetres: Number(row.distanceMetres),
+      coins: Number(row.coins),
+      totalScore: Number(row.totalScore),
       playtimeMinutes: Math.round(row.playtimeSeconds / 60),
       bestPlacement: row.bestPlacement,
     },
@@ -177,12 +189,30 @@ function achievementsFor(user: UserRow, friends: number, stats: CareerStats): Ac
     { id: "wingman", name: "Wingman", desc: "Add your first friend", icon: "userPlus", ...goal(friends, 1) },
     { id: "squad", name: "Squad Goals", desc: "Grow your friend list to 5", icon: "users", ...goal(friends, 5) },
     { id: "firstBlood", name: "First Blood", desc: "Win your first match", icon: "target", ...goal(stats.wins, 1) },
+    // Hooked to what a match actually records. Every one of these fills in on
+    // its own the moment a result is written, because they read the same
+    // aggregate columns recordMatch upserts — there is no separate achievement
+    // bookkeeping to fall out of step.
     {
-      id: "sharpshooter",
-      name: "Sharpshooter",
-      desc: "Land 100 eliminations",
-      icon: "crosshair",
-      ...goal(stats.kills, 100),
+      id: "marathon",
+      name: "Marathon",
+      desc: "Run 10 km across all your matches",
+      icon: "route",
+      ...goal(stats.distanceMetres, 10_000),
+    },
+    {
+      id: "collector",
+      name: "Collector",
+      desc: "Pick up 1,000 coins",
+      icon: "coin",
+      ...goal(stats.coins, 1_000),
+    },
+    {
+      id: "podium",
+      name: "Podium",
+      desc: "Finish a match in the top three",
+      icon: "medal",
+      unlocked: stats.bestPlacement !== null && stats.bestPlacement <= 3,
     },
     { id: "veteran", name: "Veteran", desc: "Play 100 matches", icon: "shield", ...goal(stats.matches, 100) },
     {

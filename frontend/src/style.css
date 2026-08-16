@@ -3843,6 +3843,37 @@ body.in-match .chat-panel {
   text-align: right;
   white-space: nowrap;
 }
+/* Add-friend, next to the people you actually played against. The cell is
+   always in the row so the table's columns do not jump when the buttons
+   arrive a moment after the results. */
+.mr-add {
+  text-align: right;
+  white-space: nowrap;
+  width: 1%;
+}
+.mr-add-btn {
+  border: 1px solid rgba(229, 24, 46, 0.55);
+  background: rgba(229, 24, 46, 0.14);
+  color: #ff8494;
+  border-radius: 999px;
+  padding: 3px 10px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.mr-add-btn:hover:not(:disabled) {
+  background: rgba(229, 24, 46, 0.26);
+}
+.mr-add-btn:disabled {
+  cursor: default;
+  opacity: 0.75;
+}
+.mr-add-btn.sent {
+  border-color: rgba(70, 201, 138, 0.5);
+  background: rgba(70, 201, 138, 0.12);
+  color: #46c98a;
+}
 .mr-xp {
   text-align: right;
   font-size: 12px;

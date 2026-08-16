@@ -72,6 +72,10 @@ const ICONS: Record<string, string> = {
   lock: `<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>`,
   check: `<path d="m5 12 5 5L20 6"/>`,
   swords: `<path d="M14.5 17.5 3 6V3h3l11.5 11.5"/><path d="m13 19 6-6"/><path d="m16 16 4 4"/><path d="m19 21 2-2"/><path d="M9.5 17.5 21 6V3h-3L6.5 14.5"/>`,
+  // Runner achievements: distance run, coins collected, a top-three finish.
+  route: `<circle cx="6" cy="19" r="3"/><circle cx="18" cy="5" r="3"/><path d="M9 19h5a4 4 0 0 0 0-8h-4a4 4 0 0 1 0-8h5"/>`,
+  coin: `<circle cx="12" cy="12" r="9"/><path d="M12 7v10"/><path d="M9.5 9.5h4a2 2 0 0 1 0 4h-3a2 2 0 0 0 0 4h4"/>`,
+  medal: `<circle cx="12" cy="15" r="6"/><path d="m8.2 10.6-3-6.1h4l2.3 4.6"/><path d="m15.8 10.6 3-6.1h-4l-2.3 4.6"/>`,
   back: `<path d="m15 18-6-6 6-6"/>`,
   alert: `<path d="M12 9v5"/><path d="M12 17.5h.01"/><path d="M10.3 3.9 2.4 17.4A2 2 0 0 0 4.1 20.4h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/>`,
 };
@@ -342,8 +346,10 @@ function buildPanes(page: HTMLElement, panes: HTMLElement, p: Profile) {
     { label: "Wins", value: num(s.wins) },
     { label: "Losses", value: num(s.losses) },
     { label: "Win rate", value: s.winRate === null ? "—" : `${s.winRate.toFixed(1)}%` },
-    { label: "K/D", value: s.kd === null ? "—" : s.kd.toFixed(2) },
-    { label: "Eliminations", value: num(s.kills) },
+    // A runner has no eliminations. These are the two numbers its matches
+    // actually produce, and both come straight off the career totals.
+    { label: "Distance", value: s.distanceMetres >= 1000 ? `${(s.distanceMetres / 1000).toFixed(1)} km` : `${num(s.distanceMetres)} m` },
+    { label: "Coins", value: num(s.coins) },
     { label: "Playtime", value: playtime(s.playtimeMinutes) },
     { label: "Best place", value: s.bestPlacement === null ? "—" : `#${s.bestPlacement}` },
   ];

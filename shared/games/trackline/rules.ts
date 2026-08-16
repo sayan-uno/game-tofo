@@ -76,5 +76,8 @@ export function publicRules(): Record<string, number> {
     countdownMs: COUNTDOWN_MS,
     pointsPerCoin: POINTS_PER_COIN,
     pointsPerNearMiss: POINTS_PER_NEAR_MISS,
+    // The client mirrors this ceiling so it never predicts a move the server
+    // is about to refuse — see the note in the runtime's input handler.
+    inputMaxPerSec: INPUT_MAX_PER_SEC,
   };
 }
