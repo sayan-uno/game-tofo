@@ -60,6 +60,19 @@ export class MatchClient {
   private controls: HTMLElement | null = null;
   private micBtn: HTMLButtonElement | null = null;
   private inputBuffer: MatchInputRelay[] = [];
+  /** How many of each runner's inputs the game has actually been given.
+   *
+   *  A socket that drops for three seconds misses every input relayed in those
+   *  three seconds, and nothing replays them: the server pushes a resume
+   *  carrying the whole log, but until now the client threw it away whenever it
+   *  was for the match it was already in. A runner game survives that (each
+   *  player simulates alone, and the server's replay is the result of record);
+   *  a game where players share a board does not — its board is simply wrong
+   *  from then on, on that one screen, for ever.
+   *
+   *  Counting per uid is enough to work out what was missed, because a runner's
+   *  inputs keep their order both in the server's log and on the wire. */
+  private delivered = new Map<string, number>();
   private entering: Promise<void> | null = null;
 
   constructor(private deps: MatchClientDeps) {
@@ -132,9 +145,12 @@ export class MatchClient {
     s.on(EV.input, (i: MatchInputRelay | null) => {
       if (!i || typeof i.uid !== "string") return;
       // Inputs can land while the runtime is still being built (prepare is
-      // async); keep them and replay in order once it exists.
-      if (this.runtime) this.runtime.onRemoteInput(i);
-      else this.inputBuffer.push(i);
+      // async); keep them and replay in order once it exists. Only while a
+      // match is actually being entered, though — one that arrives after a
+      // teardown belongs to a match that is over, and a buffer nothing clears
+      // would hand it to the NEXT one.
+      if (this.runtime) this.hand(i);
+      else if (this.matchId) this.inputBuffer.push(i);
     });
     s.on(EV.left, (p: { uid?: string } | null) => {
       if (p?.uid) this.runtime?.onLeft(p.uid);
@@ -178,9 +194,38 @@ export class MatchClient {
 
   // ---- lifecycle ----
 
+  /** Give one input to the game, and remember that we did. */
+  private hand(i: MatchInputRelay): void {
+    this.runtime?.onRemoteInput(i);
+    this.delivered.set(i.uid, (this.delivered.get(i.uid) ?? 0) + 1);
+  }
+
+  /** A resume for the match we are ALREADY in: play in whatever was relayed
+   *  while we were not listening. Everything before that we have had, so only
+   *  the tail of each runner's log is new. */
+  private catchUp(p: MatchPrepare | MatchResume): void {
+    if (!this.runtime || !("inputs" in p)) return;
+    const seen = new Map<string, number>();
+    let missed = 0;
+    for (const i of p.inputs) {
+      const n = (seen.get(i.uid) ?? 0) + 1;
+      seen.set(i.uid, n);
+      if (n <= (this.delivered.get(i.uid) ?? 0)) continue;
+      this.hand(i);
+      missed++;
+    }
+    if ("left" in p) for (const uid of p.left) this.runtime.onLeft(uid);
+    if (missed) console.info(`[match] caught up on ${missed} input(s) missed while offline`);
+  }
+
   private async enter(p: MatchPrepare | MatchResume): Promise<void> {
     if (this.entering) await this.entering.catch(() => {});
-    if (this.matchId === p.matchId && this.runtime) return; // duplicate prepare
+    // Already in this one: not a duplicate prepare to ignore, but a chance to
+    // find out what we missed.
+    if (this.matchId === p.matchId && this.runtime) {
+      this.catchUp(p);
+      return;
+    }
     if (this.matchId && this.matchId !== p.matchId) this.teardown();
     this.matchId = p.matchId;
     seedClock(p.serverNow);
@@ -217,7 +262,13 @@ export class MatchClient {
         you: p.you,
         seed: p.seed,
         rules: p.rules,
-        sendInput: (input) => this.deps.socket.emit(EV.input, input),
+        sendInput: (input) => {
+          this.deps.socket.emit(EV.input, input);
+          // Counted as delivered: a game that predicts its own input has
+          // already applied it, so a later catch-up must not hand it back.
+          const uid = this.deps.localUid;
+          this.delivered.set(uid, (this.delivered.get(uid) ?? 0) + 1);
+        },
         sendQuick: (kind, id) => this.deps.socket.emit(EV.quick, { kind, id }),
         requestLeave: () => void this.leave(),
         hudRoot: this.hudRoot,
@@ -226,8 +277,11 @@ export class MatchClient {
       this.runtime = runtime;
       await runtime.prepare();
       // Resume: everything that happened before we arrived.
-      if ("inputs" in p && p.inputs.length) runtime.seedInputs(p.inputs);
-      for (const i of this.inputBuffer) runtime.onRemoteInput(i);
+      if ("inputs" in p && p.inputs.length) {
+        runtime.seedInputs(p.inputs);
+        for (const i of p.inputs) this.delivered.set(i.uid, (this.delivered.get(i.uid) ?? 0) + 1);
+      }
+      for (const i of this.inputBuffer) this.hand(i);
       this.inputBuffer = [];
       if ("left" in p) for (const uid of p.left) runtime.onLeft(uid);
       startRenderLoop(this.deps.engine, () => runtime.render());
@@ -280,9 +334,10 @@ export class MatchClient {
       const res = await emitAck<MatchSync>(EV.sync);
       if (this.matchId !== mine) return; // moved on while we asked
       if (res.in) {
-        // Still ours. A different id means the party started another match
-        // while we were away, so take that one instead.
-        if (res.resume.matchId !== mine) void this.enter(res.resume);
+        // Still ours — and `enter` knows the difference between the match we
+        // are in (catch up on what we missed) and a new one the party started
+        // while we were away (take that one instead).
+        void this.enter(res.resume);
         return;
       }
       toast("You were offline too long — the match went on without you", true);
@@ -350,6 +405,7 @@ export class MatchClient {
     this.runtime = null;
     this.hudRoot.replaceChildren();
     this.inputBuffer = [];
+    this.delivered.clear();
     this.matchId = null;
     this.layer.classList.add("hidden");
     this.deps.lobby.scene.attachControl();
@@ -477,8 +533,12 @@ export class MatchClient {
     const el = document.createElement("div");
     el.className = "match-results";
     const me = e.standings.find((s) => s.uid === this.deps.localUid);
+    // The game gets first refusal on the wording: the platform knows who came
+    // where, but only the game knows what winning looked like.
+    const own = this.runtime?.resultsHeadline?.(e, this.deps.localUid) ?? null;
     const headline =
-      e.reason === "aborted"
+      own?.headline ??
+      (e.reason === "aborted"
         ? "Match aborted"
         : e.reason === "all-out" && me?.placement === 1 && e.standings.filter((s) => s.placement === 1).length === 1
           ? "Last one running"
@@ -490,7 +550,8 @@ export class MatchClient {
                 ? "Draw"
                 : "You win!"
               : `#${me.placement}`
-          : "Match over";
+          : "Match over");
+    const sub = own?.sub ?? (e.reason === "timeout" ? "Time's up" : e.reason === "all-out" ? "Everyone's out" : "");
     const rows = e.standings
       .map((s) => {
         const d = s.detail;
@@ -498,12 +559,15 @@ export class MatchClient {
         if (typeof d.distance === "number") bits.push(`${d.distance} m`);
         if (typeof d.coins === "number" && d.coins > 0) bits.push(`🪙 ${d.coins}`);
         if (d.survived === 1) bits.push("finished");
+        // A game may describe its own row; the runner-shaped bits above are
+        // the fallback for one that does not.
+        const detail = this.runtime?.describeStanding?.(s) ?? bits.join(" · ");
         const xp = e.xp?.[s.uid] ?? 0;
         return `<tr class="${s.uid === this.deps.localUid ? "me" : ""}${s.forfeit ? " forfeit" : ""}" data-uid="${s.uid}">
           <td class="mr-place">${s.placement}</td>
           <td class="mr-name"></td>
           <td class="mr-score">${s.score}</td>
-          <td class="mr-detail">${s.forfeit ? "left" : bits.join(" · ")}</td>
+          <td class="mr-detail">${s.forfeit ? "left" : detail}</td>
           <td class="mr-xp">${xp > 0 ? `+${xp} XP` : ""}</td>
           <td class="mr-add"></td>
         </tr>`;
@@ -513,8 +577,8 @@ export class MatchClient {
       <div class="mr-card">
         <div class="mr-kicker">// Results</div>
         <h2 class="mr-title">${headline}</h2>
-        <div class="mr-sub">${e.reason === "timeout" ? "Time's up" : e.reason === "all-out" ? "Everyone's out" : ""}</div>
-        <table class="mr-table"><thead><tr><th>#</th><th>Runner</th><th>Score</th><th>Run</th><th></th><th></th></tr></thead><tbody>${rows}</tbody></table>
+        <div class="mr-sub">${sub}</div>
+        <table class="mr-table"><thead><tr><th>#</th><th>Player</th><th>Score</th><th></th><th></th><th></th></tr></thead><tbody>${rows}</tbody></table>
         <div class="mr-actions">
           <button class="btn btn-ghost mr-lobby">Back to lobby</button>
           ${this.deps.isPartyLeader() ? '<button class="btn btn-red mr-again">Play again</button>' : ""}

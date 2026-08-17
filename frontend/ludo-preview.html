@@ -1,0 +1,110 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Ludo runtime preview</title>
+    <!--
+      A DEV-ONLY page that mounts the REAL LudoRuntime inside the REAL platform
+      DOM (#ui-root > .match-layer > .match-hud-root, plus the platform's own
+      mic/Leave controls), so the whole screen can be looked at — board, player
+      cards, banner, dice and stacking — without a server, a login or a match.
+
+      Vite builds only index.html, so this never ships.
+
+      It plays a plausible mid-game offline first, using the real simulation,
+      so what you are looking at is a board a real match could have produced.
+
+      Run `npm --prefix frontend run dev` and open
+        /ludo-preview.html?w=900&h=460&p=4&turns=140
+      `p=2` shows the two-handed layout; w/h check a phone-shaped landscape;
+      `turns` is how far into the game to start.
+    -->
+  </head>
+  <body>
+    <div id="ui-root">
+      <div class="match-layer">
+        <div class="match-hud-root" id="hud"></div>
+        <div class="match-controls">
+          <button class="mx-mic">🎙 On</button><button class="mx-leave">Leave</button>
+        </div>
+      </div>
+    </div>
+    <script type="module">
+      import "/src/style.css";
+      import "/src/games/ludo/ludo.css";
+      import { LudoRuntime } from "/src/games/ludo/runtime.ts";
+      import {
+        LudoSim, TICK_MS, awaitingServer, dieKind, legalMoves, playKind, publicRules,
+      } from "/src/shared/games/ludo/index.ts";
+
+      const q = new URLSearchParams(location.search);
+      const W = Number(q.get("w") || 900);
+      const H = Number(q.get("h") || 460);
+      const players = Number(q.get("p") || 4);
+      const turns = Number(q.get("turns") || 140);
+      const stop = q.get("stop") || "";
+      let holdFor = 0;
+      document.body.style.width = W + "px";
+      document.body.style.height = H + "px";
+      document.body.style.margin = "0";
+      const layer = document.querySelector(".match-layer");
+      layer.style.position = "absolute";
+      layer.style.inset = "0";
+
+      const SEED = 20260817;
+      const names = ["You", "Nova", "Rift92", "Kaze"];
+      const roster = names.slice(0, players).map((name, i) => ({
+        uid: `u${i}`, name, character: "c", weapon: null,
+      }));
+
+      // Play a plausible mid-game offline, exactly the way the server does, so
+      // the log we hand the runtime is one a real match could have produced.
+      const mirror = new LudoSim(SEED, players, 30000);
+      const log = [];
+      let rnd = 1;
+      const rand = () => ((rnd = (rnd * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+      let answered = "", tick = 0;
+      for (tick = 1; tick < 30000; tick++) {
+        mirror.advanceTo(tick);
+        const s = mirror.state;
+        if (s.over) break;
+        // ?stop=capture freezes on a knock-out, mid-flight — the one frame
+        // where a token is in two places if the painter gets it wrong.
+        if (stop === "capture" && s.phase === "hop" && s.hop && s.hop.taken.length) { holdFor = 6; break; }
+        if (stop !== "capture" && mirror.state.rolls > turns && s.turn === 0 && (s.phase === "pick" || s.phase === "roll")) break;
+        if (!awaitingServer(s)) continue;
+        const key = `${s.turn}:${s.phase}:${s.since}`;
+        if (answered === key || tick - s.since < 3) continue;
+        answered = key;
+        const kind = s.phase === "roll"
+          ? dieKind(1 + Math.floor(rand() * 6))
+          : playKind(legalMoves(s, s.turn, s.die)[Math.floor(rand() * legalMoves(s, s.turn, s.die).length)]);
+        const input = { uid: `u${s.turn}`, tick: tick + 1, kind };
+        log.push(input);
+        mirror.addInput({ tick: input.tick, seat: s.turn, kind });
+      }
+
+      const ctx = {
+        engine: null, canvas: null, assets: null,
+        roster, you: "u0", seed: SEED, rules: { ...publicRules(), durationTicks: 30000 },
+        sendInput: (i) => console.log("sendInput", i),
+        sendQuick: (k, id) => console.log("sendQuick", k, id),
+        requestLeave: () => {},
+        hudRoot: document.getElementById("hud"),
+      };
+      const rt = new LudoRuntime(ctx);
+      await rt.prepare();
+      rt.seedInputs(log);
+      rt.go(Date.now() - (tick + holdFor) * TICK_MS);
+      rt.onQuick("u2", "chat", "gg");
+      for (let i = 0; i < 4; i++) { rt.render(); await new Promise((r) => requestAnimationFrame(r)); }
+      window.__state = rt.debug();
+      window.__hop = mirror.state.hop && {
+        seat: mirror.state.hop.seat, token: mirror.state.hop.token,
+        from: mirror.state.hop.from, to: mirror.state.hop.to,
+        taken: mirror.state.hop.taken.map((v) => `${v.seat}:${v.token}`),
+      };
+      window.__ready = true;
+    </script>
+  </body>
+</html>

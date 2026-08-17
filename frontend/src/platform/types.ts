@@ -7,7 +7,7 @@
 // and one function to send an input. Nothing else crosses the line, so a
 // change inside a game can't reach another game or the lobby.
 import type { Engine } from "@babylonjs/core/Engines/engine";
-import type { MatchEnd, MatchInput, MatchInputRelay, QuickKind, RosterEntry } from "../shared/core/protocol";
+import type { MatchEnd, MatchInput, MatchInputRelay, QuickKind, RosterEntry, Standing } from "../shared/core/protocol";
 
 /** The game's downloaded pack: files by manifest path, read from the
  *  on-device store (already downloaded by the time a match starts). */
@@ -57,6 +57,14 @@ export interface GameRuntime {
   onQuick?(uid: string, kind: QuickKind, id: string): void;
   /** The match is over: freeze the world (the platform shows the results). */
   end(result: MatchEnd): void;
+  /** How this game words the top of the results card. The platform draws the
+   *  table and knows placements; it does NOT know that "everyone's out" means
+   *  nothing on a board, or that a runner's "last one running" is a board
+   *  game's "all four home". Return null to keep the platform's wording. */
+  resultsHeadline?(result: MatchEnd, you: string): { headline: string; sub: string } | null;
+  /** The one-line summary of a player's match, for their row in the table.
+   *  Reads the game's own `detail` keys, which only the game knows. */
+  describeStanding?(standing: Standing): string;
   /** One frame. Installed as the engine's render loop by the platform. */
   render(): void;
   dispose(): void;

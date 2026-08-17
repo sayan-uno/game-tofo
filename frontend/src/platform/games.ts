@@ -11,6 +11,7 @@ export interface GameClientDefinition {
 
 const CLIENT_GAMES: GameClientDefinition[] = [
   { id: "trackline", load: () => import("../games/trackline/entry") },
+  { id: "ludo", load: () => import("../games/ludo/entry") },
 ];
 
 export const getClientGame = (id: string): GameClientDefinition | undefined => CLIENT_GAMES.find((g) => g.id === id);

@@ -22,7 +22,13 @@ import { getSocketId } from "../redis.js";
 import { recordMatch } from "../services/matchResults.js";
 import { displayName, type UserRow } from "../services/users.js";
 import { resolveCharacter, resolveWeapon } from "../services/catalog.js";
-import type { GameServerDefinition, RankMember, ServerRunnerSim } from "./games.js";
+import type {
+  GameServerDefinition,
+  MatchContext,
+  RankMember,
+  ServerRunnerSim,
+  ServerRunnerView,
+} from "./games.js";
 import { recordBotOutcome, type BotIdentity } from "./bots.js";
 import { bindMatch, unbindMatch } from "./store.js";
 import { deleteMatchVoiceRoom } from "./voice.js";
@@ -47,8 +53,14 @@ import {
 /** A client that never says "ready" (crashed, cold shader compile) can't hold
  *  everyone else — the countdown starts without them. */
 const PREPARE_TIMEOUT_MS = 10_000;
-/** How long a dropped runner has to come back before it counts as leaving. */
+/** How long a dropped runner has to come back before it counts as leaving.
+ *  A game may ask for longer (see GameServerDefinition.disconnectGraceMs); this
+ *  is what a game that says nothing gets. */
 const DISCONNECT_GRACE_MS = 20_000;
+/** Nobody may hold a seat for longer than this, whatever they ask for. */
+const DISCONNECT_GRACE_MAX_MS = 5 * 60_000;
+const graceFor = (m: Match): number =>
+  Math.min(DISCONNECT_GRACE_MAX_MS, Math.max(1000, m.game.disconnectGraceMs ?? DISCONNECT_GRACE_MS));
 /** Ended matches linger this long so a late `match:leave`/`ready` finds them
  *  and gets a sane answer instead of "unknown match". */
 /** How long a finished match stays in memory after its results go out.
@@ -85,6 +97,8 @@ export interface Runner {
   weapon: string | null;
   partyLobbyId: string;
   isBot: boolean;
+  /** 0…1 for bots, 0 for people — the game's own difficulty dial. */
+  skill: number;
   seat: number;
   /** The server's own authoritative simulation of this runner. */
   sim: ServerRunnerSim;
@@ -106,6 +120,8 @@ export interface Runner {
 export interface Match {
   id: string;
   game: GameServerDefinition;
+  /** What the game was told about this match when its sims were built. */
+  ctx: MatchContext;
   seed: number;
   phase: MatchPhase;
   createdAt: number;
@@ -188,9 +204,17 @@ export async function createMatch(
   bots: BotIdentity[] = []
 ): Promise<Match> {
   const id = randomUUID().slice(0, 12);
+  // Every runner's sim is built with the same picture of the match, so a game
+  // that keeps one shared board can key it on the id and size the table right
+  // the first time it is asked.
+  const ctx: MatchContext = {
+    id,
+    players: parties.reduce((n, p) => n + p.users.length, 0) + bots.length,
+  };
   const m: Match = {
     id,
     game,
+    ctx,
     seed: randomBytes(4).readUInt32LE(0),
     phase: "prepare",
     createdAt: Date.now(),
@@ -212,6 +236,7 @@ export async function createMatch(
         weapon: resolveWeapon(u.equippedWeapon),
         partyLobbyId: party.lobbyId,
         isBot: false,
+        skill: 0,
         seat: seat++,
         ready: false,
         connected: true,
@@ -221,7 +246,7 @@ export async function createMatch(
         recent: [],
       recentQuick: [],
         graceTimer: null,
-        sim: game.createSim(m.seed, seat - 1),
+        sim: game.createSim(m.seed, seat - 1, ctx),
         plan: [],
         planCursor: 0,
       });
@@ -233,7 +258,9 @@ export async function createMatch(
     const seat2 = seat++;
     let plan: MatchInput[] = [];
     try {
-      plan = game.planBot(m.seed, seat2, bot.skill);
+      // Games whose bots must react play through serverInputs instead, and
+      // simply have nothing to plan.
+      plan = game.planBot ? game.planBot(m.seed, seat2, bot.skill) : [];
     } catch (err) {
       console.error(`[match ${id}] bot plan failed:`, err);
     }
@@ -245,6 +272,7 @@ export async function createMatch(
       weapon: bot.weapon,
       partyLobbyId: "",
       isBot: true,
+      skill: bot.skill,
       seat: seat2,
       ready: true, // nothing to download, nothing to wait for
       connected: true,
@@ -254,7 +282,7 @@ export async function createMatch(
       recent: [],
       recentQuick: [],
       graceTimer: null,
-      sim: game.createSim(m.seed, seat2),
+      sim: game.createSim(m.seed, seat2, ctx),
       plan,
       planCursor: 0,
     });
@@ -307,8 +335,11 @@ async function go(io: Server, m: Match): Promise<void> {
   );
   // Watch for the OTHER ending: everyone crashed before the clock ran out.
   m.timers.outcome = setInterval(() => void checkAllOut(io, m), OUTCOME_POLL_MS);
-  if ([...m.runners.values()].some((r) => r.isBot)) {
-    m.timers.bots = setInterval(() => releaseBotInputs(io, m), BOT_RELEASE_MS);
+  // The release timer carries two kinds of traffic: planned bot inputs, and
+  // whatever the game itself wants the server to author. A game that uses the
+  // second needs the timer whether or not anyone at the table is a bot.
+  if (m.game.serverInputs || [...m.runners.values()].some((r) => r.isBot)) {
+    m.timers.bots = setInterval(() => releaseServerInputs(io, m), BOT_RELEASE_MS);
   }
 }
 
@@ -409,7 +440,7 @@ export function onDisconnect(io: Server, userId: string): void {
   if (!r || r.left) return;
   r.connected = false;
   if (r.graceTimer) clearTimeout(r.graceTimer);
-  r.graceTimer = setTimeout(() => void leave(io, m, r.uid), DISCONNECT_GRACE_MS);
+  r.graceTimer = setTimeout(() => void leave(io, m, r.uid), graceFor(m));
   // Nobody left to wait for during prepare → start (or abandon) now.
   if (m.phase === "prepare") markReadyCheck(io, m);
 }
@@ -476,14 +507,19 @@ export async function end(io: Server, m: Match, reason: MatchEndReason): Promise
     standings,
     runners: [...m.runners.values()].map((r) => ({ uid: r.uid, userId: r.userId, isBot: r.isBot })),
   });
-  // Difficulty tuning needs evidence, not guesswork: how often bots win and
-  // how far they get is the only way to know whether they are set right.
+  // Difficulty tuning needs evidence, not guesswork: how often bots win, and
+  // how far they got in the games that measure such a thing. Recorded against
+  // THIS game, so one game's numbers never colour another's.
   recordBotOutcome(
-    standings.map((st) => ({
-      isBot: m.runners.get(st.uid)?.isBot ?? false,
-      placement: st.placement,
-      distance: Number((st.detail as Record<string, number>).distance ?? 0),
-    }))
+    m.game.id,
+    standings.map((st) => {
+      const d = (st.detail as Record<string, number>).distance;
+      return {
+        isBot: m.runners.get(st.uid)?.isBot ?? false,
+        placement: st.placement,
+        distance: typeof d === "number" ? d : null,
+      };
+    })
   );
   const payload: MatchEnd = { matchId: m.id, reason, standings, ticks: endTick, xp: recorded.xp };
   io.to(m.room).emit(EV.end, payload);
@@ -502,12 +538,14 @@ export async function end(io: Server, m: Match, reason: MatchEndReason): Promise
   m.timers.linger = setTimeout(() => matches.delete(m.id), LINGER_MS);
 }
 
-/** Send the bot inputs whose tick is nearly here.
+/** Everything the SERVER puts on the wire on a runner's behalf: the planned bot
+ *  inputs whose tick is nearly here, and whatever the game itself asks to
+ *  author this instant.
  *
- *  Each one goes onto the bot's own log and sim exactly like a human's, so the
- *  end-of-match replay treats the two identically and a bot's score is
+ *  Each one goes onto that runner's own log and sim exactly like a human's, so
+ *  the end-of-match replay treats them identically and a bot's score is
  *  computed by the same code as everyone else's. */
-function releaseBotInputs(io: Server, m: Match): void {
+function releaseServerInputs(io: Server, m: Match): void {
   if (m.phase !== "countdown" && m.phase !== "running") return;
   if (m.startAt === null) return;
   const horizon = Date.now() + BOT_LEAD_MS - m.startAt;
@@ -517,12 +555,42 @@ function releaseBotInputs(io: Server, m: Match): void {
       const input = r.plan[r.planCursor];
       if ((input.tick * 1000) / m.game.tickRate > horizon) break;
       r.planCursor++;
-      r.inputs.push(input);
-      r.sim.addInput(input);
-      const relay: MatchInputRelay = { uid: r.uid, tick: input.tick, kind: input.kind };
-      io.to(m.room).emit(EV.input, relay);
+      emitServerInput(io, m, r, input);
     }
   }
+  if (!m.game.serverInputs) return;
+  // Left runners are included: a game may need to be told that a chair is
+  // empty, and only the platform knows it.
+  const runners: ServerRunnerView[] = [...m.runners.values()].map((r) => ({
+    uid: r.uid,
+    seat: r.seat,
+    isBot: r.isBot,
+    skill: r.skill,
+    left: r.left,
+  }));
+  let authored: { uid: string; input: MatchInput }[] = [];
+  try {
+    authored = m.game.serverInputs(m.ctx, m.seed, nowTick(m), runners);
+  } catch (err) {
+    console.error(`[match ${m.id}] serverInputs failed:`, err);
+    return;
+  }
+  for (const { uid, input } of authored) {
+    const r = m.runners.get(uid);
+    if (!r) continue;
+    // The same shape check the client path applies, minus the kind: these are
+    // the kinds only the server may write, so isValidInputKind refuses them
+    // on the way IN and cannot be asked about them here.
+    if (!Number.isInteger(input.tick) || input.tick < 1 || input.tick > m.game.durationTicks) continue;
+    emitServerInput(io, m, r, input);
+  }
+}
+
+function emitServerInput(io: Server, m: Match, r: Runner, input: MatchInput): void {
+  r.inputs.push(input);
+  r.sim.addInput(input);
+  const relay: MatchInputRelay = { uid: r.uid, tick: input.tick, kind: input.kind };
+  io.to(m.room).emit(EV.input, relay);
 }
 
 /** Everyone crashed? Then the match is over now rather than at the clock.

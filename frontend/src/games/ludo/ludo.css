@@ -1,0 +1,295 @@
+/* Ludo's in-match chrome. Scoped by .ld-* so nothing here reaches another game
+   or the lobby, and shipped inside the game's own chunk.
+
+   The board itself is canvas; everything in this file is the text around it —
+   the player cards, the line that says what is happening, and the chat wheel.
+   Keeping them as elements is what lets a ten-second turn pass without a single
+   repaint: the turn clock below is one CSS animation, not a drawn arc. */
+
+/* `isolation: isolate` matters more than it looks. Without it, every z-index in
+   this file competes with the PLATFORM's overlays — the "Preparing match…"
+   curtain, the 3·2·1 countdown, the results card — which are siblings of the
+   HUD root with no z-index of their own and so lose to any positive one here.
+   The chat button would have painted over all three. Isolating keeps Ludo's
+   layering entirely inside Ludo. */
+.ld-root {
+  position: absolute;
+  inset: 0;
+  isolation: isolate;
+  overflow: hidden;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: #e8ecf8;
+  /* The rail either side of the square board, and the dice drawn in the right
+     one; both set from the layout so the DOM can sit beside the canvas rather
+     than on top of it. */
+  --ld-rail: 120px;
+  --ld-die: 64px;
+}
+
+.ld-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  /* The board is a tap surface, so the browser must not treat a drag on it as
+     a scroll or a pinch — the same rule the platform puts on its own canvas. */
+  touch-action: none;
+}
+.ld-board {
+  z-index: 0;
+}
+.ld-live {
+  z-index: 1;
+}
+
+/* ---------- player cards (left rail) ---------- */
+
+.ld-players {
+  position: absolute;
+  left: max(6px, env(safe-area-inset-left));
+  top: 50%;
+  transform: translateY(-50%);
+  width: calc(var(--ld-rail) - 12px);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.ld-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px 8px;
+  border-radius: 10px;
+  background: rgba(12, 8, 11, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(6px);
+  transition:
+    border-color 160ms ease,
+    background 160ms ease;
+}
+.ld-card.turn {
+  border-color: var(--ld-c);
+  background: rgba(12, 8, 11, 0.85);
+  box-shadow: 0 0 0 1px var(--ld-c, #e5182e) inset;
+}
+.ld-card.gone {
+  opacity: 0.45;
+}
+/* Not waiting for this one any more. Dimmed rather than struck through: they
+   are still playing, and one tap brings them straight back. */
+.ld-card.away {
+  opacity: 0.6;
+}
+.ld-card.away .ld-name::after {
+  content: " · away";
+  font-weight: 400;
+  color: rgba(232, 236, 248, 0.5);
+}
+.ld-card.done .ld-home {
+  color: var(--ld-cl);
+}
+
+.ld-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--ld-c);
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.45);
+}
+.ld-who {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.15;
+}
+.ld-name {
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ld-home {
+  font-size: 10.5px;
+  color: rgba(232, 236, 248, 0.55);
+  letter-spacing: 0.02em;
+}
+
+/* The turn clock. One animation, started when the turn starts, then left to
+   run — no per-frame work anywhere. */
+.ld-timer {
+  grid-column: 1 / -1;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+.ld-timer i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--ld-c);
+  transform-origin: left center;
+  transform: scaleX(0);
+}
+@keyframes ld-timer {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+
+/* Above its own card, never beside it: the rail is exactly as wide as a card,
+   so a bubble to the right would be a bubble over the board. */
+.ld-bubble {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 4px);
+  padding: 5px 9px;
+  border-radius: 10px 10px 2px 10px;
+  background: #f2f5ff;
+  color: #12090d;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  opacity: 0;
+  transform: translateY(4px) scale(0.9);
+  transition:
+    opacity 140ms ease,
+    transform 140ms ease;
+  pointer-events: none;
+}
+.ld-bubble.on {
+  opacity: 1;
+  transform: none;
+}
+
+/* ---------- the line that says what is happening ---------- */
+
+/* Under the dice, in the right rail. It used to float across the bottom of the
+   board, where it covered the very squares a player was watching. */
+.ld-banner {
+  position: absolute;
+  right: max(6px, env(safe-area-inset-right));
+  width: calc(var(--ld-rail) - 12px);
+  top: calc(50% + var(--ld-die) / 2 + 14px);
+  padding: 7px 10px;
+  border-radius: 10px;
+  background: rgba(12, 8, 11, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.25;
+  text-align: center;
+  z-index: 3;
+  pointer-events: none;
+  backdrop-filter: blur(6px);
+}
+.ld-banner.hidden {
+  display: none;
+}
+.ld-banner.good {
+  border-color: rgba(255, 255, 255, 0.35);
+}
+.ld-banner.bad {
+  border-color: #ff5566;
+  color: #ffd7dc;
+}
+
+/* ---------- quick chat (right rail, under the dice) ---------- */
+
+.ld-quick-btn {
+  position: absolute;
+  right: max(8px, env(safe-area-inset-right));
+  bottom: max(8px, env(safe-area-inset-bottom));
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(12, 8, 11, 0.7);
+  color: #e8ecf8;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  z-index: 4;
+  backdrop-filter: blur(6px);
+}
+.ld-quick-btn:active {
+  transform: scale(0.94);
+}
+.ld-quick-btn.on {
+  border-color: #e5182e;
+}
+
+.ld-wheel {
+  position: absolute;
+  right: max(8px, env(safe-area-inset-right));
+  bottom: calc(max(8px, env(safe-area-inset-bottom)) + 48px);
+  width: min(190px, 44vw);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 7px;
+  border-radius: 12px;
+  background: rgba(12, 8, 11, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  z-index: 4;
+  backdrop-filter: blur(10px);
+}
+.ld-wheel.hidden {
+  display: none;
+}
+.ld-wheel > button {
+  padding: 6px 9px;
+  border-radius: 8px;
+  border: none;
+  background: rgba(255, 255, 255, 0.06);
+  color: #e8ecf8;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.ld-wheel > button:active {
+  background: rgba(229, 24, 46, 0.5);
+}
+.ld-emotes {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 3px;
+  margin-top: 2px;
+}
+.ld-emotes button {
+  padding: 5px 0;
+  border-radius: 7px;
+  border: none;
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.ld-emotes button:active {
+  background: rgba(229, 24, 46, 0.5);
+}
+
+/* On a short screen the cards have to give way before the board does. */
+@media (max-height: 380px) {
+  .ld-name {
+    font-size: 11px;
+  }
+  .ld-card {
+    padding: 4px 6px 6px;
+  }
+  .ld-banner {
+    font-size: 12px;
+    padding: 5px 11px;
+  }
+}

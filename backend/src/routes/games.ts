@@ -15,6 +15,7 @@ gamesRouter.get("/", (_req, res) => {
     tagline: g.tagline,
     matchSizes: { solo: g.matchSizeFor("solo"), duo: g.matchSizeFor("duo"), squad: g.matchSizeFor("squad") },
     durationSec: Math.round(g.durationTicks / g.tickRate),
+    typicalSec: g.typicalSec ? Math.round(g.typicalSec) : null,
     packVersion: g.pack.version,
     packBytes: g.pack.bytes,
     packUrl: config.cdnBaseUrl && g.pack.bytes > 0 ? `${config.cdnBaseUrl}/${g.pack.key}/manifest.json` : null,

@@ -51,14 +51,20 @@ app.get("/ops/bots", (req, res) => {
     res.status(404).json({ error: "Not found" });
     return;
   }
-  const t = botTelemetry();
-  const humanRuns = Math.max(1, t.matches * 4 - t.botRuns);
-  res.json({
-    ...t,
-    botWinRate: t.matches ? Math.round((t.botWins / t.matches) * 100) : null,
-    avgBotDistance: t.botRuns ? Math.round(t.botDistance / t.botRuns) : null,
-    avgHumanDistance: Math.round(t.humanDistance / humanRuns),
-  });
+  // One block per game: difficulty is a property of a game, and averaging two
+  // of them together describes neither.
+  const games = Object.fromEntries(
+    Object.entries(botTelemetry()).map(([id, t]) => [
+      id,
+      {
+        ...t,
+        botWinRate: t.matches ? Math.round((t.botWins / t.matches) * 100) : null,
+        avgBotDistance: t.hasDistance && t.botRuns ? Math.round(t.botDistance / t.botRuns) : null,
+        avgHumanDistance: t.hasDistance && t.humanRuns ? Math.round(t.humanDistance / t.humanRuns) : null,
+      },
+    ])
+  );
+  res.json({ games });
 });
 
 const server = http.createServer(app);

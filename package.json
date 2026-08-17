@@ -10,6 +10,7 @@
     "sync:shared": "node scripts/sync-shared.mjs",
     "check:shared": "node scripts/sync-shared.mjs --check",
     "check:sim": "backend/node_modules/.bin/tsx tools/checks/trackline-sim.ts",
+    "check:ludo": "backend/node_modules/.bin/tsx tools/checks/ludo-sim.ts",
     "pack:build": "node tools/packs/build.mjs",
     "pack:upload": "node tools/packs/upload.mjs",
     "pack:sources": "node tools/packs/sources.mjs",

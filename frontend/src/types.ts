@@ -202,6 +202,9 @@ export interface GameInfo {
   tagline: string;
   matchSizes: Record<LobbyMode, number>;
   durationSec: number;
+  /** Typical length when that differs from the ceiling above; null when the
+   *  ceiling IS the length. */
+  typicalSec: number | null;
   packVersion: string;
   packBytes: number;
   /** null when the CDN isn't configured or the pack hasn't been published. */

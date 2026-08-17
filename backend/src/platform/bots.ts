@@ -125,31 +125,83 @@ export async function buildBots(game: GameServerDefinition, count: number): Prom
  *  free wins or impossible. Aggregated in memory and logged periodically;
  *  cheap, and it costs nothing when no bots are playing.
  * ------------------------------------------------------------------------- */
-const stat = { matches: 0, botRuns: 0, botWins: 0, humanWins: 0, botDistance: 0, humanDistance: 0 };
+interface GameStat {
+  matches: number;
+  botRuns: number;
+  humanRuns: number;
+  botWins: number;
+  humanWins: number;
+  /** Only games that report one contribute here (see recordBotOutcome). */
+  botDistance: number;
+  humanDistance: number;
+  hasDistance: boolean;
+}
 
-export function recordBotOutcome(rows: { isBot: boolean; placement: number; distance: number }[]): void {
+/** Per GAME, not one bucket for all of them.
+ *
+ *  Difficulty is a property of a game, so mixing two games' numbers makes both
+ *  meaningless — and a game with no notion of distance would drag the other's
+ *  average towards nought simply by being played. */
+const stats = new Map<string, GameStat>();
+
+const statFor = (gameId: string): GameStat => {
+  let s = stats.get(gameId);
+  if (!s) {
+    s = {
+      matches: 0,
+      botRuns: 0,
+      humanRuns: 0,
+      botWins: 0,
+      humanWins: 0,
+      botDistance: 0,
+      humanDistance: 0,
+      hasDistance: false,
+    };
+    stats.set(gameId, s);
+  }
+  return s;
+};
+
+/** `distance` is null for games that do not measure one; their rows still
+ *  count towards win rates, which is the half of this that every game has. */
+export function recordBotOutcome(
+  gameId: string,
+  rows: { isBot: boolean; placement: number; distance: number | null }[]
+): void {
   if (!rows.some((r) => r.isBot)) return;
+  const stat = statFor(gameId);
   stat.matches += 1;
   for (const r of rows) {
+    if (r.distance !== null) stat.hasDistance = true;
     if (r.isBot) {
       stat.botRuns += 1;
-      stat.botDistance += r.distance;
+      stat.botDistance += r.distance ?? 0;
       if (r.placement === 1) stat.botWins += 1;
     } else {
-      stat.humanDistance += r.distance;
+      stat.humanRuns += 1;
+      stat.humanDistance += r.distance ?? 0;
       if (r.placement === 1) stat.humanWins += 1;
     }
   }
-  if (stat.matches % 10 === 0) logBotTelemetry();
+  if (stat.matches % 10 === 0) logBotTelemetry(gameId);
 }
 
-export function logBotTelemetry(): void {
-  if (stat.botRuns === 0) return;
-  const humanRuns = Math.max(1, stat.matches * 4 - stat.botRuns);
-  console.info(
-    `[bots] ${stat.matches} matches with bots · bot win rate ${((stat.botWins / stat.matches) * 100).toFixed(0)}% · ` +
-      `avg distance bot ${(stat.botDistance / stat.botRuns).toFixed(0)}m vs human ${(stat.humanDistance / humanRuns).toFixed(0)}m`
-  );
+/** `only` prints one game's line — what a milestone in THAT game should say.
+ *  Called without it (on shutdown, or from a console) it prints them all. */
+export function logBotTelemetry(only?: string): void {
+  for (const [gameId, stat] of stats) {
+    if (only && gameId !== only) continue;
+    if (stat.botRuns === 0) continue;
+    const dist = stat.hasDistance
+      ? ` · avg distance bot ${(stat.botDistance / stat.botRuns).toFixed(0)}m vs human ${(
+          stat.humanDistance / Math.max(1, stat.humanRuns)
+        ).toFixed(0)}m`
+      : "";
+    console.info(
+      `[bots] ${gameId}: ${stat.matches} matches with bots · bot win rate ` +
+        `${((stat.botWins / stat.matches) * 100).toFixed(0)}%${dist}`
+    );
+  }
 }
 
-export const botTelemetry = () => ({ ...stat });
+export const botTelemetry = (): Record<string, GameStat> => Object.fromEntries(stats);

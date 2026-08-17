@@ -33,6 +33,15 @@ export interface LoadedPack {
 const loaded = new Map<string, LoadedPack>();
 const packTag = (gameId: string, version: string) => `${gameId}@${version}`;
 
+/** The asset view a game with no pack gets. Every question is answered, and
+ *  asking for a file is a programming error rather than a missing download. */
+const NO_ASSETS: PackAssets = {
+  version: "none",
+  has: () => false,
+  url: (path) => path,
+  get: (path) => Promise.reject(new Error(`this game has no pack, so no "${path}"`)),
+};
+
 function baseOf(manifestUrl: string): string {
   return manifestUrl.slice(0, manifestUrl.lastIndexOf("/") + 1);
 }
@@ -41,8 +50,16 @@ function baseOf(manifestUrl: string): string {
  *  loadPack has completed for it in this session. */
 export const getLoadedPack = (gameId: string): LoadedPack | undefined => loaded.get(gameId);
 
+/** Some games have nothing to download. A board drawn in two dimensions is a
+ *  few kilobytes of JavaScript and no art at all, so it publishes no pack: its
+ *  code chunk is the whole of it. `packBytes === 0` is what says so — a game
+ *  that HAS a pack but has not published it yet reports its size and a null
+ *  URL, which is a different thing and must still read as unavailable. */
+export const needsDownload = (info: GameInfo): boolean => info.packBytes > 0;
+
 /** Is every file of the pack already on the device? Metadata reads only. */
 export async function isPackCached(info: GameInfo): Promise<boolean> {
+  if (!needsDownload(info)) return true;
   if (!info.packUrl) return false;
   if (loaded.get(info.id)?.version === info.packVersion) return true;
   try {
@@ -73,6 +90,18 @@ export async function loadPack(
   }
   const client = getClientGame(info.id);
   if (!client) throw new Error(`This build can't run "${info.id}"`);
+
+  // Nothing to fetch but the code. Reported as an instant 100 % rather than
+  // skipped, because START waits on every member reaching it — a game with no
+  // pack must still say it is ready, or the button never lights.
+  if (!needsDownload(info)) {
+    const module = await client.load();
+    if (opts.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    const pack: LoadedPack = { gameId: info.id, version: info.packVersion, assets: NO_ASSETS, module };
+    loaded.set(info.id, pack);
+    opts.onProgress?.(100);
+    return pack;
+  }
   if (!info.packUrl) throw new Error("This game's files aren't published yet");
 
   const tag = packTag(info.id, info.packVersion);

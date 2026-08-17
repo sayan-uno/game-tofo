@@ -1,8 +1,11 @@
 # TOFO Games
 
-A browser 3D game platform built with **Babylon.js**. Current milestone: the lobby —
-Google sign-in, unique player UIDs, friends (search / request / accept), squad lobbies
-with invites, and LiveKit voice chat.
+A browser game platform built with **Babylon.js**. The lobby is Google sign-in,
+unique player UIDs, friends (search / request / accept), squad lobbies with
+invites and LiveKit voice chat; from it a party picks a game, is matched with
+strangers (or bots) and plays. Two games so far — a 3D runner and a 2D board
+game — which is why "3D" is no longer in that first sentence: the engine is
+what the platform offers a game, not what a game must use.
 
 ## Architecture — frontend and backend are fully separate
 
@@ -48,7 +51,7 @@ the match lifecycle:
 ```
 shared/games/<id>/     course + simulation + rules   (both sides run this)
 frontend/src/games/<id>/   scene, HUD, controls
-backend/src/games/<id>/    server definition: rules, ranking, (later) bots
+backend/src/games/<id>/    server definition: rules, ranking, bots
 ```
 
 `platform/` never imports a game — it reads a registry. Adding a game is a
@@ -134,15 +137,86 @@ No code changes needed, ever — only those env values.
 
 ## Games
 
-The first game (working title **Trackline**) is a four-lane runner launched
-from the lobby: the leader picks it, every member downloads its pack into
-IndexedDB with a progress bar under their name plate, and START unlocks when
-everyone is ready. During a match the whole roster shares one LiveKit room and
-drops back to their party's room when it ends.
+Two so far, and they are deliberately unalike — the platform is only proved
+game-agnostic by a game that does not resemble the first one.
 
-Only **inputs** cross the wire (`{tick, kind}`); every client and the server
-run the same seeded simulation over them, so the local player never waits for
-a round trip and the server's replay is the authoritative result.
+**Trackline** is a four-lane runner: the leader picks it, every member
+downloads its pack into IndexedDB with a progress bar under their name plate,
+and START unlocks when everyone is ready. During a match the whole roster
+shares one LiveKit room and drops back to their party's room when it ends.
+
+**Ludo** is the board game, in two dimensions, for two or four. It downloads
+**nothing** — the board is drawn, not modelled, so the game is a lazily-loaded
+~10 kB chunk and START lights the moment it is picked. It does not use Babylon
+at all: it paints onto its own two canvases, a still one underneath for the
+board and a live one above for the tokens and the dice.
+
+It is also LONG, and honestly so: four tokens each over fifty-six squares, with
+a six needed to start any of them, is three to four hundred turns between four
+people. Measured, a table finishes in about twelve minutes if everyone taps the
+instant it is their turn, twenty at a second's thought, and thirty-five at two
+seconds — so the picker advertises ~25 minutes and the match clock is a
+one-hour BACKSTOP rather than a schedule. Nothing is cut off that anyone is
+still playing.
+
+The thing that makes that promise keepable is `away`. An empty chair used to
+cost the table the full turn clock every time it came round, three hundred
+times over, and one absent player was enough to run any match out of time —
+measurably, nine games in ten. After a few unanswered questions the server
+declares that seat away: it keeps its turn and keeps playing, but instantly,
+and one tap from its owner — on anyone's turn — gives the clock straight back.
+
+### Two shapes of netcode, both inputs-only
+
+Only **inputs** cross the wire in either game (`{tick, kind}`), and every client
+and the server run the same seeded simulation over them. What differs is who is
+allowed to author one.
+
+In **Trackline** a client applies its own input immediately and the server
+replays to confirm. That is right for a runner: a mispredicted swipe costs one
+player a little rubber-banding and costs nobody else anything.
+
+In **Ludo** it would be fatal. The platform relays an input to everyone *except*
+its sender and acknowledges nothing, so a client that moved its own piece would
+be the one participant who could never discover that nobody else did — one
+dropped packet and the table is two different boards for ever. So a Ludo tap is
+a **request** (`roll`, `t0`…`t3`) that the simulation ignores; the server reads
+it off its own copy of the board and writes the outcome as its own input
+(`d1`…`d6` a die, `p0`…`p3` a played token, `quit` an empty chair), which is
+relayed to everyone *including* the asker. `isValidInputKind` accepts only the
+request kinds, so a client cannot forge a die.
+
+That also buys honest dice: a number derived from the match seed would be
+deterministic *and* readable in advance by any client, since every client is
+told the seed. The round trip costs nothing a player can see, because the dice
+starts tumbling under their thumb and the answer arrives before it stops.
+
+Two hooks on `GameServerDefinition` exist for this and are optional, so a game
+that needs neither declares neither: `serverInputs` (inputs the server authors —
+also how a board game's bots react, since they cannot be planned up front the
+way a runner's are) and the `MatchContext` passed to `createSim` (a game whose
+players share one board keeps one state per *match*, not one per runner).
+
+### Checking a game's simulation
+
+Every game's rules and netcode have a self-check that runs the shared source
+directly, so it can never pass against a stale build:
+
+```bash
+npm run check:sim      # Trackline: determinism, solvability, replay parity
+npm run check:ludo     # Ludo: board geometry, rules, authority, liveness, replay parity
+```
+
+Run the one for the game you touched before committing. Ludo's also drives its
+own server definition through a whole match, which is what proves the bots, the
+dice and the ranking rather than just the rules.
+
+To look at Ludo without a server, a login or a match, run the frontend dev
+server and open `/ludo-preview.html?w=900&h=460&p=4&turns=140`. It plays a
+mid-game with the real simulation and mounts the real runtime inside the real
+platform DOM, so what you see is the shipped screen; `p=2` shows the two-handed
+board and `w`/`h` check a phone-shaped landscape. Vite builds only
+`index.html`, so it never ships.
 
 Asset packs are built and published separately from the code:
 

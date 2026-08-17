@@ -2,6 +2,7 @@
 // the lobby, closes on pick or dismiss. Members can open it to see what's
 // there but only the leader's taps do anything.
 import type { GameInfo } from "../types";
+import { needsDownload } from "../platform/packLoader";
 
 export interface GameSheetOptions {
   games: GameInfo[];
@@ -34,16 +35,24 @@ export function openGameSheet(opts: GameSheetOptions): void {
         g.matchSizes.duo === g.matchSizes.squad
           ? `${g.matchSizes.squad} players`
           : `${g.matchSizes.duo}–${g.matchSizes.squad} players`;
-      const mins = Math.round(g.durationSec / 60);
+      // A game whose clock is a ceiling says roughly how long it really takes;
+      // one whose clock IS its length says exactly.
+      const mins = g.typicalSec
+        ? `~${Math.round(g.typicalSec / 60)} min`
+        : `${Math.round(g.durationSec / 60)} min`;
+      // A game with no pack is ready the moment it is picked; one that HAS a
+      // pack but no URL for it has not been published, and cannot be played.
+      const free = !needsDownload(g);
+      const unavailable = !free && !g.packUrl;
       return `
-        <button class="gs-card${selected ? " selected" : ""}" data-id="${esc(g.id)}" ${!g.packUrl ? 'data-unavailable="1"' : ""}>
+        <button class="gs-card${selected ? " selected" : ""}" data-id="${esc(g.id)}" ${unavailable ? 'data-unavailable="1"' : ""}>
           <span class="gs-art" aria-hidden="true"><span class="gs-art-name">${esc(g.name)}</span></span>
           <span class="gs-body">
             <span class="gs-name">${esc(g.name)}</span>
             <span class="gs-tag">${esc(g.tagline)}</span>
-            <span class="gs-meta">${players} · ${mins} min · <span class="gs-size">${fmtBytes(g.packBytes)}</span>
-              <span class="gs-badge hidden">Downloaded</span>
-              ${!g.packUrl ? '<span class="gs-badge warn">Not published</span>' : ""}
+            <span class="gs-meta">${players} · ${mins} · <span class="gs-size">${free ? "no download" : fmtBytes(g.packBytes)}</span>
+              <span class="gs-badge hidden">${free ? "Ready" : "Downloaded"}</span>
+              ${unavailable ? '<span class="gs-badge warn">Not published</span>' : ""}
             </span>
           </span>
           ${selected ? '<span class="gs-check" aria-hidden="true">✓</span>' : ""}
