@@ -8,14 +8,29 @@ export const redis = new Redis(config.redisUrl, {
 
 // ---- Presence (who is online, and on which socket) ----
 const presenceKey = (userId: string) => `presence:${userId}`;
+// A parallel SET of everyone online. The per-user keys answer "where is this
+// player's socket"; this answers "how many are there", which the admin
+// console asks on every dashboard load. Counting the per-user keys would mean
+// SCANning the keyspace — this is one SCARD. The cost is one extra Redis
+// command per connect and per disconnect, and nothing per event.
+const ONLINE_KEY = "presence:online";
 
 export async function setOnline(userId: string, socketId: string) {
-  await redis.set(presenceKey(userId), socketId);
+  await redis.multi().set(presenceKey(userId), socketId).sadd(ONLINE_KEY, userId).exec();
 }
 
 export async function setOffline(userId: string) {
-  await redis.del(presenceKey(userId));
+  await redis.multi().del(presenceKey(userId)).srem(ONLINE_KEY, userId).exec();
 }
+
+/** How many players are connected right now. O(1). */
+export const countOnline = (): Promise<number> => redis.scard(ONLINE_KEY);
+
+/** Drop the online set. Called ONCE at boot for the same reason the stale
+ *  match bindings are cleared: nobody can legitimately be connected to a
+ *  process that has not started yet, so whatever is in there is a leftover
+ *  from the previous run and would inflate the count for ever. */
+export const clearOnlineSet = (): Promise<number> => redis.del(ONLINE_KEY);
 
 export async function getSocketId(userId: string): Promise<string | null> {
   return redis.get(presenceKey(userId));

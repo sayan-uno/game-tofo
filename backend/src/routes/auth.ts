@@ -2,6 +2,8 @@ import { Router } from "express";
 import { OAuth2Client } from "google-auth-library";
 import { config } from "../config.js";
 import { requireAuth, signToken } from "../middleware/auth.js";
+import { logEvent } from "../services/eventLog.js";
+import { requestOrigin } from "../services/clientIp.js";
 import { displayName, getUserById, toPublicUser, upsertGoogleUser, type UserRow } from "../services/users.js";
 import {
   claimGeneratedUsername,
@@ -51,6 +53,18 @@ authRouter.post("/google", async (req, res) => {
       email: payload.email,
       name: payload.name || payload.email.split("@")[0],
       avatarUrl: payload.picture,
+    });
+    // The first row of the session trail. Buffered, so this costs the sign-in
+    // nothing — see services/eventLog.ts.
+    const origin = requestOrigin(req);
+    logEvent({
+      type: "auth.login",
+      userId: user.id,
+      uid: user.uid,
+      ip: origin.ip,
+      ipCountry: origin.country,
+      ua: origin.ua,
+      data: { newAccount: user.createdAt.getTime() === user.lastLoginAt.getTime() },
     });
     res.json(sessionFor(user));
   } catch (err) {

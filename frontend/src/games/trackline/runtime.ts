@@ -81,6 +81,11 @@ export class TracklineRuntime implements GameRuntime {
   private ghosts: Sim[] = [];
   private byUid = new Map<string, Sim>();
   private startAt: number | null = null;
+  /** The clock this runtime reads. Date.now() while a player is playing; a
+   *  clock the console drives while somebody is watching it back. */
+  private readonly now: () => number;
+  /** Nobody is playing — see GameRuntimeContext.spectator. */
+  private readonly spectator: boolean;
   private ended = false;
   private disposed = false;
   private camX = 0;
@@ -112,6 +117,8 @@ export class TracklineRuntime implements GameRuntime {
 
   constructor(private ctx: GameRuntimeContext) {
     // The server's numbers win; the shared copy is what we were built with.
+    this.now = ctx.now ?? Date.now;
+    this.spectator = ctx.spectator === true;
     this.tickRate = ctx.rules.tickRate ?? TICK_RATE;
     this.durationTicks = ctx.rules.durationTicks ?? DURATION_TICKS;
     this.inputMaxPerSec = ctx.rules.inputMaxPerSec ?? INPUT_MAX_PER_SEC;
@@ -224,7 +231,10 @@ export class TracklineRuntime implements GameRuntime {
       this.scene.meshes.map((m) => (m.material ? m.material.forceCompilationAsync(m).catch(() => {}) : Promise.resolve()))
     );
     this.baseScale = ctx.engine.getHardwareScalingLevel();
-    this.controls = new Controls(ctx.canvas, (kind) => this.onLocalInput(kind));
+    // Not while watching: Controls listens on the window for arrow keys and on
+    // the canvas for drags, so a viewer scrubbing with the keyboard would
+    // author inputs nobody ever made and quietly rewrite the evidence.
+    if (!this.spectator) this.controls = new Controls(ctx.canvas, (kind) => this.onLocalInput(kind));
   }
 
   go(localStartAt: number): void {
@@ -233,7 +243,13 @@ export class TracklineRuntime implements GameRuntime {
 
   onRemoteInput(input: MatchInputRelay): void {
     const sim = this.byUid.get(input.uid);
-    if (!sim || sim === this.local || sim.left) return;
+    if (!sim || sim.left) return;
+    // Live: this player's own inputs were applied the instant they pressed,
+    // and the server never relays them back — so one arriving here would be a
+    // duplicate. WATCHING: nobody pressed anything, so their inputs arrive the
+    // same way everyone else's do, and dropping them would show them standing
+    // still through a run they actually played.
+    if (sim === this.local && !this.spectator) return;
     sim.sim.addInput({ tick: input.tick, kind: input.kind as InputKind });
   }
 
@@ -398,7 +414,7 @@ export class TracklineRuntime implements GameRuntime {
 
   /** Current tick from the synced clock, clamped to the match. */
   private tickNow(): number {
-    const t = Math.floor(((Date.now() - this.startAt!) * this.tickRate) / 1000);
+    const t = Math.floor(((this.now() - this.startAt!) * this.tickRate) / 1000);
     return Math.max(0, Math.min(t, this.durationTicks));
   }
 
@@ -417,7 +433,7 @@ export class TracklineRuntime implements GameRuntime {
   private onLocalInput(kind: InputKind): void {
     if (this.startAt === null || this.ended) return;
     // Before tick 0 (countdown) there is nothing to steer yet.
-    if (Date.now() < this.startAt) return;
+    if (this.now() < this.startAt) return;
     const s = this.local.sim.state;
     // Out of the run: the same left/right that steered now picks who to
     // watch. Reusing the controls rather than adding new ones means it works
@@ -436,7 +452,7 @@ export class TracklineRuntime implements GameRuntime {
     // watches themselves clear a barrier and is told afterwards they hit it.
     // Refusing here keeps the two simulations identical, which is the whole
     // basis of this netcode; a real player never reaches this rate anyway.
-    const now = Date.now();
+    const now = this.now();
     while (this.recentInputs.length && this.recentInputs[0] <= now - 1000) this.recentInputs.shift();
     if (this.recentInputs.length >= this.inputMaxPerSec) return;
     this.recentInputs.push(now);

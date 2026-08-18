@@ -48,6 +48,9 @@ lobby, means mint again.
 | `test_limits.py` | Input floods, quick-chat floods, invented message ids and malformed payloads on every handler — and an honest player in the same match who is unaffected. |
 | `test_features.py` | Quick chat and emotes crossing between two real clients; the spectator banner; the add-friend offer, which appears for real opponents and not for bots. |
 | `test_clock.py` | The match length is the server's to change: run it with `EXPECT_MATCH_SECONDS` matching the backend's `TRACKLINE_MATCH_SECONDS`. |
+| `admin-signin.mts` | The console's sign-in over HTTP: enrolment, the authenticator, recovery codes, sudo, refresh rotation and reuse detection, and that a player's token is refused. `npm run e2e:admin`. |
+| `test_admin_console.py` | The console in a real browser: the sign-in screen, an httpOnly cookie resuming a session across origins, the overview painting real numbers, and signing out actually ending it. `npm run e2e:console`. |
+| `enforcement.mts` | A banned player is refused at the API *and* at the socket handshake, lifting the ban lets them back in at once, an ordinary session leaves the trail the admin console reads, two accounts on one device are linked, and nobody is left marked online afterwards. No browser — run it with `npm run e2e:enforcement`. |
 
 ## Two facts that shape every test here
 

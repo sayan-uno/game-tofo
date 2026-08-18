@@ -31,6 +31,7 @@ import type {
 } from "./games.js";
 import { recordBotOutcome, type BotIdentity } from "./bots.js";
 import { bindMatch, unbindMatch } from "./store.js";
+import { encodeReplay, queueReplay, tierFor, type QuickLogEntry } from "./replay.js";
 import { deleteMatchVoiceRoom } from "./voice.js";
 import {
   EV,
@@ -48,6 +49,7 @@ import {
   QUICK_WINDOW_MS,
   type QuickRelay,
   type RosterEntry,
+  type Standing,
 } from "../shared/core/protocol.js";
 
 /** A client that never says "ready" (crashed, cold shader compile) can't hold
@@ -131,6 +133,10 @@ export interface Match {
   /** Party lobby ids involved, for Redis bindings + un-bindings. */
   lobbyIds: string[];
   room: string;
+  /** What was SAID during the match. Not an input — the wheel changes nothing
+   *  — but it is the only thing players say to each other while playing, so
+   *  without it a replay is silent about the part moderation cares about. */
+  quick: QuickLogEntry[];
   timers: {
     prepare: NodeJS.Timeout | null;
     end: NodeJS.Timeout | null;
@@ -223,6 +229,7 @@ export async function createMatch(
     runners: new Map(),
     lobbyIds: parties.map((p) => p.lobbyId),
     room: `match:${id}`,
+    quick: [],
     timers: { prepare: null, end: null, linger: null, outcome: null, bots: null },
   };
   let seat = 0;
@@ -398,6 +405,8 @@ export function onQuick(io: Server, m: Match, uid: string, raw: unknown): string
   while (r.recentQuick.length && r.recentQuick[0] < cutoff) r.recentQuick.shift();
   if (r.recentQuick.length >= QUICK_MAX) return "rate";
   r.recentQuick.push(now);
+  // One array push, after the rate ceiling — so a flood costs the log nothing.
+  m.quick.push({ tick: nowTick(m), seat: r.seat, kind, id });
   const relay: QuickRelay = { uid, kind, id };
   io.to(m.room).emit(EV.quick, relay);
   return null;
@@ -524,6 +533,13 @@ export async function end(io: Server, m: Match, reason: MatchEndReason): Promise
   const payload: MatchEnd = { matchId: m.id, reason, standings, ticks: endTick, xp: recorded.xp };
   io.to(m.room).emit(EV.end, payload);
 
+  // Archive it. AFTER the results are on their way, and never awaited: a slow
+  // upload must not hold up anybody's results screen. Everything it needs is
+  // already in memory — the input logs the ranking was just computed from.
+  void archive(m, reason, endTick, standings, recorded.xp).catch((err) =>
+    console.error(`[match ${m.id}] could not queue the replay:`, err)
+  );
+
   // Release everyone: bindings, sockets, voice.
   const userIds = humans(m).map((r) => r.userId!);
   for (const id of userIds) if (byUser.get(id) === m.id) byUser.delete(id);
@@ -536,6 +552,55 @@ export async function end(io: Server, m: Match, reason: MatchEndReason): Promise
   }
   void deleteMatchVoiceRoom(m.id);
   m.timers.linger = setTimeout(() => matches.delete(m.id), LINGER_MS);
+}
+
+/** Serialize the match and hand it to the archive queue.
+ *
+ *  There is nothing to capture here — a match is completely described by its
+ *  game, its seed, its roster and its inputs, and all four have been sitting in
+ *  this object the whole time. This is a serialization, which is why it costs
+ *  a player nothing. */
+async function archive(
+  m: Match,
+  reason: MatchEndReason,
+  endTick: number,
+  standings: Standing[],
+  xp: Record<string, number>
+): Promise<void> {
+  const runners = [...m.runners.values()];
+  const inputsBySeat = new Map<number, MatchInput[]>();
+  for (const r of runners) inputsBySeat.set(r.seat, r.inputs);
+  const tier = await tierFor(runners.filter((r) => r.userId).map((r) => r.userId!));
+  const file = encodeReplay({
+    matchKey: m.id,
+    gameId: m.game.id,
+    seed: m.seed,
+    tickRate: m.game.tickRate,
+    durationTicks: m.game.durationTicks,
+    createdAt: m.createdAt,
+    startAt: m.startAt,
+    endedAt: m.endedAt ?? Date.now(),
+    reason,
+    endTick,
+    roster: runners
+      .map((r) => ({
+        uid: r.uid,
+        seat: r.seat,
+        name: r.name,
+        character: r.character,
+        weapon: r.weapon,
+        isBot: r.isBot,
+        userId: r.userId,
+        left: r.left,
+        leftAtTick: r.leftAtTick,
+      }))
+      .sort((a, b) => a.seat - b.seat),
+    inputsBySeat,
+    quick: m.quick,
+    standings,
+    xp,
+  });
+  await queueReplay(file, tier);
 }
 
 /** Everything the SERVER puts on the wire on a runner's behalf: the planned bot
@@ -618,4 +683,49 @@ async function checkAllOut(io: Server, m: Match): Promise<void> {
 export function activeMatchIdForUser(userId: string): string | null {
   const m = getMatchForUser(userId);
   return m && isActive(m) ? m.id : null;
+}
+
+/** A compact picture of every live match, for the ops snapshot the admin
+ *  console reads. Built on demand from what is already in memory — no extra
+ *  bookkeeping, and nothing here is retained. Ended matches linger in the map
+ *  so late events find them; they are deliberately not reported as live. */
+export interface MatchSnapshotEntry {
+  id: string;
+  gameId: string;
+  phase: MatchPhase;
+  tick: number;
+  players: number;
+  bots: number;
+  createdAt: number;
+  startAt: number | null;
+  uids: string[];
+}
+
+export function liveMatchSnapshot(): MatchSnapshotEntry[] {
+  const out: MatchSnapshotEntry[] = [];
+  for (const m of matches.values()) {
+    if (m.phase === "ended") continue;
+    const runners = [...m.runners.values()];
+    out.push({
+      id: m.id,
+      gameId: m.game.id,
+      phase: m.phase,
+      tick: nowTick(m),
+      players: runners.filter((r) => !r.isBot).length,
+      bots: runners.filter((r) => r.isBot).length,
+      createdAt: m.createdAt,
+      startAt: m.startAt,
+      uids: runners.filter((r) => !r.isBot).map((r) => r.uid),
+    });
+  }
+  return out;
+}
+
+/** Force a match to end from outside the socket path — the console's
+ *  "end this stuck match" button, arriving over the ops command channel. */
+export async function endMatchById(io: Server, matchId: string, reason: MatchEndReason): Promise<boolean> {
+  const m = matches.get(matchId);
+  if (!m || m.phase === "ended") return false;
+  await end(io, m, reason);
+  return true;
 }

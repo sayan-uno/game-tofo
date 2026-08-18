@@ -5,6 +5,7 @@ import { requireAuth } from "../middleware/auth.js";
 import { getUserLobby } from "../redis.js";
 import { activeMatchIdForUser } from "../platform/match.js";
 import { matchVoiceRoom } from "../platform/voice.js";
+import { getSanctions } from "../services/sanctions.js";
 
 export const voiceRouter = Router();
 voiceRouter.use(requireAuth);
@@ -46,6 +47,10 @@ voiceRouter.post("/token", async (req, res) => {
     name: req.auth!.name,
     ttl,
   });
-  at.addGrant({ roomJoin: true, room, canPublish: true, canSubscribe: true });
-  res.json({ token: await at.toJwt(), url: config.livekit.url, room });
+  // A voice mute is applied HERE rather than in the client: the token itself
+  // carries no permission to speak, so a modified client gains nothing.
+  const active = await getSanctions(req.auth!.userId);
+  const canPublish = !active.voice;
+  at.addGrant({ roomJoin: true, room, canPublish, canSubscribe: true });
+  res.json({ token: await at.toJwt(), url: config.livekit.url, room, canPublish });
 });

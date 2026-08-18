@@ -1,3 +1,4 @@
+import { getSanctions } from "../services/sanctions.js";
 import { randomUUID } from "node:crypto";
 import type { Server, Socket } from "socket.io";
 import type { AuthPayload } from "../middleware/auth.js";
@@ -48,6 +49,22 @@ function cleanBody(raw: unknown): string | null {
 export function registerChatHandlers(io: Server, socket: AuthedSocket): void {
   const { userId, uid, name } = socket.data.auth;
 
+  /** What a chat sanction means for one message.
+   *
+   *  "muted" is told to the sender. "shadow" is not: the send reports success
+   *  and the message goes nowhere, which is aimed at spam accounts — told they
+   *  are muted, they simply make another account within the minute.
+   *
+   *  Honest limitation: a shadowed message is not stored either, so reloading
+   *  the thread reveals it was never sent. That is fine for the bots this is
+   *  for and it is not fine for a person, which is why the console words it as
+   *  "for spam accounts" and keeps the plain mute as the default. */
+  async function chatGate(): Promise<"ok" | "muted" | "shadow"> {
+    const active = await getSanctions(userId);
+    if (active["shadow-chat"]) return "shadow";
+    return active.chat ? "muted" : "ok";
+  }
+
   // Direct message — lands in the recipient's Friends or Recent section
   // depending on the relationship (isFriend travels with the event).
   socket.on(
@@ -57,6 +74,9 @@ export function registerChatHandlers(io: Server, socket: AuthedSocket): void {
         const { toUid, body } = payload ?? {};
         const text = cleanBody(body);
         if (!text) return ack?.({ error: "Message must be 1–500 characters" });
+        const gate = await chatGate();
+        if (gate === "muted") return ack?.({ error: "You cannot send messages right now" });
+        if (gate === "shadow") return ack?.({ ok: true });
         const target = await getUserByUid(String(toUid || ""));
         if (!target) return ack?.({ error: "Player not found" });
         if (target.id === userId) return ack?.({ error: "That's your own UID" });
@@ -93,6 +113,9 @@ export function registerChatHandlers(io: Server, socket: AuthedSocket): void {
       const { body } = payload ?? {};
       const text = cleanBody(body);
       if (!text) return ack?.({ error: "Message must be 1–500 characters" });
+      const gate = await chatGate();
+      if (gate === "muted") return ack?.({ error: "You cannot send messages right now" });
+      if (gate === "shadow") return ack?.({ ok: true });
       const lobbyId = await getUserLobby(userId);
       if (!lobbyId) return ack?.({ error: "You're not in a squad" });
       // Being alone in an open duo/squad still counts as in the group — only

@@ -40,6 +40,35 @@ export interface GameRuntimeContext {
   requestLeave(): void;
   /** A DOM layer above the canvas for the game's own HUD. Emptied on dispose. */
   hudRoot: HTMLElement;
+  /** Nobody is playing: this runtime is being WATCHED, not driven.
+   *
+   *  Two things must change, and a game that gets either wrong will show a
+   *  replay of something that did not happen:
+   *
+   *  1. Every input arrives through `onRemoteInput`, INCLUDING the focused
+   *     runner's own. In live play a player's own inputs never arrive that way
+   *     — they were applied at press time and the server does not relay them
+   *     back to the sender — so a game may reasonably ignore them there. Here
+   *     that would leave the watched player standing still while everyone else
+   *     ran, which is exactly the kind of wrong that gets quoted as evidence.
+   *
+   *  2. NO player controls may be attached. A key press or a drag over the
+   *     canvas must not be able to author an input nobody ever made. A replay
+   *     the viewer can edit is not a replay.
+   *
+   *  Absent during live play, so a game that ignores it behaves exactly as
+   *  before — it simply cannot be watched back faithfully. */
+  spectator?: boolean;
+  /** What the game should treat as "now", in the Date.now() domain.
+   *
+   *  Optional, and absent during live play — a game that ignores it and calls
+   *  Date.now() itself is correct, it simply cannot be watched in slow motion.
+   *  The admin console's replay studio supplies a clock it controls, which is
+   *  how a recorded match plays at a quarter speed, or eight times, or stops.
+   *
+   *  Bind it ONCE (`this.now = ctx.now ?? Date.now`) rather than checking on
+   *  every frame; it is then one indirect call V8 inlines away. */
+  now?: () => number;
 }
 
 export interface GameRuntime {

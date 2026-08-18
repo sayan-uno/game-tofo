@@ -15,6 +15,12 @@ glb/
 frontend/src/shared/
 backend/src/shared/
 
+# Evidence written by a development machine when no R2 evidence bucket is
+# configured: match replays, and later voice recordings. Never committed —
+# in production these live in a private bucket (see backend/src/platform/
+# evidence.ts, which says at boot which of the two it is using).
+backend/.evidence/
+
 # Built game packs (uploaded to the CDN, never committed).
 tools/packs/out/
 

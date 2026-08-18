@@ -50,6 +50,13 @@
       "when": 1786866934499,
       "tag": "0006_puzzling_lester",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1787036366945,
+      "tag": "0007_lame_winter_soldier",
+      "breakpoints": true
     }
   ]
 }

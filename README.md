@@ -12,11 +12,19 @@ what the platform offers a game, not what a game must use.
 ```
 game-tofo/
 ├── frontend/   Vite + TypeScript + Babylon.js  (pure static site when built)
+├── admin/      the moderation console — its own Vite app, its own ORIGIN
 ├── backend/    Node + Express + Socket.IO + PostgreSQL (Drizzle ORM) + Redis + LiveKit tokens
 ├── shared/     pure TypeScript compiled into BOTH sides at build time (see below)
 ├── scripts/    sync-shared.mjs — copies shared/ into each side
 └── tools/      packs/ — builds and uploads a game's downloadable asset pack
 ```
+
+`admin/` is a separate folder because it must be a separate ORIGIN: an XSS bug
+in the player app then has no path to an admin session. The console's *API* is
+not a separate folder — it is this same `backend/`, deployed a second time with
+`ROLE=admin`, which mounts the console routes and none of the player ones and
+starts no sockets and no matchmaker. Same source, two processes, one env var
+apart. See "The console" below.
 
 They talk **only** over HTTP + WebSocket. There is exactly **one coupling point**:
 
@@ -228,8 +236,233 @@ node tools/packs/upload.mjs trackline   # dry run; --go to publish to R2
 Pack paths are immutable and cached for a year, so every rebuild publishes a
 new version and players mid-download are never handed a half-new pack.
 
+## Admin console foundations (A0)
+
+The moderation console itself is not built yet, but everything it will read is
+being collected from now on — because the log you have not started keeping is
+the one you will wish you had. None of it touches a player's hot path:
+
+- **The activity trail** (`services/eventLog.ts`) — signed in, connected,
+  refused, disconnected, with the address, the country and the device.
+  `logEvent()` is synchronous and does no I/O; a timer writes one batched
+  `INSERT` every two seconds. A failed flush keeps its rows; a row Postgres
+  will never accept is bisected out rather than jamming the queue for ever.
+- **Enforcement** (`services/sanctions.ts`) — Postgres holds the record, Redis
+  holds the answer. A ban check is one `GET` against a key that only exists for
+  sanctioned players, at the socket handshake and in `requireAuth`. The cache is
+  rebuilt at boot, or a flushed Redis would silently un-ban everyone.
+- **The live snapshot** (`platform/ops.ts`) — the game process publishes players
+  online, matches running and queue depth to Redis every two seconds, with a TTL,
+  so a crashed instance disappears instead of reporting itself as healthy.
+- **The control channel** (`platform/opsCommands.ts`) — signed, freshness-checked,
+  idempotent and *addressed*. Redis pub/sub ignores the database index, so every
+  process on one Redis hears every channel; a command names the instance it is
+  for, because a match only exists in one process's memory.
+- **`ROLE=admin`** — starts a process with no sockets, no matchmaker and none of
+  the player routes. That switch is what makes a second process safe at all: two
+  matchmakers on one Redis is the bug that costs an hour to find.
+
+```bash
+npm run check:ops          # the foundations, against real Postgres and Redis
+npm run e2e:enforcement    # a banned player, against a RUNNING backend
+```
+
+`check:ops` uses its own Redis database index and deletes everything it writes.
+
+## The console (A1)
+
+```bash
+npm run dev:admin      # ROLE=admin API on :4031 + the console UI on :5174
+```
+
+Sign in with Google (allowlisted in `admin_users`, not in an env var), then an
+optional password, then a code from Google Authenticator. `ADMIN_BOOTSTRAP_EMAIL`
+creates the first owner — and only while `admin_users` is empty, so leaving it
+set is harmless.
+
+What holds it up, in order:
+
+- **A secret path.** Everything off `/$ADMIN_PATH/` is a plain 404, including the
+  sign-in screen. Obscurity, not security: assume it leaks and note that nothing
+  below depends on it.
+- **Cloudflare Access**, when `CF_ACCESS_TEAM`/`CF_ACCESS_AUD` are set — every
+  request must then carry an assertion Cloudflare signed. It is the only gate
+  that can refuse a request before this code runs on it, so it is also the only
+  one that survives a bug in this code. Unset is allowed and says so at boot.
+- **Separate realm.** A different signing key and `aud: "admin"`, so a player's
+  token here is a forgery rather than a near miss — and the reverse.
+- **Short sessions.** A 20-minute access token held only in memory, and a
+  refresh token in an httpOnly cookie that JavaScript never sees. Refresh tokens
+  **rotate**; presenting a spent one ends every session that admin has, because
+  nothing can tell a thief from the owner at that point.
+- **Sudo.** Creating admins, changing roles and (later) bans and recordings need
+  a *fresh* authenticator code. The code you signed in with will not do — replay
+  protection is what makes sudo mean "holding the phone now".
+- **Roles**, read from the database rather than the token, so demoting or
+  disabling someone bites on their next request.
+- **Every action and every sensitive read** is written to `admin_audit`, with
+  the admin's identity snapshotted so deleting an account cannot blank the trail.
+- **Alerts** to Telegram on every sign-in, lockout and recovery-code use — a
+  channel deliberately separate from wherever those codes are kept.
+
+### What is in it
+
+- **Overview** — players online, matches running, queue depth and every game
+  server publishing, read from the two-second snapshot. Leaving it open costs
+  the game server nothing.
+- **Players** — one search box that works out what you gave it: a UID, an email
+  (or part of one), part of a username, an address, a device fingerprint. The
+  answer says *how* it read the query, so a surprising result explains itself.
+- **Player 360** — identity, career, recent matches, sanctions, and for admins
+  and owners: session and address history, devices, and **linked accounts** —
+  anyone else seen on the same device or address, which is what turns "a new
+  player" into "the person you removed last week".
+
+Roles are enforced on the SERVER, not by hiding panels: a support account's
+answer does not contain the addresses at all, and searching by one is refused
+outright. Opening a profile is audited; opening its addresses is audited
+separately.
+
+- **Enforcement** — five sanctions, applied from the player's own page:
+
+  | | what the player experiences |
+  |---|---|
+  | ban | cannot connect at all |
+  | match | lobby and friends still work, matchmaking refuses |
+  | voice | can hear, cannot speak |
+  | chat | messages refused, and they are told |
+  | shadow-chat | messages go nowhere, and they are not told |
+
+  Each is written to Postgres (the record), rebuilt into Redis (the
+  enforcement) and then made *immediate*: a ban hangs the socket up through the
+  ops channel, and a voice mute takes the permission away from someone who may
+  be talking this second rather than waiting up to two hours for their token to
+  expire.
+
+- **Sanctions** — everything currently in force, which no player page can
+  answer because you would have to know who to look at first.
+- **Platform** — maintenance mode (turns new connections away, leaves running
+  matches alone) and a notice pushed to everyone already online.
+
+Every one of those needs **sudo** — a *fresh* authenticator code, since the one
+you signed in with cannot be spent twice. A moderator may act for up to 30
+days; permanent is an admin's decision, and the platform switches are not a
+moderator's to touch.
+
+### Replays (A4)
+
+Every finished match is archived. Not as video — as the **input log**, which is
+all a replay needs to be, because a match here is completely described by its
+game, its seed, its roster and its `{tick, kind}` inputs. Everything else is
+derived by a simulation both sides already run.
+
+That is why it costs a player nothing: there is no capture, only a
+serialization of what the match runtime was already holding for the
+end-of-match ranking. It runs after the results have gone out and is never
+awaited. A Trackline match lands at about **1 kB gzipped**; a full Ludo match,
+862 inputs across three hundred turns, at **3.3 kB**.
+
+- **Written** to the private evidence bucket through a Redis queue, so a
+  restart or an R2 wobble retries instead of losing the match. One unwritable
+  replay is dropped and counted rather than blocking every later one.
+- **Kept** for 30 days, or 365 if a flagged player was at the table, or
+  indefinitely once attached to a case. Swept by tier and expiry only — never
+  by hand, so nobody can quietly remove an inconvenient match.
+- **Stored on local disk** when `R2_EVIDENCE_*` is unset, which is right for a
+  development machine and wrong for a server. The process says which at boot
+  and the console shows a banner.
+
+```bash
+npm run check:replay     # the round trip, retention, the queue and the sweeper
+```
+
+### The studio (A5)
+
+Open any match from a player's page or from **Matches** and watch it back.
+
+There is no video and nothing was recorded in the ordinary sense: the console
+loads the game's **real client code** — the same folder players run, imported
+from `frontend/src` at build time — and drives it from the archived input log.
+Everything on screen is re-simulated from the seed. That is why a few kilobytes
+is a whole match, and why the studio works for **every game automatically**: it
+drives `createRuntime`, which every game already has to implement.
+
+Two mechanisms carry it, and neither needed new game code:
+
+- **The clock.** A game reads `ctx.now()`, so the studio hands it one it
+  controls. Speed is a multiplier on how fast that clock advances; pause simply
+  stops advancing it. 0.25× to 8×.
+- **The scrubber is the reconnect path.** Seeking is not rewinding — it throws
+  the runtime away, builds a new one, feeds it every input up to the target tick
+  at once, and starts its clock in the past so that tick is the present. A
+  player's phone that drops mid-match already does exactly this.
+
+Also there: an input tape with a lane per player, what was said during the
+match, per-player focus, and **Keep this replay** — the one deliberate
+exception to "retention deletes by tier and expiry only", and it can only ever
+make a replay live longer.
+
+#### What makes a replay TRUE
+
+A replay that shows something that did not happen is worse than no replay,
+because it would be quoted as evidence. Three things guarantee it, and all
+three were bugs first:
+
+- **`ctx.spectator`.** Nobody is playing, so every input arrives through
+  `onRemoteInput` — *including the watched player's own*, which in live play
+  never do, because that player applied them at press time and the server does
+  not relay them back. Trackline discarded them as duplicates, so the watched
+  runner stood still and died at the first obstacle while everyone else ran.
+- **The same flag detaches the controls.** Trackline's `Controls` listens on
+  the window for arrow keys, which are also the studio's seek shortcuts — so
+  scrubbing with the keyboard authored lane changes nobody ever made. A replay
+  a viewer can edit is not a replay.
+- **One frame loop, in one order.** Advance the clock → hand over the inputs
+  that time has reached → *then* let the game draw, because drawing is when a
+  game steps its simulation. Two independent loops (the studio's and the
+  engine's) have undefined order, and on a slow frame the simulation stepped
+  past a tick before its input arrived. It scored 255 where the server recorded
+  4155, and only sometimes.
+
+`e2e:console` holds the studio to the record: it plays a whole Trackline match
+through at speed and requires the score the game draws to **equal the score the
+server archived**, then hammers the keyboard and requires it to be unchanged.
+
+`admin/public/meshopt_decoder.js` is a copy of the player app's, and must stay
+one: the games' models are meshopt-compressed and Babylon fetches that decoder
+from a fixed same-origin path. Without it every compressed model fails to
+parse and the replay is name plates running down an empty street — silently,
+because Vite's dev server answers the missing file with `index.html` and a
+200. The browser test now fails on any "failed to load" warning.
+
+In development the console proxies the asset CDN, whose CORS policy names
+specific origins and does not include this one. **In production the console's
+origin must be added to the bucket's CORS rules** or Trackline replays will not
+load.
+
+The check that matters plays a real match through a real game's server
+definition, ranks it, puts it through the encoder, the gzip, the decoder and
+back into the ranker, and requires the standings to be **identical** — then
+removes one input and requires them not to be, so the first assertion is
+proving something. `e2e:enforcement` does the same against a live server: it
+starts a real Ludo match, lets bots fill it, abandons it, and re-ranks the
+archived file.
+
+Games gained one optional hook for this: `ctx.now()` on `GameRuntimeContext`.
+Absent during live play — a game that ignores it is correct, it simply cannot
+be watched in slow motion. The studio (A5) supplies a clock it controls.
+
+```bash
+npm run check:admin      # crypto, TOTP replay, sessions, roles, limits, sudo
+npm run e2e:admin        # sign-in and the role gates over HTTP, against a RUNNING admin API
+npm run e2e:console      # the real console in a real browser (needs both running)
+```
+
+The Google stage is not automated in any of them: faking it would mean putting a
+bypass in production code. Everything on either side of it is exercised for real.
+
 ## What's next (planned)
 
 - Trackline gameplay: obstacles, jump/roll, crashes, coins, scoring.
-- Match results in Postgres, feeding the profile's career stats.
+- The admin console: voice recording (A6), reports and cases (A7), analytics (A8).
 - Matchmaking that fills a party from a pool, and server bots for empty slots.

@@ -19,6 +19,9 @@ import {
   boolean,
   jsonb,
   bigint,
+  bigserial,
+  inet,
+  char,
 } from "drizzle-orm/pg-core";
 
 export const users = pgTable(
@@ -56,6 +59,9 @@ export const users = pgTable(
     // the referee for claim races — the loser gets a 23505 and a clean
     // "taken" answer. Also serves the availability probe's lower() lookup.
     uniqueIndex("users_username_lower_key").on(sql`lower(${t.username})`),
+    // "How many signed up today" is an admin-console question asked on every
+    // dashboard load; without this it is a sequential scan of every account.
+    index("idx_users_created").on(t.createdAt),
   ]
 );
 
@@ -243,3 +249,299 @@ export const playerStats = pgTable("player_stats", {
   xp: bigint("xp", { mode: "number" }).notNull().default(0),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// ===========================================================================
+// Admin console — A0 foundations
+//
+// Every table below is COLD. The rules that keep them off a player's hot path
+// live with the code that writes them, and are worth restating here because
+// the temptation to "just add one more insert" is exactly how that promise
+// gets broken:
+//
+//   * event_log is never written inline. services/eventLog.ts buffers in
+//     memory and flushes one multi-row INSERT every couple of seconds, so a
+//     socket handshake never waits on Postgres.
+//   * sanctions is the record of truth, but nothing on a hot path reads it.
+//     Enforcement reads a Redis key (services/sanctions.ts); this table is
+//     what that key is rebuilt from.
+//   * Neither event_log nor admin_audit carries a foreign key to the row it
+//     describes. An audit trail that a DELETE can rewrite is not an audit
+//     trail — these rows must outlive the accounts they are about.
+// ===========================================================================
+
+/** People who can sign in to the admin console. Deliberately NOT the players
+ *  table: a different realm, a different token audience, and no path by which
+ *  a player row could ever become an admin one. */
+export const adminUsers = pgTable(
+  "admin_users",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    email: text("email").notNull().unique("admin_users_email_key"),
+    name: text("name").notNull(),
+    /** owner | admin | moderator | support | analyst */
+    role: varchar("role", { length: 20 }).notNull().default("moderator"),
+    /** active | disabled */
+    status: varchar("status", { length: 20 }).notNull().default("active"),
+    /** AES-256-GCM ciphertext of the TOTP secret. NULL until enrolment; never
+     *  plaintext, because a database dump would otherwise hand over a
+     *  permanent code generator. */
+    totpSecretEnc: text("totp_secret_enc"),
+    /** NULL until one working code has been confirmed — a bad QR scan must
+     *  not be able to lock the only admin out of their own console. */
+    totpActivatedAt: timestamp("totp_activated_at", { withTimezone: true }),
+    /** Highest TOTP time-step already accepted. Replay protection: a code read
+     *  over a shoulder must not stay usable for the rest of its 30 seconds. */
+    totpLastStep: bigint("totp_last_step", { mode: "number" }),
+    /** argon2id. Optional third factor — see the login plan. */
+    passwordHash: text("password_hash"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    lastLoginAt: timestamp("last_login_at", { withTimezone: true }),
+    disabledAt: timestamp("disabled_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("admin_users_email_lower_key").on(sql`lower(${t.email})`),
+    check("admin_users_role_check", sql`role IN ('owner','admin','moderator','support','analyst')`),
+    check("admin_users_status_check", sql`status IN ('active','disabled')`),
+  ]
+);
+
+/** One row per signed-in admin browser. Exists so a session can be revoked
+ *  remotely — including from a shell script, for the day the console itself
+ *  cannot be reached. */
+export const adminSessions = pgTable(
+  "admin_sessions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    adminId: uuid("admin_id")
+      .notNull()
+      .references(() => adminUsers.id, { onDelete: "cascade" }),
+    /** SHA-256 of the refresh token. The token itself is never stored. */
+    refreshHash: char("refresh_hash", { length: 64 }).notNull().unique("admin_sessions_refresh_key"),
+    ip: inet("ip"),
+    ua: text("ua"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (t) => [index("idx_admin_sessions_admin").on(t.adminId, t.createdAt)]
+);
+
+/** Ten single-use codes, argon2id-hashed, printed at enrolment and kept
+ *  offline. The way back in when the authenticator phone is gone. */
+export const adminRecoveryCodes = pgTable(
+  "admin_recovery_codes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    adminId: uuid("admin_id")
+      .notNull()
+      .references(() => adminUsers.id, { onDelete: "cascade" }),
+    codeHash: text("code_hash").notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("idx_admin_recovery_admin").on(t.adminId)]
+);
+
+/** Every admin action AND every sensitive read (an IP history opened, a voice
+ *  recording played). Append-only by design: the console's database role gets
+ *  INSERT here and nothing else, and the admin's identity is snapshotted into
+ *  the row rather than joined, so deleting an account cannot blank the trail. */
+export const adminAudit = pgTable(
+  "admin_audit",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+    /** No foreign key on purpose — see the section comment. */
+    adminId: uuid("admin_id"),
+    adminEmail: text("admin_email").notNull(),
+    /** e.g. "sanction.apply", "voice.play", "player.viewIps" */
+    action: varchar("action", { length: 60 }).notNull(),
+    /** user | match | sanction | recording | admin | platform */
+    targetType: varchar("target_type", { length: 30 }),
+    targetId: text("target_id"),
+    ip: inet("ip"),
+    /** Required by the console for anything irreversible. */
+    reason: text("reason"),
+    before: jsonb("before"),
+    after: jsonb("after"),
+    requestId: text("request_id"),
+  },
+  (t) => [
+    index("idx_admin_audit_at").on(t.at),
+    index("idx_admin_audit_admin").on(t.adminId, t.at),
+    index("idx_admin_audit_target").on(t.targetType, t.targetId, t.at),
+    index("idx_admin_audit_action").on(t.action, t.at),
+  ]
+);
+
+/** The session/activity trail: signed in, connected, entered a match, dropped,
+ *  banned. One row per durable fact, written by the buffered logger.
+ *
+ *  Not partitioned. Declarative partitioning is the right answer at tens of
+ *  millions of rows and pure overhead below that — it needs a job creating next
+ *  month's partition and it cannot be expressed in this schema file. Retention
+ *  is an archive-then-DELETE sweep instead; the indexes below are what make
+ *  both the sweep and every console query cheap. Revisit when the table is
+ *  genuinely large, not before. */
+export const eventLog = pgTable(
+  "event_log",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+    /** session.start | session.end | auth.login | match.join | match.end |
+     *  sanction.applied | sanction.lifted | … */
+    type: varchar("type", { length: 40 }).notNull(),
+    /** No foreign key — this row is evidence and must survive the account. */
+    userId: uuid("user_id"),
+    uid: varchar("uid", { length: 12 }),
+    ip: inet("ip"),
+    ipCountry: char("ip_country", { length: 2 }),
+    ua: text("ua"),
+    deviceHash: char("device_hash", { length: 32 }),
+    matchKey: text("match_key"),
+    gameId: varchar("game_id", { length: 40 }),
+    lobbyId: text("lobby_id"),
+    data: jsonb("data").notNull().default({}),
+  },
+  (t) => [
+    index("idx_event_log_at").on(t.at),
+    index("idx_event_log_user").on(t.userId, t.at),
+    index("idx_event_log_type").on(t.type, t.at),
+    index("idx_event_log_ip").on(t.ip, t.at),
+    index("idx_event_log_device").on(t.deviceHash, t.at),
+  ]
+);
+
+/** Which devices an account has been seen on. Not tracking for its own sake:
+ *  this is what makes ban evasion visible — one device hash, three accounts,
+ *  one of them banned. */
+export const userDevices = pgTable(
+  "user_devices",
+  {
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    deviceHash: char("device_hash", { length: 32 }).notNull(),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    seenCount: integer("seen_count").notNull().default(1),
+    ua: text("ua"),
+  },
+  (t) => [
+    primaryKey({ columns: [t.userId, t.deviceHash] }),
+    // The reverse lookup is the whole point: given a device, who else is on it.
+    index("idx_user_devices_hash").on(t.deviceHash),
+  ]
+);
+
+/** Bans and mutes. The record of truth — but nothing on a hot path reads it.
+ *  Applying a sanction also writes `ban:<userId>` to Redis with a TTL, and THAT
+ *  is what the socket handshake and requireAuth check. */
+export const sanctions = pgTable(
+  "sanctions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /** ban | match | voice | chat | shadow-chat */
+    type: varchar("type", { length: 20 }).notNull(),
+    /** Shown to the player. */
+    reason: text("reason").notNull(),
+    /** Internal only, never leaves the console. */
+    note: text("note"),
+    createdBy: uuid("created_by").references(() => adminUsers.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /** NULL = permanent. */
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: uuid("revoked_by").references(() => adminUsers.id, { onDelete: "set null" }),
+    /** Replay keys, recording ids, report ids — whatever justified it. */
+    evidence: jsonb("evidence").notNull().default({}),
+  },
+  (t) => [
+    index("idx_sanctions_user").on(t.userId, t.createdAt),
+    index("idx_sanctions_expiry").on(t.expiresAt),
+    check("sanctions_type_check", sql`type IN ('ban','match','voice','chat','shadow-chat')`),
+  ]
+);
+
+/** Where a finished match's input log was archived. Keyed on the runtime match
+ *  id rather than a foreign key to `matches`, because the replay is written by
+ *  the match runtime and must land even if recording the result did not. */
+export const matchReplays = pgTable(
+  "match_replays",
+  {
+    matchKey: text("match_key").primaryKey(),
+    gameId: varchar("game_id", { length: 40 }).notNull(),
+    r2Key: text("r2_key").notNull(),
+    bytes: integer("bytes").notNull(),
+    formatVersion: integer("format_version").notNull().default(1),
+    /** standard (30d) | extended (365d, a flagged player was in it) | hold
+     *  (attached to an open case — never swept). */
+    tier: varchar("tier", { length: 12 }).notNull().default("standard"),
+    /** NULL for hold. The nightly sweeper deletes by this and nothing else, so
+     *  no one can quietly remove an inconvenient match. */
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("idx_match_replays_expiry").on(t.tier, t.expiresAt),
+    index("idx_match_replays_created").on(t.createdAt),
+  ]
+);
+
+/** An open flag on a player: record their voice, or keep their replays longer.
+ *  Budgeted on purpose — egress is billed per participant-minute, so a flag
+ *  that never expires is a bill that never stops. */
+export const recordingTargets = pgTable(
+  "recording_targets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /** voice | replay-extended */
+    kind: varchar("kind", { length: 20 }).notNull(),
+    reason: text("reason").notNull(),
+    createdBy: uuid("created_by").references(() => adminUsers.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /** Hard stop, always set. */
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    maxMatches: integer("max_matches").notNull().default(20),
+    matchesUsed: integer("matches_used").notNull().default(0),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("idx_recording_targets_user").on(t.userId),
+    check("recording_targets_kind_check", sql`kind IN ('voice','replay-extended')`),
+  ]
+);
+
+/** One audio file per participant per recorded match. The bytes live in the
+ *  private evidence bucket; this row is how the console finds them. */
+export const voiceRecordings = pgTable(
+  "voice_recordings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    matchKey: text("match_key").notNull(),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
+    uid: varchar("uid", { length: 12 }).notNull(),
+    r2Key: text("r2_key").notNull(),
+    egressId: text("egress_id"),
+    /** starting | active | complete | failed */
+    status: varchar("status", { length: 16 }).notNull().default("starting"),
+    bytes: bigint("bytes", { mode: "number" }),
+    durationSec: integer("duration_sec"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("idx_voice_recordings_match").on(t.matchKey),
+    index("idx_voice_recordings_user").on(t.userId, t.startedAt),
+    index("idx_voice_recordings_expiry").on(t.expiresAt),
+    check("voice_recordings_status_check", sql`status IN ('starting','active','complete','failed')`),
+  ]
+);

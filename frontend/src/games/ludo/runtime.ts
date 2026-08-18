@@ -88,6 +88,13 @@ export class LudoRuntime implements GameRuntime {
   private hud: LudoHud;
 
   private startAt: number | null = null;
+  /** The clock this runtime reads. Date.now() while a player is playing; a
+   *  clock the console drives while somebody is watching it back. */
+  private readonly now: () => number;
+  /** Nobody is playing — see GameRuntimeContext.spectator. Ludo already treats
+   *  every input as remote (the server authors them all, and relays them to
+   *  everyone including the asker), so only the TAPS have to be refused. */
+  private readonly spectator: boolean;
   private tick = 0;
   private durationTicks: number;
 
@@ -114,6 +121,8 @@ export class LudoRuntime implements GameRuntime {
   private observer: ResizeObserver | null = null;
 
   constructor(private ctx: GameRuntimeContext) {
+    this.now = ctx.now ?? Date.now;
+    this.spectator = ctx.spectator === true;
     this.players = Math.max(2, Math.min(4, ctx.roster.length));
     // The server sorts the roster by seat, so the index IS the seat — the same
     // contract the runner relies on.
@@ -163,7 +172,9 @@ export class LudoRuntime implements GameRuntime {
     }
     window.addEventListener("resize", this.onResize);
     window.addEventListener("orientationchange", this.onResize);
-    this.liveCanvas.addEventListener("pointerdown", (e) => this.onTap(e));
+    // A tap on the board must not be able to roll a die in a match that is
+    // over. See GameRuntimeContext.spectator.
+    if (!this.spectator) this.liveCanvas.addEventListener("pointerdown", (e) => this.onTap(e));
     // Phones synthesize a mouse click after every touch. The platform kills
     // those on the Babylon canvas; this is a different surface and needs its
     // own, or the tap that rolls the dice also lands on whatever the wheel
@@ -291,7 +302,7 @@ export class LudoRuntime implements GameRuntime {
 
   render(): void {
     if (this.disposed) return;
-    const now = Date.now();
+    const now = this.now();
     if (this.startAt !== null) {
       const t = Math.floor((now - this.startAt) / TICK_MS);
       this.tick = Math.max(0, Math.min(t, this.durationTicks));
@@ -336,7 +347,7 @@ export class LudoRuntime implements GameRuntime {
    *  future — so a die that glowed then would be inviting a tap it could only
    *  swallow. */
   private started(): boolean {
-    return this.startAt !== null && Date.now() >= this.startAt;
+    return this.startAt !== null && this.now() >= this.startAt;
   }
 
   private myTurn(s: LudoState): boolean {
@@ -353,7 +364,7 @@ export class LudoRuntime implements GameRuntime {
    *  The retry window is what makes a tap the platform quietly dropped into a
    *  tap you can simply make again, rather than a turn lost to a countdown. */
   private waiting(s: LudoState): boolean {
-    return this.asked !== null && this.asked.key === this.phaseKey(s) && Date.now() - this.asked.at <= RETRY_MS;
+    return this.asked !== null && this.asked.key === this.phaseKey(s) && this.now() - this.asked.at <= RETRY_MS;
   }
 
   private onTap(e: PointerEvent): void {
@@ -410,7 +421,7 @@ export class LudoRuntime implements GameRuntime {
     // Stamped one tick ahead: it must not be in the past by the time it lands,
     // and the platform refuses anything more than a quarter second early.
     const tick = Math.max(1, Math.min(this.tick + 1, this.durationTicks));
-    this.asked = { key: this.phaseKey(this.state()), kind, at: Date.now() };
+    this.asked = { key: this.phaseKey(this.state()), kind, at: this.now() };
     this.ctx.sendInput({ tick, kind });
     this.lastSig = ""; // repaint at once, so the tap feels answered
   }
@@ -507,7 +518,7 @@ export class LudoRuntime implements GameRuntime {
     const dpad = l.dsize * 0.9;
     g.clearRect(l.dx - dpad, l.dy - dpad, l.dsize + dpad * 2, l.dsize + dpad * 2);
 
-    const now = Date.now();
+    const now = this.now();
     const pulse = 0.5 + 0.5 * Math.sin(now / 260);
     const frac = this.startAt !== null ? Math.min(1, Math.max(0, (now - this.startAt) / TICK_MS - this.tick)) : 0;
     const at = s.tick + frac;

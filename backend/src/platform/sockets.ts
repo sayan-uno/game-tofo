@@ -23,6 +23,7 @@ import {
 import { getLoading, getLobbyGame, getLobbyMatch, getSearching, setLoading, setLobbyGame, throttle } from "./store.js";
 import { FILL_DEADLINE_MS, dequeue, enqueue, packNow } from "./matchmaking.js";
 import { EV, PROGRESS_MAX_HZ, type MatchAddable, type MatchSync, type TimePong } from "../shared/core/protocol.js";
+import { getSanctions } from "../services/sanctions.js";
 
 interface AuthedSocket extends Socket {
   data: { auth: AuthPayload; lastProgressAt?: number };
@@ -99,6 +100,9 @@ export function registerPlatformHandlers(io: Server, socket: AuthedSocket, deps:
     try {
       const lobbyId = (await getUserLobby(userId)) ?? soloLobby;
       if (lobbyId !== soloLobby) return reply?.({ error: "Only the party leader can start" });
+      // A match ban leaves the lobby and friends working — only playing stops.
+      const active = await getSanctions(userId);
+      if (active.match) return reply?.({ error: active.match.reason || "You cannot join matches right now" });
       const gameId = await getLobbyGame(lobbyId);
       if (!gameId) return reply?.({ error: "Choose a game first" });
       const game = getGame(gameId);

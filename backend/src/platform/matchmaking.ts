@@ -88,6 +88,11 @@ export async function updateSize(gameId: string, size: number, lobbyId: string, 
   await redis.hset(sizeKey(gameId, size), lobbyId, String(partySize));
 }
 
+/** How many parties are waiting in one pool. For the ops snapshot — exported
+ *  from here rather than rebuilt elsewhere so the key format stays in one
+ *  place. */
+export const poolDepth = (gameId: string, size: number): Promise<number> => redis.zcard(poolKey(gameId, size));
+
 export async function isSearching(gameId: string, size: number, lobbyId: string): Promise<boolean> {
   return (await redis.zscore(poolKey(gameId, size), lobbyId)) !== null;
 }

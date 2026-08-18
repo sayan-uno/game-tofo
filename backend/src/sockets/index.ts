@@ -29,6 +29,11 @@ import {
 } from "../redis.js";
 import { areFriends, displayName, getFriendIds, getUserById, getUserByUid, getUsersByIds } from "../services/users.js";
 import { registerChatHandlers, syncTeamChatSession } from "./chat.js";
+import { deviceHashFrom, socketOrigin, type ClientOrigin } from "../services/clientIp.js";
+import { logEvent } from "../services/eventLog.js";
+import { noteDevice } from "../services/devices.js";
+import { getSanctions } from "../services/sanctions.js";
+import { inMaintenance } from "../platform/flags.js";
 import { canPerform, resolveCharacter, resolveWeapon } from "../services/catalog.js";
 import { platformOnConnect, platformOnDisconnect, registerPlatformHandlers } from "../platform/sockets.js";
 import {
@@ -42,7 +47,15 @@ import {
 import { dequeue, updateSize } from "../platform/matchmaking.js";
 
 interface AuthedSocket extends Socket {
-  data: { auth: AuthPayload };
+  data: {
+    auth: AuthPayload;
+    /** Where this connection came from, resolved once at the handshake — the
+     *  session trail needs it and re-deriving it per event would be waste. */
+    origin: ClientOrigin;
+    /** Client-reported, unverified, correlation only. */
+    deviceHash: string | null;
+    connectedAt: number;
+  };
 }
 
 /** Floor between two emotes from one connection. Long enough to stop a held
@@ -251,7 +264,42 @@ export function registerSockets(io: Server) {
         const user = await getUserById(payload.userId);
         if (!user) return next(new Error("Unauthorized"));
         if (!user.username) return next(new Error("USERNAME_REQUIRED"));
-        (socket as AuthedSocket).data.auth = { ...payload, name: user.username };
+        const origin = socketOrigin(socket);
+        const deviceHash = deviceHashFrom(socket.handshake.auth?.deviceHash);
+        // One Redis GET against a key that exists only for sanctioned players,
+        // and one field read for maintenance. A ban has to be felt at the door,
+        // not discovered three screens in.
+        const [sanctions, maintenance] = await Promise.all([
+          getSanctions(payload.userId),
+          inMaintenance(),
+        ]);
+        if (maintenance) {
+          // Deliberately checked BEFORE the ban: during maintenance nobody is
+          // getting in, and telling a banned player they are banned is not the
+          // message that matters at that moment.
+          return next(new Error("MAINTENANCE"));
+        }
+        if (sanctions.ban) {
+          // The device matters MOST on a refused connection: a banned player
+          // knocking again from the same machine is what ban evasion looks
+          // like, and it is the one row that proves it.
+          logEvent({
+            type: "session.rejected",
+            userId: payload.userId,
+            uid: payload.uid,
+            ip: origin.ip,
+            ipCountry: origin.country,
+            ua: origin.ua,
+            deviceHash,
+            data: { reason: "banned", detail: sanctions.ban.reason },
+          });
+          return next(new Error(`BANNED:${sanctions.ban.reason}`));
+        }
+        const s = socket as AuthedSocket;
+        s.data.auth = { ...payload, name: user.username };
+        s.data.origin = origin;
+        s.data.deviceHash = deviceHash;
+        s.data.connectedAt = Date.now();
         next();
       } catch (err) {
         console.error("Socket auth error:", err);
@@ -611,7 +659,17 @@ export function registerSockets(io: Server) {
       }
     });
 
-    socket.on("disconnect", async () => {
+    /** Everything that has to happen when this connection goes away.
+     *
+     *  Pulled out of the handler because it has TWO callers. The obvious one is
+     *  the disconnect event. The other is the end of the connect setup below:
+     *  that setup is asynchronous, and a socket that drops while it is still
+     *  running fires its disconnect BEFORE presence was ever written — so the
+     *  ownership guard here sends it home having cleaned nothing, and the
+     *  player is left marked online for ever. Rare with a good connection,
+     *  routine on a phone in a lift, and it quietly inflates every "players
+     *  online" number the platform reports. */
+    async function endSession(): Promise<void> {
       try {
         // Another socket may have replaced us already — only clean up if we still own presence.
         const current = await getSocketId(userId);
@@ -619,6 +677,14 @@ export function registerSockets(io: Server) {
 
         // Mid-match: keep their seat for the grace period (platform/match.ts).
         platformOnDisconnect(io, socket);
+        logEvent({
+          type: "session.end",
+          userId,
+          uid,
+          ip: socket.data.origin?.ip,
+          deviceHash: socket.data.deviceHash,
+          data: { seconds: Math.round((Date.now() - (socket.data.connectedAt ?? Date.now())) / 1000) },
+        });
         await setOffline(userId);
         const lobbyId = await leaveLobby(userId);
         if (lobbyId) {
@@ -633,7 +699,9 @@ export function registerSockets(io: Server) {
       } catch (err) {
         console.error("Socket disconnect cleanup error:", err);
       }
-    });
+    }
+
+    socket.on("disconnect", () => void endSession());
 
     // ---- connection setup (runs after handlers are attached) ----
     try {
@@ -645,6 +713,18 @@ export function registerSockets(io: Server) {
 
       await setOnline(userId, socket.id);
       socket.join(`user:${userId}`);
+      logEvent({
+        type: "session.start",
+        userId,
+        uid,
+        ip: socket.data.origin.ip,
+        ipCountry: socket.data.origin.country,
+        ua: socket.data.origin.ua,
+        deviceHash: socket.data.deviceHash,
+      });
+      // Fire-and-forget: one upsert per session, never awaited, so the
+      // handshake does not wait on Postgres for a correlation hint.
+      noteDevice(userId, socket.data.deviceHash, socket.data.origin.ua);
 
       // Everyone starts a session in their own lobby, in solo mode (like Free
       // Fire) — unless their squad is still alive and waiting for them.
@@ -658,6 +738,11 @@ export function registerSockets(io: Server) {
       for (const fid of friendIds) {
         io.to(`user:${fid}`).emit("friend:online", { uid, name });
       }
+
+      // The socket may have gone while all of the above was running. Its own
+      // disconnect handler already came and went with nothing to clean, so the
+      // cleanup has to happen here instead — see endSession.
+      if (socket.disconnected) await endSession();
     } catch (err) {
       console.error("Socket connect error:", err);
       socket.disconnect(true);

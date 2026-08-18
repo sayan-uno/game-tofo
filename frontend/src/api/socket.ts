@@ -1,13 +1,17 @@
 import { io, type Socket } from "socket.io-client";
 import { API_URL } from "../config";
 import { getToken } from "./http";
+import { deviceHashNow } from "./device";
 
 let socket: Socket | null = null;
 
 export function connectSocket(): Socket {
   if (socket?.connected) return socket;
   socket = io(API_URL, {
-    auth: { token: getToken() },
+    // A function rather than an object: socket.io calls it on every connection
+    // attempt, so a reconnect carries a refreshed token — and the device hash
+    // once it has finished computing.
+    auth: (cb: (data: Record<string, unknown>) => void) => cb({ token: getToken(), deviceHash: deviceHashNow() }),
     transports: ["websocket"],
     reconnectionDelay: 1000,
     reconnectionDelayMax: 8000,
