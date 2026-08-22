@@ -13,7 +13,7 @@ import { emitAck } from "../api/socket";
 import { startRenderLoop } from "../game/engine";
 import type { LobbyScene } from "../game/lobbyScene";
 import { toast } from "../ui/toast";
-import { isMicEnabled, joinVoice, toggleMic } from "../voice/livekit";
+import { isMicEnabled, joinVoice, onMicChange, toggleMic } from "../voice/livekit";
 import { getGameInfo, fetchGames } from "./gamesApi";
 import { getLoadedPack, loadPack } from "./packLoader";
 import { seedClock, serverToLocal, syncClock } from "./clock";
@@ -30,6 +30,7 @@ import {
   type MatchSync,
   type QuickKind,
   type QuickRelay,
+  RESULTS_MS,
 } from "../shared/core/protocol";
 
 export interface MatchClientDeps {
@@ -55,10 +56,15 @@ export class MatchClient {
   private countdownEl: HTMLElement | null = null;
   private countdownRaf = 0;
   private resultsEl: HTMLElement | null = null;
+  /** Counts the results screen down and then takes everybody home. */
+  private resultsTimer = 0;
   private searchEl: HTMLElement | null = null;
   private searchTimer = 0;
   private controls: HTMLElement | null = null;
   private micBtn: HTMLButtonElement | null = null;
+  /** Dropped when the controls are rebuilt, so a match does not leave a
+   *  listener behind pointing at a button that is no longer on the page. */
+  private stopMicWatch: (() => void) | null = null;
   private inputBuffer: MatchInputRelay[] = [];
   /** How many of each runner's inputs the game has actually been given.
    *
@@ -95,7 +101,10 @@ export class MatchClient {
     this.controls.className = "match-controls hidden";
     this.controls.innerHTML = `<button class="mx-mic" type="button"></button><button class="mx-leave" type="button">Leave</button>`;
     this.micBtn = this.controls.querySelector<HTMLButtonElement>(".mx-mic")!;
-    this.paintMic();
+    // Same source as the lobby's button, so the two can never disagree about
+    // whether this player is being heard.
+    this.stopMicWatch?.();
+    this.stopMicWatch = onMicChange(() => this.paintMic());
     this.micBtn.onclick = () => {
       const btn = this.micBtn!;
       btn.disabled = true;
@@ -103,7 +112,6 @@ export class MatchClient {
         .catch(() => toast("Couldn't switch your microphone", true))
         .finally(() => {
           btn.disabled = false;
-          this.paintMic();
         });
     };
     this.controls.querySelector<HTMLButtonElement>(".mx-leave")!.onclick = () => void this.leave();
@@ -123,7 +131,18 @@ export class MatchClient {
     s.on(EV.searching, (p: MatchSearching | null) => {
       if (p) this.showSearching(p);
     });
-    s.on(EV.searchEnded, () => this.hideSearching());
+    s.on(EV.searchEnded, (p: { reason?: string; by?: { uid: string; name: string } } | null) => {
+      this.hideSearching();
+      // Say WHO stopped it. A search that vanishes on its own reads as a bug;
+      // a search that somebody cancelled reads as a teammate changing their
+      // mind, which is the whole point of letting them.
+      const by = p?.by;
+      if (by && by.uid !== this.deps.localUid) toast(`${by.name} stopped the search`);
+    });
+    s.on(EV.objection, (p: { uid?: string; name?: string } | null) => {
+      if (!p?.name || p.uid === this.deps.localUid) return;
+      toast(`${p.name} would rather play something else`);
+    });
     s.on(EV.quick, (q: QuickRelay | null) => {
       if (!q || typeof q.uid !== "string") return;
       (this.runtime as (GameRuntime & { onQuick?: (u: string, k: QuickKind, i: string) => void }) | null)
@@ -399,6 +418,8 @@ export class MatchClient {
     this.controls?.classList.add("hidden");
     this.stopCountdown();
     this.hideCurtain();
+    window.clearInterval(this.resultsTimer);
+    this.resultsTimer = 0;
     this.resultsEl?.remove();
     this.resultsEl = null;
     this.runtime?.dispose();
@@ -429,7 +450,8 @@ export class MatchClient {
           <div class="ms-dots"></div>
           <div class="ms-count"><span class="ms-found">1</span><span class="ms-of">/</span><span class="ms-size">4</span></div>
           <div class="ms-elapsed">0:00</div>
-          ${this.deps.isPartyLeader() ? '<button class="btn btn-ghost ms-cancel" type="button">Cancel</button>' : '<div class="ms-note">Waiting for your leader</div>'}
+          <button class="btn btn-ghost ms-cancel" type="button">Cancel</button>
+          ${this.deps.isPartyLeader() ? "" : '<div class="ms-note">Anyone can stop the search</div>'}
         </div>`;
       this.layer.appendChild(el);
       this.searchEl = el;
@@ -580,6 +602,7 @@ export class MatchClient {
         <div class="mr-sub">${sub}</div>
         <table class="mr-table"><thead><tr><th>#</th><th>Player</th><th>Score</th><th></th><th></th><th></th></tr></thead><tbody>${rows}</tbody></table>
         <div class="mr-actions">
+          <span class="mr-countdown"></span>
           <button class="btn btn-ghost mr-lobby">Back to lobby</button>
           ${this.deps.isPartyLeader() ? '<button class="btn btn-red mr-again">Play again</button>' : ""}
         </div>
@@ -589,6 +612,30 @@ export class MatchClient {
     e.standings.forEach((s, i) => (nameCells[i].textContent = s.name));
     this.offerFriendRequests(el, e.matchId);
     el.querySelector<HTMLButtonElement>(".mr-lobby")!.onclick = () => this.exit();
+
+    // EVERYBODY GOES BACK, on a clock they can see.
+    //
+    // A scoreboard left up until somebody presses a button is a match that
+    // never ends: the party cannot start another one while a member is still
+    // sitting on it, and — for a table with a flagged player at it — the
+    // recording has to be closed at a moment the server can predict rather
+    // than whenever the last person gets bored. Counted down out loud so it
+    // does not read as the game throwing them out.
+    const back = el.querySelector<HTMLElement>(".mr-countdown");
+    let left = Math.ceil(RESULTS_MS / 1000);
+    const tick = () => {
+      if (back) back.textContent = `Back to the lobby in ${left}…`;
+      if (left <= 0) {
+        window.clearInterval(this.resultsTimer);
+        this.resultsTimer = 0;
+        this.exit();
+        return;
+      }
+      left--;
+    };
+    window.clearInterval(this.resultsTimer);
+    tick();
+    this.resultsTimer = window.setInterval(tick, 1000);
     el.querySelector<HTMLButtonElement>(".mr-again")?.addEventListener("click", () => {
       this.exit();
       void emitAck(EV.start).then((res) => {

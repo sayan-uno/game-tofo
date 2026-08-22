@@ -16,7 +16,43 @@ export function connectSocket(): Socket {
     reconnectionDelay: 1000,
     reconnectionDelayMax: 8000,
   });
+  startHeartbeat(socket);
   return socket;
+}
+
+// ---------------------------------------------------------------------------
+// "I am still here"
+//
+// A connected socket is not a player. A phone in a pocket, a tab behind six
+// others, a laptop lid closed on a train — all of those hold the socket open
+// for minutes, and a friends list built on "is the socket up?" shows those
+// people as online and ready to be invited when nobody is there at all.
+//
+// So the page says so itself, and only while it is VISIBLE. Stop looking and
+// the beat stops; about ten seconds later the server marks the player away.
+// Come back and the first beat fires immediately, so returning is instant
+// rather than something you wait out.
+//
+// One tiny event every four seconds, no acknowledgement and no payload.
+// ---------------------------------------------------------------------------
+const BEAT_MS = 4000;
+let beatTimer = 0;
+
+function beat(): void {
+  if (document.visibilityState !== "visible") return;
+  socket?.emit("presence:beat");
+}
+
+function startHeartbeat(s: Socket): void {
+  if (beatTimer) return;
+  // On connect, on every reconnect, and the moment the page is looked at
+  // again — each of those is a point where the server's idea of this player
+  // may be out of date, and waiting up to four seconds to correct it is four
+  // seconds of a friend seeing the wrong thing.
+  s.on("connect", beat);
+  document.addEventListener("visibilitychange", beat);
+  beatTimer = window.setInterval(beat, BEAT_MS);
+  beat();
 }
 
 export function getSocket(): Socket {
@@ -25,6 +61,11 @@ export function getSocket(): Socket {
 }
 
 export function disconnectSocket() {
+  if (beatTimer) {
+    clearInterval(beatTimer);
+    beatTimer = 0;
+  }
+  document.removeEventListener("visibilitychange", beat);
   socket?.disconnect();
   socket = null;
 }

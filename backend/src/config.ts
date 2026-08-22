@@ -15,8 +15,9 @@ const here = path.dirname(fileURLToPath(import.meta.url));
  *  creates the match in ITS memory and emits to ITS sockets — so the player
  *  waits on FINDING PLAYERS forever while the other log cheerfully reports a
  *  match starting. The role switch is what makes a second process safe. */
-export type ProcessRole = "game" | "admin";
-const role: ProcessRole = process.env.ROLE === "admin" ? "admin" : "game";
+export type ProcessRole = "game" | "admin" | "recorder";
+const role: ProcessRole =
+  process.env.ROLE === "admin" ? "admin" : process.env.ROLE === "recorder" ? "recorder" : "game";
 
 export const config = {
   role,
@@ -93,6 +94,59 @@ export const config = {
      *  reading its output would silently disagree the moment one of them was
      *  launched from somewhere else. */
     localDir: process.env.EVIDENCE_DIR || path.resolve(here, "..", ".evidence"),
+  },
+  // The recorder process: a hidden LiveKit participant that receives the audio
+  // and writes the files itself. Replaces LiveKit's egress, whose concurrency
+  // is capped per project (2 on the free plan, 500 at $500/month) — a cap this
+  // has no equivalent of, because the only limit here is CPU.
+  recorder: {
+    /** How often a part-written file is pushed to the bucket. A crash costs at
+     *  most this much audio, so it is a directly chosen risk. */
+    flushSeconds: Number(process.env.RECORDER_FLUSH_SECONDS || 30),
+    /** Refuses to hold more sessions than this at once. Not a licence limit —
+     *  a brake, so one runaway cannot take the process down with it. */
+    maxSessions: Number(process.env.RECORDER_MAX_SESSIONS || 50),
+    /** Horizontal scaling, when one process is no longer enough: each instance
+     *  takes the sessions whose key hashes to its own shard. One instance
+     *  (the default) takes everything. */
+    shard: Number(process.env.RECORDER_SHARD || 0),
+    shards: Number(process.env.RECORDER_SHARDS || 1),
+  },
+  // Voice recording (A6). OFF unless explicitly switched on, and deliberately
+  // so: recording a flagged player necessarily records everyone in the room
+  // with them, which is a thing a Terms & Privacy page has to have told players
+  // about BEFORE it happens. A feature that can be turned on by forgetting to
+  // turn it off is the wrong shape for that.
+  voiceRecording: {
+    enabled: process.env.VOICE_RECORDING_ENABLED === "true",
+    /** Refuses to start more than this many at once, whatever the console asks.
+     *  Egress is billed per participant-minute and a four-player Ludo table is
+     *  a hundred of them; the ceiling is what stops one forgotten flag becoming
+     *  a bill. */
+    maxConcurrent: Number(process.env.VOICE_MAX_CONCURRENT || 8),
+    /** How long a recording is kept before retention removes it. */
+    retentionDays: Number(process.env.VOICE_RETENTION_DAYS || 90),
+    /** Record what every party LOOKED like — who was in it, wearing what, and
+     *  what was said — so the console can replay a lobby the way it replays a
+     *  match. It is a few kilobytes per party and costs the players nothing;
+     *  it is separate from voice, which still needs a flagged player. */
+    partyReplays: process.env.PARTY_REPLAYS !== "false",
+    /** Keep a single mixed file of everyone in the room. This is what makes a
+     *  conversation followable; the separate voices below answer who said it. */
+    mixEnabled: process.env.VOICE_MIX !== "false",
+    /** Record each microphone separately as well as the room mix.
+     *
+     *  On by default, because separate voices are what answer "who said it".
+     *  Turn it OFF when LiveKit's concurrent-egress limit is the binding
+     *  constraint: one match then costs ONE egress instead of one per speaker
+     *  plus the mix, and what you keep is the whole conversation rather than a
+     *  conversation with holes in it. */
+    separateTracks: process.env.VOICE_SEPARATE_TRACKS !== "false",
+    /** A hard ceiling on any single recording. A match ends by itself; a
+     *  lobby does not — somebody can sit in one all afternoon with the
+     *  microphone open, and egress is billed by the minute. Nothing is lost
+     *  when this fires: the next thing they publish starts a new file. */
+    maxSessionMinutes: Number(process.env.VOICE_MAX_SESSION_MINUTES || 120),
   },
   // Cloudflare Access, when it is in front. Set both and every admin request
   // must carry a Cloudflare-signed assertion — which is what stops someone who

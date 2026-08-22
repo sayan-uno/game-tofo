@@ -11,6 +11,7 @@
 // repaint every frame of every turn, for ten seconds at a time, on a screen
 // where nothing else was moving. Here it is one CSS animation, set once when
 // the turn begins and left alone.
+import { onTalkingChange } from "../../voice/livekit";
 import { QUICK_CHAT, QUICK_EMOTE, type QuickKind } from "../../shared/core/protocol";
 import { PALETTE } from "./theme";
 
@@ -19,6 +20,9 @@ export interface HudSeat {
   corner: number;
   name: string;
   you: boolean;
+  /** Matches the LiveKit participant identity, which is how the speaking
+   *  indicator finds the right card. Absent for bots — they never talk. */
+  uid?: string;
 }
 
 export interface HudDeps {
@@ -34,6 +38,8 @@ export class LudoHud {
   private quickBtn: HTMLButtonElement;
   private bubbleTimers = new Map<number, number>();
   private lastBanner = "";
+  private micOf = new Map<string, HTMLElement>();
+  private untalk: (() => void) | null = null;
 
   constructor(private deps: HudDeps) {
     const rail = document.createElement("div");
@@ -46,14 +52,23 @@ export class LudoHud {
       card.style.setProperty("--ld-cl", p.light);
       card.innerHTML = `
         <span class="ld-dot"></span>
-        <span class="ld-who"><span class="ld-name"></span><span class="ld-home">0/4</span></span>
+        <span class="ld-who"><span class="ld-name"></span><i class="ld-mic">🎙</i><span class="ld-home">0/4</span></span>
         <span class="ld-timer"><i></i></span>
         <span class="ld-bubble"></span>`;
       // A username is user input and never goes near innerHTML.
       card.querySelector<HTMLElement>(".ld-name")!.textContent = s.you ? `${s.name} (you)` : s.name;
       rail.appendChild(card);
       this.cards.set(s.seat, card);
+      if (s.uid) this.micOf.set(s.uid, card.querySelector<HTMLElement>(".ld-mic")!);
     }
+    // Only while they are actually speaking — everyone's mic is on, so
+    // "mic on" would light every card and mean nothing.
+    this.untalk = onTalkingChange((uids) => {
+      for (const [uid, mic] of this.micOf) {
+        const talking = uids.has(uid);
+        if (mic.classList.contains("live") !== talking) mic.classList.toggle("live", talking);
+      }
+    });
     deps.root.appendChild(rail);
 
     this.banner = document.createElement("div");
@@ -188,6 +203,8 @@ export class LudoHud {
   }
 
   dispose(): void {
+    this.untalk?.();
+    this.untalk = null;
     for (const t of this.bubbleTimers.values()) clearTimeout(t);
     this.bubbleTimers.clear();
   }

@@ -1,13 +1,15 @@
 // Trackline's in-match HUD: DOM, updated on change only (never per frame
 // unless a value actually changed) — the compositor does the rest.
 import { QUICK_CHAT, QUICK_EMOTE, type QuickKind, type RosterEntry } from "../../shared/core/protocol";
+import { onTalkingChange } from "../../voice/livekit";
 
 export class TracklineHud {
   private root: HTMLElement;
   private timerEl: HTMLElement;
   private scoreEl: HTMLElement;
   private coinsEl: HTMLElement;
-  private rows = new Map<string, { el: HTMLElement; status: HTMLElement; last: string }>();
+  private rows = new Map<string, { el: HTMLElement; status: HTMLElement; last: string; mic: HTMLElement }>();
+  private untalk: (() => void) | null = null;
   private flashEl!: HTMLElement;
   private spectateEl!: HTMLElement;
   private watchingEl!: HTMLElement;
@@ -46,16 +48,31 @@ export class TracklineHud {
     for (const r of roster) {
       const el = document.createElement("div");
       el.className = `tl-row${r.uid === you ? " me" : ""}`;
+      // A microphone that shows only while they are actually talking. During
+      // a match this is the only way to tell who is speaking — everyone's
+      // mic is on, so "mic on" would light the whole board and say nothing.
+      const mic = document.createElement("i");
+      mic.className = "tl-mic";
+      mic.textContent = "🎙";
       const name = document.createElement("span");
       name.className = "tl-name";
       name.textContent = r.name;
       const status = document.createElement("span");
       status.className = "tl-status";
       status.textContent = "";
-      el.append(name, status);
+      el.append(mic, name, status);
       board.appendChild(el);
-      this.rows.set(r.uid, { el, status, last: "" });
+      this.rows.set(r.uid, { el, status, last: "", mic });
     }
+
+    // Event-driven, never per frame: LiveKit tells every client at once, so
+    // the whole table sees the same person light up at the same moment.
+    this.untalk = onTalkingChange((uids) => {
+      for (const [uid, row] of this.rows) {
+        const talking = uids.has(uid);
+        if (row.mic.classList.contains("live") !== talking) row.mic.classList.toggle("live", talking);
+      }
+    });
   }
 
   /** Seconds remaining → "m:ss"; repaints only when the text changes. */
@@ -154,6 +171,8 @@ export class TracklineHud {
 
   dispose(): void {
     if (this.flashTimer !== null) clearTimeout(this.flashTimer);
+    this.untalk?.();
+    this.untalk = null;
     this.root.remove();
   }
 }

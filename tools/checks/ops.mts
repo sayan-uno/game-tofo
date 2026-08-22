@@ -319,7 +319,13 @@ try {
     const signed = JSON.stringify({ ...once, sig: sign(once) });
     await redis.publish(CMD_CHANNEL, signed);
     await redis.publish(CMD_CHANNEL, signed);
-    await sleep(350);
+    // Wait for the FIRST acknowledgement however long the box takes, then give
+    // a second one room to arrive. A fixed sleep here was measuring the
+    // machine, not the code: on a busy one the single correct ack had not come
+    // back yet and "ran exactly once" failed as "ran not at all".
+    const deadline = Date.now() + 6000;
+    while (heard === 0 && Date.now() < deadline) await sleep(50);
+    await sleep(400);
     ok(heard === 1, `a redelivered command runs exactly once (${heard} acknowledgement)`);
 
     const elsewhere = { id: randomUUID(), at: Date.now(), cmd: "ping", args: {}, by: "check", instance: "some-other-server" };
@@ -328,6 +334,59 @@ try {
     ok(heard === 1, "a command addressed to another instance is ignored — pub/sub crosses database indexes, so this matters");
     await listener.quit();
   }
+
+// ---------------------------------------------------------------------------
+console.log("\n— going back in time —");
+{
+  // The live snapshot expires in seconds. This is the record that outlives it,
+  // and the thing that makes it worth having is what is NOT in it: a minute
+  // with no row is a minute nothing could write one.
+  const { platformHistory } = await import("../../backend/src/db/schema.js");
+  const { db } = await import("../../backend/src/db/client.js");
+  const base = Math.floor(Date.now() / 60_000) * 60_000 - 60 * 60_000;
+  const minutes: number[] = [];
+  for (let i = 0; i < 20; i++) {
+    // A deliberate hole at minutes 8, 9 and 10 — an outage of three minutes.
+    if (i >= 8 && i <= 10) continue;
+    minutes.push(base + i * 60_000);
+  }
+  await db.insert(platformHistory).values(
+    minutes.map((at) => ({
+      at: new Date(at),
+      instance: `opscheck-${process.pid}`,
+      online: 5,
+      sockets: 5,
+      matches: 1,
+      matchPlayers: 4,
+      matchBots: 0,
+      queued: 0,
+      rssMb: 100,
+    }))
+  );
+
+  const rows = await q<{ at: Date }>(
+    `select at from platform_history where instance = $1 order by at`,
+    [`opscheck-${process.pid}`]
+  );
+  ok(rows.length === 17, `seventeen minutes written, three missing (${rows.length})`);
+
+  // The same gap detection the console does.
+  const points = rows.map((r) => new Date(r.at).getTime());
+  const gaps: number[] = [];
+  for (let i = 1; i < points.length; i++) {
+    const delta = points[i] - points[i - 1];
+    if (delta > 2 * 60_000) gaps.push(Math.round(delta / 60_000) - 1);
+  }
+  ok(gaps.length === 1, `one hole is found, not several (${gaps.length})`);
+  ok(gaps[0] === 3, `and it is the right size — three minutes with nothing recorded (${gaps[0]})`);
+  ok(
+    points.every((p, i) => i === 0 || p > points[i - 1]),
+    "the record is in order, so a chart can be drawn straight from it"
+  );
+
+  await q("delete from platform_history where instance = $1", [`opscheck-${process.pid}`]);
+}
+
 } finally {
   await stopOpsCommands();
   await stopOpsPublisher();

@@ -162,6 +162,15 @@ export interface TimePong {
   serverNow: number;
 }
 
+/** How long the results stay up before everybody is put back in the lobby.
+ *
+ *  Shared because both sides have to agree on it: the client counts it down on
+ *  screen, and the server keeps the match's voice room open for exactly this
+ *  long afterwards. What is said over a scoreboard is often the most telling
+ *  thing in the whole match — the abuse that follows losing — and cutting the
+ *  recording at the final tick threw all of it away. */
+export const RESULTS_MS = 5000;
+
 /** Event names, in one place so a typo can't split the two sides. */
 export const EV = {
   // lobby ↔ game selection + loading (party scope)
@@ -169,9 +178,12 @@ export const EV = {
   progress: "game:progress", // client→server {pct}
   loading: "lobby:loading", // server→room {uid, pct}
   start: "lobby:start", // client→server (leader)
-  cancel: "lobby:cancelSearch", // client→server (leader)
+  cancel: "lobby:cancelSearch", // client→server (ANY member — see sockets.ts)
+  sayReady: "lobby:sayReady", // client→server {ready}
+  objectGame: "lobby:objectGame", // client→server (member)
+  objection: "lobby:objection", // server→room {uid, name, gameId}
   searching: "match:searching", // server→room  MatchSearching
-  searchEnded: "match:searchEnded", // server→room {reason}
+  searchEnded: "match:searchEnded", // server→room {reason, by?, mine?}
   // match lifecycle (match scope)
   prepare: "match:prepare", // server→participants  MatchPrepare
   ready: "match:ready", // client→server

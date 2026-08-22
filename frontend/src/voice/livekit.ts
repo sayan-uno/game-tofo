@@ -17,6 +17,73 @@ export function isMicEnabled(): boolean {
   return micEnabled;
 }
 
+// ---------------------------------------------------------------------------
+// The mic, and who is showing it
+//
+// Two pieces of UI draw this button — the lobby's and the match's — and each
+// used to paint it from a value it read once and then only refreshed when IT
+// was clicked. The lobby HUD is built at startup and lives for the whole
+// session, so muting inside a match left the lobby still saying "🎙 On" while
+// nothing was being transmitted: a player believing they were heard when they
+// were not, which is the worst direction for this particular error.
+//
+// So the state lives here and says when it changes. Nobody paints from memory.
+// ---------------------------------------------------------------------------
+const micListeners = new Set<(on: boolean) => void>();
+
+/** Paints immediately with what is true now, and again whenever that changes.
+ *  Returns the unsubscribe. */
+export function onMicChange(fn: (on: boolean) => void): () => void {
+  micListeners.add(fn);
+  fn(micEnabled);
+  return () => {
+    micListeners.delete(fn);
+  };
+}
+
+function setMic(on: boolean): void {
+  if (micEnabled === on) return;
+  micEnabled = on;
+  for (const fn of micListeners) {
+    try {
+      fn(on);
+    } catch (err) {
+      console.error("[voice] mic listener failed", err);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Who is talking
+//
+// A microphone icon that means "their mic is on" tells a player nothing —
+// everyone's mic is on. What is worth showing is who is speaking RIGHT NOW,
+// and LiveKit already works that out (it does the level detection server-side
+// and tells every client at once, so all four players agree about it).
+//
+// Kept as a plain set plus a listener rather than a store: the only consumers
+// are two pieces of UI, and this file is loaded before either exists.
+// ---------------------------------------------------------------------------
+const talking = new Set<string>();
+const talkingListeners = new Set<(uids: Set<string>) => void>();
+
+export function whoIsTalking(): ReadonlySet<string> {
+  return talking;
+}
+
+/** Fires whenever the set changes. Returns its own unsubscribe. */
+export function onTalkingChange(fn: (uids: Set<string>) => void): () => void {
+  talkingListeners.add(fn);
+  fn(talking);
+  return () => talkingListeners.delete(fn);
+}
+
+function setTalking(uids: string[]): void {
+  talking.clear();
+  for (const uid of uids) talking.add(uid);
+  for (const fn of talkingListeners) fn(talking);
+}
+
 /** Join a voice room. Safe to call repeatedly — reconnects only when the
  *  room actually changed.
  *
@@ -68,7 +135,14 @@ export async function joinVoice(
   newRoom.on(RoomEvent.TrackUnsubscribed, (track) => {
     track.detach().forEach((el) => el.remove());
   });
+  // The identity on a LiveKit participant IS the player's uid — that is what
+  // the token grants — so this maps straight onto the names on screen.
+  newRoom.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
+    if (room !== newRoom && room !== null) return;
+    setTalking(speakers.map((p) => p.identity));
+  });
   newRoom.on(RoomEvent.Disconnected, () => {
+    setTalking([]);
     if (room === newRoom) {
       room = null;
       currentRoomName = null;
@@ -77,7 +151,16 @@ export async function joinVoice(
 
   try {
     await newRoom.connect(url, token);
-    await newRoom.localParticipant.setMicrophoneEnabled(micEnabled);
+    try {
+      await newRoom.localParticipant.setMicrophoneEnabled(micEnabled);
+    } catch {
+      // No microphone, or permission refused. The player is muted whatever
+      // they last chose, and the button below is about to say so.
+      onStatus("Your microphone could not be opened", true);
+    }
+    // What the ROOM ended up with, not what we asked it for. Carrying the
+    // intent across rooms is how the button came to disagree with the sound.
+    setMic(newRoom.localParticipant.isMicrophoneEnabled);
     room = newRoom;
     currentRoomName = roomName;
     // No success toast — squadding up fires this on every join and the popup
@@ -92,6 +175,7 @@ export async function leaveVoice(): Promise<void> {
   const r = room;
   room = null;
   currentRoomName = null;
+  setTalking([]);
   await r.disconnect();
 }
 
@@ -101,7 +185,12 @@ export async function leaveVoice(): Promise<void> {
  *  does not have. Throws in that case — callers show the failure. */
 export async function toggleMic(): Promise<boolean> {
   const next = !micEnabled;
-  if (room) await room.localParticipant.setMicrophoneEnabled(next);
-  micEnabled = next;
+  if (room) {
+    await room.localParticipant.setMicrophoneEnabled(next);
+    setMic(room.localParticipant.isMicrophoneEnabled);
+  } else {
+    // Not in a room yet: this is an intent, applied when one is joined.
+    setMic(next);
+  }
   return micEnabled;
 }

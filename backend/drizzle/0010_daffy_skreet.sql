@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "voice_recordings_live_track_key" ON "voice_recordings" USING btree ("match_key","track_sid") WHERE status <> 'failed';

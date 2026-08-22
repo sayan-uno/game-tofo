@@ -81,6 +81,16 @@ async function writeSnapshot(io: Server): Promise<void> {
     rssMb: String(Math.round(process.memoryUsage().rss / 1048576)),
   };
 
+  // Once a minute, the same numbers go into Postgres as well. The live
+  // snapshot answers "what is happening"; this answers "what WAS happening" —
+  // and, because a minute with no row is a minute nothing was written, it is
+  // also the only record of an outage that happened while nobody was watching.
+  const minute = Math.floor(Date.now() / 60_000);
+  if (minute !== lastHistoryMinute) {
+    lastHistoryMinute = minute;
+    void writeHistory(snapshot, queue).catch((err) => console.error("[ops] history:", err));
+  }
+
   await redis
     .multi()
     .hset(liveKey(config.instanceId), snapshot)
@@ -110,3 +120,42 @@ export function stopOpsSnapshot(): void {
 /** Used by the self-check, and by the console when it wants one fresh read
  *  rather than whatever the last tick left. */
 export const writeSnapshotNow = writeSnapshot;
+
+/** The minute whose row has already been written, so a two-second snapshot
+ *  writes one row a minute rather than thirty. */
+let lastHistoryMinute = 0;
+
+async function writeHistory(snapshot: Record<string, string>, queue: Record<string, number>): Promise<void> {
+  const { db } = await import("../db/client.js");
+  const { platformHistory } = await import("../db/schema.js");
+  await db
+    .insert(platformHistory)
+    .values({
+      at: new Date(Math.floor(Date.now() / 60_000) * 60_000),
+      instance: config.instanceId,
+      online: Number(snapshot.online),
+      sockets: Number(snapshot.sockets),
+      matches: Number(snapshot.matches),
+      matchPlayers: Number(snapshot.matchPlayers),
+      matchBots: Number(snapshot.matchBots),
+      queued: Object.values(queue).reduce((n, v) => n + v, 0),
+      rssMb: Number(snapshot.rssMb),
+      byGame: JSON.parse(snapshot.matchesByGame) as Record<string, number>,
+    })
+    // Two snapshots in the same minute (a restart, a clock nudge) must not be
+    // an error: the first one written is the one that stands.
+    .onConflictDoNothing();
+}
+
+/** Thirty days of minutes, then they go — the same rule as everything else. */
+export async function sweepHistory(): Promise<number> {
+  const { db } = await import("../db/client.js");
+  const { platformHistory } = await import("../db/schema.js");
+  const { sql } = await import("drizzle-orm");
+  const gone = await db
+    .delete(platformHistory)
+    .where(sql`${platformHistory.at} < now() - interval '30 days'`)
+    .returning({ id: platformHistory.id });
+  if (gone.length > 0) console.log(`✔ Swept ${gone.length} minute(s) of platform history`);
+  return gone.length;
+}

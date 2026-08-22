@@ -3414,6 +3414,37 @@ body {
 @keyframes startPulse {
   50% { opacity: 0.7; }
 }
+/* A member's two controls, under START. Deliberately quieter than START
+   itself: agreeing is a small act, and the loud button in this corner belongs
+   to the person who actually begins the match. */
+.ready-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+.ready-row.hidden { display: none; }
+.ready-btn {
+  font-family: var(--display-font);
+  letter-spacing: 0.08em;
+  font-size: 12.5px;
+  padding: 8px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.06);
+  color: #f2eef0;
+}
+/* Green, not crimson: this is agreement, and crimson is the platform's
+   "act now" colour — it belongs to START and to nothing next to it. */
+.ready-btn.on {
+  border-color: rgba(120, 220, 160, 0.65);
+  background: linear-gradient(135deg, rgba(120, 220, 160, 0.24), rgba(120, 220, 160, 0.1));
+  color: #d8ffe9;
+}
+.object-btn { font-size: 11.5px; padding: 7px 11px; }
+.object-btn.hidden { display: none; }
+
 .game-start-hint {
   display: flex;
   align-items: center;
@@ -3883,9 +3914,17 @@ body.in-match .chat-panel {
 }
 .mr-actions {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
   gap: 8px;
   margin-top: 14px;
+}
+/* The clock that takes everybody home. Pushed to the left of the buttons and
+   deliberately quiet: it is a reassurance, not a threat. */
+.mr-countdown {
+  margin-right: auto;
+  font-size: 12px;
+  color: #c9c1c4;
 }
 @media (max-height: 520px) {
   .mr-card {
@@ -3975,4 +4014,269 @@ body.in-match .chat-panel {
   .ms-card { padding: 12px 16px 10px; }
   .ms-title { font-size: 18px; margin-bottom: 8px; }
   .ms-count { font-size: 20px; }
+}
+
+
+/* ---- what the platform says ------------------------------------------- */
+/* A notice is read and dismissed; a maintenance curtain is not. They share a
+   card so they read as the same voice, and differ in exactly one way: whether
+   there is a way out of it. */
+.pf-notice, .pf-curtain {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 60;
+  background: rgba(6, 3, 5, 0.72);
+  backdrop-filter: blur(3px);
+}
+/* The curtain sits above everything, including the match HUD, and takes the
+   pointer with it: while the platform is down, every control underneath would
+   fail, and a button that looks pressable and is not is worse than one that
+   is plainly out of reach. */
+.pf-curtain { z-index: 90; background: rgba(6, 3, 5, 0.9); }
+
+.pf-notice .pf-card, .pf-curtain .pf-card {
+  width: 100%;
+  max-width: 460px;
+  background: linear-gradient(180deg, rgba(38, 10, 16, 0.96), rgba(18, 6, 10, 0.96));
+  border: 1px solid rgba(255, 90, 110, 0.55);
+  border-radius: 14px;
+  padding: 22px 24px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
+}
+.pf-kicker {
+  font-family: var(--mono, monospace);
+  font-size: 10.5px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #ff8b9b;
+  margin-bottom: 8px;
+}
+.pf-title { margin: 0 0 8px; font-family: var(--display-font); font-size: 22px; color: #fff; }
+/* pre-line: the message is written by a person in a console, and the line
+   breaks they typed are part of what they wrote. */
+.pf-msg { margin: 0; font-size: 14px; line-height: 1.5; color: #f4eaec; white-space: pre-line; }
+.pf-sub { margin: 12px 0 0; font-size: 12.5px; color: #c9a8ae; }
+.pf-actions { display: flex; justify-content: flex-end; margin-top: 16px; }
+
+/* Mid-match: a line in the corner, not a dialog. This player has the most to
+   lose from being interrupted and the least attention to spare. */
+.pf-banner {
+  position: fixed;
+  top: 10px;
+  left: 10px;
+  z-index: 70;
+  font-size: 12px;
+  color: #ffd9df;
+  background: rgba(120, 12, 26, 0.86);
+  border: 1px solid rgba(255, 90, 110, 0.5);
+  border-radius: 8px;
+  padding: 6px 10px;
+  pointer-events: none;
+}
+
+/* ---- events ------------------------------------------------------------ */
+/* A picture the platform wants seen, with one obvious way out of it. The close
+   control is a real button in the corner rather than a click-anywhere
+   backdrop: an event that vanishes when somebody taps the picture is an event
+   whose "See it" never gets pressed. */
+.ev-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 58;
+  background: rgba(6, 3, 5, 0.78);
+  backdrop-filter: blur(3px);
+}
+.ev-card {
+  position: relative;
+  width: min(560px, 100%);
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  background: #120a0e;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
+}
+.ev-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(8, 4, 6, 0.75);
+  color: #f2eef0;
+  font-size: 13px;
+  cursor: pointer;
+}
+.ev-media { overflow: auto; background: #0b0507; }
+
+.ev-media.clickable { cursor: pointer; }
+.ev-media { display: flex; align-items: center; justify-content: center; max-height: 70vh; }
+.ev-media img, .ev-media video {
+  display: block;
+  max-width: 100%;
+  max-height: 70vh;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+}
+.ev-foot { display: flex; align-items: center; gap: 12px; padding: 13px 16px; }
+.ev-title { margin: 0; flex: 1; font-family: var(--display-font); font-size: 16px; color: #f6f1f3; }
+
+/* The list, in the same shape as the notice panel — they are two kinds of the
+   same thing and should not need learning twice. */
+.ev-list {
+  position: fixed;
+  top: 64px;
+  right: 14px;
+  width: min(340px, calc(100vw - 28px));
+  max-height: min(420px, 70vh);
+  display: flex;
+  flex-direction: column;
+  z-index: 55;
+  background: rgba(14, 8, 11, 0.97);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+.ev-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 11px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  font-family: var(--display-font);
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  color: #f2eef0;
+}
+.ev-list-head .ev-close { position: static; width: auto; height: auto; border: 0; background: none; }
+.ev-list-body { overflow-y: auto; }
+.ev-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 11px 14px;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  color: #f2eef0;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.ev-row:hover { background: rgba(255, 255, 255, 0.05); }
+.ev-row-title { flex: 1; }
+.ev-pin {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #ff8b9b;
+  border: 1px solid rgba(255, 90, 110, 0.4);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.ev-empty { margin: 0; padding: 14px; font-size: 12.5px; color: #9a9098; }
+
+/* The item an event sent them to, so it is obvious which one is meant. */
+.cl-card.cl-focus { outline: 2px solid var(--crimson, #e5182e); outline-offset: 2px; }
+
+
+/* ---- the events / notices page ---------------------------------------- */
+/* Full screen, like the locker. A panel in the corner reads as a
+   notification; these are pages somebody came to look at. Both use one shell
+   because they are two kinds of the same thing and should not need learning
+   twice: a list down the side, the chosen one filling the rest. */
+.ev-page {
+  position: fixed;
+  inset: 0;
+  z-index: 62;
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(180deg, #120a0e 0%, #0b0507 60%);
+}
+.ev-head { display: flex; align-items: center; gap: 12px; padding: 14px 18px; border-bottom: 1px solid rgba(255,255,255,.08); }
+.ev-back {
+  width: 36px; height: 36px; flex: none; border-radius: 9px;
+  border: 1px solid rgba(255,255,255,.16); background: rgba(255,255,255,.05);
+  color: #f2eef0; font-size: 20px; line-height: 1; cursor: pointer;
+}
+.ev-kicker { font-family: var(--mono, monospace); font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: #ff8b9b; }
+.ev-head-text h1 { margin: 2px 0 0; font-family: var(--display-font); font-size: 20px; color: #fff; }
+
+.ev-body { flex: 1; display: flex; min-height: 0; }
+.ev-rail {
+  width: 260px; flex: none; overflow-y: auto; padding: 10px;
+  border-right: 1px solid rgba(255,255,255,.08);
+}
+.ev-tile {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 12px 13px; margin-bottom: 8px; border-radius: 10px;
+  border: 1px solid rgba(255,255,255,.1); background: rgba(255,255,255,.04);
+  color: #e9e3e6; font-size: 13.5px; text-align: left; cursor: pointer;
+}
+.ev-tile:hover { background: rgba(255,255,255,.08); }
+/* The one being read, marked in the platform's own colour. */
+.ev-tile.on { border-color: rgba(255,90,110,.6); background: rgba(255,90,110,.12); color: #fff; }
+.ev-tile-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ev-pin {
+  font-size: 9.5px; letter-spacing: .1em; text-transform: uppercase; color: #ff8b9b;
+  border: 1px solid rgba(255,90,110,.45); border-radius: 4px; padding: 1px 5px; flex: none;
+}
+
+.ev-main { flex: 1; min-width: 0; overflow-y: auto; padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; }
+/* The picture, WHOLE. Sized to fit the space rather than stretched to fill it:
+   an event banner can be any shape an admin uploads, and `width:100%` on a
+   tall one pushed the title off the bottom of the page and cropped the part
+   that mattered. `contain` shows all of it, letterboxed, whatever its shape. */
+.ev-hero {
+  border-radius: 12px;
+  overflow: hidden;
+  background: #0b0507;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Leaves room for the header, the title row and the button underneath. */
+  max-height: 62vh;
+}
+.ev-hero img, .ev-hero video {
+  display: block;
+  max-width: 100%;
+  max-height: 62vh;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+}
+/* Markup an admin wrote gets the same box but keeps its own flow. */
+.ev-hero > *:not(img):not(video) { max-width: 100%; }
+.ev-main-foot { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.ev-main-foot h2 { margin: 0; flex: 1; font-family: var(--display-font); font-size: 18px; color: #f6f1f3; }
+.ev-main-foot time { font-size: 11.5px; color: #9a9098; }
+.ev-empty { margin: auto; font-size: 13px; color: #9a9098; }
+
+/* A notice being read: no picture, so the words carry it. */
+.nt-read { max-width: 640px; }
+.nt-read time { display: block; font-size: 11.5px; color: #9a9098; margin-bottom: 8px; }
+.nt-read p { margin: 0; font-size: 15px; line-height: 1.55; color: #f2eef0; white-space: pre-line; }
+
+/* Narrow screens: the rail becomes a strip along the top. */
+@media (max-width: 720px) {
+  .ev-body { flex-direction: column; }
+  .ev-rail { width: auto; display: flex; gap: 8px; overflow-x: auto; border-right: 0; border-bottom: 1px solid rgba(255,255,255,.08); }
+  .ev-tile { width: auto; margin-bottom: 0; white-space: nowrap; }
 }

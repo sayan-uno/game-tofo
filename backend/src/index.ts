@@ -11,6 +11,8 @@ import { chatRouter } from "./routes/chat.js";
 import { profileRouter } from "./routes/profile.js";
 import { collectionRouter } from "./routes/collection.js";
 import { gamesRouter } from "./routes/games.js";
+import { noticesRouter } from "./routes/notices.js";
+import { playerEventsRouter } from "./routes/events.js";
 // Registers every game with the platform (one import per game folder).
 import "./games/index.js";
 import { registerSockets } from "./sockets/index.js";
@@ -18,11 +20,14 @@ import { startMatchmaker } from "./platform/matchmaking.js";
 import { clearStaleMatchState } from "./platform/store.js";
 import { startChatRetention } from "./services/chat.js";
 import { botTelemetry } from "./platform/bots.js";
-import { clearOnlineSet } from "./redis.js";
+import { clearOnlineSet, clearStalePresence } from "./redis.js";
+import { gateReason, gateShut, getFlags, setGate, startMaintenanceWatch } from "./platform/flags.js";
+import { refreshWithdrawn, startWithdrawnWatch } from "./platform/gameLocks.js";
 import { flushEvents, startEventLog, stopEventLog } from "./services/eventLog.js";
 import { warmSanctionCache } from "./services/sanctions.js";
 import { startOpsSnapshot, stopOpsSnapshot } from "./platform/ops.js";
 import { startOpsCommands, stopOpsCommands } from "./platform/opsCommands.js";
+import { readiness as voiceReadiness, warmVoiceTargets } from "./platform/voiceRecording.js";
 import {
   drainReplays,
   startReplaySweeper,
@@ -56,7 +61,20 @@ if (config.role === "game") {
     })
   );
 }
-app.use(express.json({ limit: "100kb" }));
+// Bodies are capped tight, with ONE exception that has to be declared here
+// rather than on the route.
+//
+// A route-level parser cannot raise a limit the global one has already
+// enforced: this middleware runs first, and a twelve-megabyte upload was being
+// rejected as too large before the route that knows how to accept it was ever
+// reached. So the upload path is skipped here and parses its own body, with
+// its own limit, in one place — every other route keeps the tight cap.
+const tightJson = express.json({ limit: "100kb" });
+app.use((req, res, next) => {
+  const isUpload = req.method === "POST" && /\/events$/.test(req.path);
+  if (isUpload) return next();
+  return tightJson(req, res, next);
+});
 
 app.get("/health", (_req, res) => res.json({ ok: true, service: "tofo-games-backend" }));
 
@@ -102,7 +120,18 @@ const io = new Server(server, {
 // sockets — so the player sits on FINDING PLAYERS for ever while the other
 // process's log cheerfully reports a match starting. This branch is what makes
 // running a second process safe at all.
-if (config.role === "game") {
+if (config.role === "recorder") {
+  // Nothing is served. The recorder talks to LiveKit and Redis and to nobody
+  // else; there is no route worth exposing and every one would be a way in.
+} else if (config.role === "game") {
+  // EVERY game route, shut. Before any of them, so nothing has to remember to
+  // check — a gate somebody can forget to apply to their new endpoint is not a
+  // gate. The admin console is a different process on a different port with
+  // its own routes, so this cannot lock an admin out of ending it.
+  app.use("/api", (req, res, next) => {
+    if (!gateShut()) return next();
+    res.status(503).json({ error: gateReason(), code: "MAINTENANCE" });
+  });
   app.use("/api/auth", authRouter);
   app.use("/api/friends", friendsRouter(io));
   app.use("/api/voice", voiceRouter);
@@ -110,7 +139,8 @@ if (config.role === "game") {
   app.use("/api/profile", profileRouter);
   app.use("/api/collection", collectionRouter(io));
   app.use("/api/games", gamesRouter);
-
+  app.use("/api/notices", noticesRouter);
+  app.use("/api/events", playerEventsRouter);
   registerSockets(io);
   // The packer: fills waiting parties from the pool, then with bots.
   startMatchmaker(io);
@@ -135,6 +165,12 @@ async function start() {
     // Same reasoning for the online set: nobody can be connected to a process
     // that has not started, so whatever is in there is a leftover.
     await clearOnlineSet();
+    // …and the per-player keys behind it. Until these carried a TTL the only
+    // thing that removed one was a clean disconnect, so a crash or a deploy
+    // left everybody who happened to be playing marked online for ever — the
+    // friends list showing people who had not been there for days.
+    const ghosts = await clearStalePresence();
+    if (ghosts > 0) console.log(`✔ Cleared ${ghosts} presence key(s) left by a previous run`);
     // Enforcement reads Redis, so Redis has to know. Without this a flushed
     // cache silently un-bans everyone until their next sanction change.
     const warmed = await warmSanctionCache();
@@ -146,10 +182,56 @@ async function start() {
     if (flagged > 0) console.log(`✔ ${flagged} player(s) on extended replay retention`);
     startReplayWorker();
     startReplaySweeper();
+    // A party marked live at boot cannot be — nobody is in it.
+    const { closeStaleParties } = await import("./platform/partyLog.js");
+    await closeStaleParties().catch((e) => console.error("[party] recover:", e));
+    const voice = await warmVoiceTargets();
+    if (voice > 0) console.log(`✔ ${voice} player(s) flagged for voice recording`);
+    // Say it at boot rather than at the moment somebody needed the audio:
+    // switched on with nowhere to write is the one failure here that looks
+    // like nothing at all until it is quoted as evidence.
+    // Read before anything is served: an instance that comes up during a
+    // maintenance window must not answer a single request first.
+    const bootFlags = await getFlags();
+    setGate(bootFlags.maintenance, bootFlags.maintenanceMessage);
+    if (bootFlags.maintenance) console.log("⚠ Starting INTO a maintenance window — the platform is shut");
+
+    // Withdrawn items, into memory before the first lobby is drawn: the
+    // resolvers read them synchronously on every broadcast.
+    const pulled = await refreshWithdrawn();
+    if (pulled > 0) console.log(`✔ ${pulled} catalogue item(s) withdrawn`);
+    startWithdrawnWatch();
+
+    const voiceState = voiceReadiness();
+    if (config.voiceRecording.enabled && !voiceState.ready) {
+      console.warn(`⚠ Voice recording is switched ON but cannot run: ${voiceState.why}`);
+    }
     startOpsSnapshot(io);
     startOpsCommands(io);
+    // When a scheduled window falls due: tell everybody, and end every match
+    // rather than let them run into a restart that would drop them anyway.
+    startMaintenanceWatch(async (flags) => {
+      io.emit("platform:maintenance", { active: true, at: flags.maintenanceAt, message: flags.maintenanceMessage });
+      const { endAllMatches } = await import("./platform/match.js");
+      await endAllMatches(io, "maintenance");
+      // …and close every connection. The page can be edited; the socket
+      // cannot. See the ops command for the reasoning.
+      setTimeout(() => {
+        for (const s of io.sockets.sockets.values()) s.disconnect(true);
+      }, 1500);
+    });
+  } else if (config.role === "recorder") {
+    const { startRecorder } = await import("./recorder/index.js");
+    await startRecorder();
   } else {
     await prepareAdmin();
+  }
+
+  // The recorder has no HTTP surface; a listening socket would only be one
+  // more thing that can be reached.
+  if (config.role === "recorder") {
+    console.log(`✔ TOFO recorder running (role: recorder)`);
+    return;
   }
 
   server.listen(config.port, () => {

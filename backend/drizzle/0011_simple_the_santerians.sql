@@ -1,0 +1,2 @@
+ALTER TABLE "voice_recordings" ADD COLUMN "scope" varchar(8) DEFAULT 'match' NOT NULL;--> statement-breakpoint
+ALTER TABLE "voice_recordings" ADD CONSTRAINT "voice_recordings_scope_check" CHECK (scope IN ('match','lobby'));

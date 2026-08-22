@@ -2,14 +2,26 @@
 //
 // Maintenance mode turns new connections away — but leaves matches already
 // running alone, because cutting those short is the thing maintenance is
-// trying to avoid. The notice is pushed to everyone already online, which is
-// why it goes out over the command channel rather than just being stored.
+// trying to avoid. Messages to players are NOT here: they live in Notices, so
+// that every send is a row somebody can look at, resend, or take back.
 import { ApiFailure, call } from "../api";
 import { ask } from "../modal";
 import { withSudo } from "../sudo";
 import { esc, toast } from "../ui";
 
-interface Flags { maintenance: boolean; maintenanceMessage: string; notice: string }
+interface Flags {
+  maintenance: boolean;
+  /** Epoch ms the window opens; 0 when nothing is scheduled. */
+  maintenanceAt: number;
+  maintenanceMessage: string;
+}
+
+/** A datetime-local value, in the admin's own timezone. */
+const localValue = (ms: number): string => {
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
 
 export function mountPlatform(host: HTMLElement, role: string): () => void {
   let cancelled = false;
@@ -22,46 +34,68 @@ export function mountPlatform(host: HTMLElement, role: string): () => void {
         <header><h2>Switches</h2></header>
         <div class="switch">
           <div class="txt">
-            <b>Maintenance mode ${f.maintenance ? "— ON" : "— off"}</b>
+            <b>Maintenance ${f.maintenance ? "— HAPPENING NOW" : f.maintenanceAt ? "— scheduled" : "— off"}</b>
             <span>${
               f.maintenance
-                ? "Nobody new can connect. Matches already running are left to finish."
-                : "Players can connect normally."
+                ? `Everybody is being held behind a notice they cannot close. ${esc(f.maintenanceMessage)}`
+                : f.maintenanceAt
+                  ? `Starts ${new Date(f.maintenanceAt).toLocaleString()}. Everyone online has been told; matches running then will be ended.`
+                  : "Players can connect and play normally."
             }</span>
           </div>
-          <button class="btn ${f.maintenance ? "ghost" : ""}" id="maint" ${senior ? "" : "disabled"}>
-            ${f.maintenance ? "Turn off" : "Turn on"}
-          </button>
+          ${
+            f.maintenance || f.maintenanceAt
+              ? `<button class="btn ghost" id="maintoff" ${senior ? "" : "disabled"}>${
+                  f.maintenance ? "End it" : "Call it off"
+                }</button>`
+              : `<button class="btn" id="maintplan" ${senior ? "" : "disabled"}>Schedule it</button>`
+          }
         </div>
-        <div class="switch">
-          <div class="txt">
-            <b>Notice to everyone online</b>
-            <span>${f.notice ? esc(f.notice) : "Nothing is being shown."}</span>
-          </div>
-          <button class="btn ghost" id="notice" ${senior ? "" : "disabled"}>Send</button>
-        </div>
+        ${
+          f.maintenance || f.maintenanceAt
+            ? ""
+            : `<div class="switch">
+                 <div class="txt">
+                   <b>Start it right now</b>
+                   <span>No warning, every match ended on the spot. For an emergency — otherwise schedule it.</span>
+                 </div>
+                 <button class="btn ghost" id="maintnow" ${senior ? "" : "disabled"}>Start now</button>
+               </div>`
+        }
       </div>
+      <div class="card"><div class="pad" style="font-size:13.5px">
+        Sending a message to players lives in <strong>Notices</strong>, where every send is recorded
+        and can be taken back. It used to be here too, which meant a notice sent from this screen
+        appeared on nobody's list and could not be undone.
+      </div></div>
       ${senior ? "" : `<p class="muted" style="font-size:12.5px">These are admin and owner actions. You can see them, not change them.</p>`}`;
 
     if (!senior) return;
 
-    host.querySelector<HTMLButtonElement>("#maint")!.onclick = async () => {
-      const turningOn = !f.maintenance;
+    host.querySelector<HTMLButtonElement>("#maintplan")?.addEventListener("click", async () => {
       const answer = await ask({
-        title: turningOn ? "Turn maintenance mode ON?" : "Turn maintenance mode off?",
-        intro: turningOn
-          ? "Nobody new will be able to connect. Matches already running will be left to finish."
-          : "Players will be able to connect again straight away.",
-        confirm: turningOn ? "Turn it on" : "Turn it off",
-        fields: turningOn
-          ? [{ name: "message", label: "What players are told", value: "TOFO is down for maintenance — back shortly." }]
-          : [],
+        title: "Schedule maintenance",
+        intro:
+          "Everyone online is told straight away. Anybody mid-match sees a line in the corner; " +
+          "when the window opens every match is ended and nobody can play until you end it.",
+        confirm: "Schedule it",
+        fields: [
+          { name: "at", label: "When it starts", type: "text", value: localValue(Date.now() + 45 * 60_000) },
+          {
+            name: "message",
+            label: "What players are told",
+            type: "textarea",
+            value: "TOFO is going down for a short update — back shortly.",
+          },
+        ],
         async onSubmit(v) {
+          const at = new Date(v.at).getTime();
+          if (!Number.isFinite(at)) return "That is not a time I can read.";
           try {
             const done = await withSudo(() =>
               call<{ flags: Flags }>("/platform", {
                 method: "POST",
-                body: JSON.stringify({ maintenance: turningOn, maintenanceMessage: v.message ?? undefined }),
+                body: JSON.stringify({ maintenanceAt: at, maintenanceMessage: v.message }),
               })
             );
             return done === null ? "Cancelled." : null;
@@ -71,22 +105,48 @@ export function mountPlatform(host: HTMLElement, role: string): () => void {
         },
       });
       if (answer) {
-        toast(turningOn ? "Maintenance mode is on." : "Maintenance mode is off.");
+        toast("Maintenance scheduled. Everyone online has been told.");
         void load();
       }
-    };
+    });
 
-    host.querySelector<HTMLButtonElement>("#notice")!.onclick = async () => {
+    host.querySelector<HTMLButtonElement>("#maintoff")?.addEventListener("click", async () => {
+      try {
+        const done = await withSudo(() =>
+          call<{ flags: Flags }>("/platform", { method: "POST", body: JSON.stringify({ maintenanceAt: 0 }) })
+        );
+        if (done === null) return;
+        toast("Maintenance is off. Players can get back in.");
+        void load();
+      } catch (e) {
+        toast(e instanceof ApiFailure ? e.info.error : "That did not work");
+      }
+    });
+
+    host.querySelector<HTMLButtonElement>("#maintnow")?.addEventListener("click", async () => {
       const answer = await ask({
-        title: "Send a notice",
-        intro: "It appears for everyone who is online right now.",
-        confirm: "Send it",
-        fields: [{ name: "notice", label: "Message", type: "textarea", placeholder: "e.g. Ranked resets in 10 minutes." }],
+        title: "Start maintenance NOW?",
+        intro:
+          "No warning is given. Every match in progress ends immediately and every player is held " +
+          "behind a notice they cannot close. Schedule it instead unless this is an emergency.",
+        confirm: "Start it now",
+        danger: true,
+        fields: [
+          {
+            name: "message",
+            label: "What players are told",
+            type: "textarea",
+            value: "TOFO is down for maintenance — back shortly.",
+          },
+        ],
         async onSubmit(v) {
-          if (v.notice.trim().length < 3) return "Write something first.";
+          if ((v.message ?? "").trim().length < 4) return "Say what is happening — every player is shown this.";
           try {
             const done = await withSudo(() =>
-              call("/platform", { method: "POST", body: JSON.stringify({ notice: v.notice.trim() }) })
+              call<{ flags: Flags }>("/platform", {
+                method: "POST",
+                body: JSON.stringify({ maintenance: true, maintenanceMessage: v.message }),
+              })
             );
             return done === null ? "Cancelled." : null;
           } catch (e) {
@@ -95,10 +155,11 @@ export function mountPlatform(host: HTMLElement, role: string): () => void {
         },
       });
       if (answer) {
-        toast("Notice sent.");
+        toast("Maintenance has started.");
         void load();
       }
-    };
+    });
+
   };
 
   const load = async () => {

@@ -33,6 +33,7 @@ await redis.connect();
 if (mode === "clean") {
   const { rows } = await pool.query("select r2_key from match_replays where match_key = $1", [arg]);
   if (rows[0]) await deleteEvidence([rows[0].r2_key]);
+  await pool.query("delete from voice_recordings where match_key = $1", [arg]);
   await pool.query("delete from match_replays where match_key = $1", [arg]);
   redis.disconnect();
   await pool.end();
@@ -130,5 +131,24 @@ console.log(
     standings: standings.map((st) => ({ uid: st.uid, placement: st.placement, score: st.score })),
   })
 );
+// A voice file that OUTLASTS the match, which is the ordinary case: the
+// scoreboard is up for five seconds and everybody is still in the room. The
+// studio's timeline used to end at the final tick, so this stretch — recorded
+// correctly, sitting in the file — could not be scrubbed to or played. There
+// is no audio behind this row and there does not need to be: what is being
+// checked is that the timeline reaches it.
+const tailStart = Math.round((endTick / file.tickRate) * 1000) - 1000;
+await pool.query(
+  `insert into voice_recordings
+     (match_key, scope, uid, r2_key, kind, offset_ms, duration_sec, status, bytes, speech, ended_at)
+   values ($1, 'match', 'u0', $2, 'track', $3, 8, 'complete', 1024, $4, now())`,
+  [
+    matchKey,
+    `voice/${matchKey}/e2e-tail.ogg`,
+    tailStart,
+    JSON.stringify([[tailStart + 2000, tailStart + 6000]]),
+  ]
+);
+
 redis.disconnect();
 await pool.end();

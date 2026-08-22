@@ -57,6 +57,83 @@
       "when": 1787036366945,
       "tag": "0007_lame_winter_soldier",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1787068973720,
+      "tag": "0008_powerful_archangel",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1787134934650,
+      "tag": "0009_real_warbird",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1787135356289,
+      "tag": "0010_daffy_skreet",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1787138302169,
+      "tag": "0011_simple_the_santerians",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1787141624041,
+      "tag": "0012_big_colonel_america",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1787216630348,
+      "tag": "0013_lying_kree",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1787228001135,
+      "tag": "0014_brave_hobgoblin",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1787231089183,
+      "tag": "0015_brief_wrecker",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1787242827329,
+      "tag": "0016_graceful_the_fury",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1787396371315,
+      "tag": "0017_far_blue_marvel",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1787399123599,
+      "tag": "0018_dry_luckman",
+      "breakpoints": true
     }
   ]
 }

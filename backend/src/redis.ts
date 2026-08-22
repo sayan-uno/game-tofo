@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Redis } from "ioredis";
 import { config } from "./config.js";
 
@@ -6,8 +7,26 @@ export const redis = new Redis(config.redisUrl, {
   maxRetriesPerRequest: 2,
 });
 
-// ---- Presence (who is online, and on which socket) ----
+// ---- Presence -------------------------------------------------------------
+//
+// TWO different questions, deliberately kept apart, because answering them
+// with one key is what made the friends list lie.
+//
+//   WHERE IS THIS PLAYER'S SOCKET?  `presence:<id>` holds the socket id, and
+//   lives as long as the connection does. Invites, kicks and match joins are
+//   delivered through it, so it must NOT disappear because somebody glanced at
+//   another tab — that would silently make them un-invitable.
+//
+//   IS THIS PLAYER ACTUALLY HERE?  `here:<id>` is refreshed by a heartbeat the
+//   page sends only while it is VISIBLE, and expires on its own. Minimise the
+//   game, switch app, put the phone in a pocket — it lapses, and the friends
+//   list says offline. This is the one the console and the friends list read.
+//
+// Both carry a TTL now. Neither did before, and a process that went away
+// without running its disconnect handlers — a crash, a kill, a Railway deploy
+// — left people marked online for ever, with nothing to ever take it back.
 const presenceKey = (userId: string) => `presence:${userId}`;
+const hereKey = (userId: string) => `here:${userId}`;
 // A parallel SET of everyone online. The per-user keys answer "where is this
 // player's socket"; this answers "how many are there", which the admin
 // console asks on every dashboard load. Counting the per-user keys would mean
@@ -15,13 +34,59 @@ const presenceKey = (userId: string) => `presence:${userId}`;
 // command per connect and per disconnect, and nothing per event.
 const ONLINE_KEY = "presence:online";
 
+/** Generous: this is a leak guard, not the liveness signal. A connection that
+ *  is genuinely alive refreshes it on every heartbeat. */
+const PRESENCE_TTL = 90;
+/** Tight: two missed heartbeats and they are gone. The heartbeat is every
+ *  four seconds, so this is the "ten seconds and you are offline" rule. */
+export const HERE_TTL = 11;
+
 export async function setOnline(userId: string, socketId: string) {
-  await redis.multi().set(presenceKey(userId), socketId).sadd(ONLINE_KEY, userId).exec();
+  await redis
+    .multi()
+    .set(presenceKey(userId), socketId, "EX", PRESENCE_TTL)
+    .set(hereKey(userId), "1", "EX", HERE_TTL)
+    .sadd(ONLINE_KEY, userId)
+    .exec();
+}
+
+/** The page said it is open AND in front of somebody. One round trip, two
+ *  cheap commands, once every four seconds per player.
+ *
+ *  Note what this does NOT touch: the socket registry. That is kept alive by
+ *  the server for as long as the connection exists (below), because a player
+ *  who has put their phone down is still someone an invite must reach. */
+export async function touchHere(userId: string) {
+  await redis.multi().set(hereKey(userId), "1", "EX", HERE_TTL).sadd(ONLINE_KEY, userId).exec();
+}
+
+/** The connection is still up. Refreshed by the server on a slow timer rather
+ *  than by the client, so a page that never sends a heartbeat — an older build
+ *  still cached on somebody's phone — cannot lose its socket registration and
+ *  quietly become un-invitable. */
+export const touchSocket = (userId: string): Promise<number> => redis.expire(presenceKey(userId), PRESENCE_TTL);
+
+/** Still connected, but not looking: the tab is hidden or the app is in the
+ *  background. The socket registry is left alone on purpose — they can still
+ *  be invited, kicked and pulled into a match. */
+export async function setAway(userId: string) {
+  await redis.multi().del(hereKey(userId)).srem(ONLINE_KEY, userId).exec();
 }
 
 export async function setOffline(userId: string) {
-  await redis.multi().del(presenceKey(userId)).srem(ONLINE_KEY, userId).exec();
+  await redis.multi().del(presenceKey(userId), hereKey(userId)).srem(ONLINE_KEY, userId).exec();
 }
+
+/** Is this one player here right now? */
+export const isHere = async (userId: string): Promise<boolean> => (await redis.exists(hereKey(userId))) === 1;
+
+/** Everybody here right now, as UIDs.
+ *
+ *  The set holds internal ids, so this joins nothing and returns nothing a
+ *  caller can use directly — the caller that needs names asks the database.
+ *  Used when a notice is addressed to "whoever is online", so the record can
+ *  say who that actually was rather than leaving it unanswerable a day later. */
+export const onlineUserIds = (): Promise<string[]> => redis.smembers(ONLINE_KEY);
 
 /** How many players are connected right now. O(1). */
 export const countOnline = (): Promise<number> => redis.scard(ONLINE_KEY);
@@ -32,13 +97,39 @@ export const countOnline = (): Promise<number> => redis.scard(ONLINE_KEY);
  *  from the previous run and would inflate the count for ever. */
 export const clearOnlineSet = (): Promise<number> => redis.del(ONLINE_KEY);
 
+/** The per-player keys a previous run left behind. The set above is one key
+ *  and easy to drop; these are one per player, and until they carried a TTL
+ *  the only thing that ever removed them was a clean disconnect — so a crash
+ *  left its whole player list marked online, permanently. They expire on
+ *  their own now, and this clears the ones already out there. */
+export async function clearStalePresence(): Promise<number> {
+  let cursor = "0";
+  let removed = 0;
+  do {
+    // SCAN, never KEYS: this runs against the Redis the game is using, and
+    // KEYS blocks the server for the whole walk.
+    const [next, keys] = await redis.scan(cursor, "MATCH", "presence:*", "COUNT", 500);
+    cursor = next;
+    const stale = keys.filter((k) => k !== ONLINE_KEY);
+    if (stale.length > 0) removed += await redis.del(...stale);
+  } while (cursor !== "0");
+  do {
+    const [next, keys] = await redis.scan(cursor, "MATCH", "here:*", "COUNT", 500);
+    cursor = next;
+    if (keys.length > 0) removed += await redis.del(...keys);
+  } while (cursor !== "0");
+  return removed;
+}
+
 export async function getSocketId(userId: string): Promise<string | null> {
   return redis.get(presenceKey(userId));
 }
 
 export async function getOnlineSet(userIds: string[]): Promise<Set<string>> {
   if (userIds.length === 0) return new Set();
-  const values = await redis.mget(userIds.map(presenceKey));
+  // "here", not "has a socket": a connection that nobody is looking at is not
+  // somebody a friend can expect an answer from.
+  const values = await redis.mget(userIds.map(hereKey));
   const online = new Set<string>();
   values.forEach((v, i) => {
     if (v) online.add(userIds[i]);
@@ -54,6 +145,23 @@ const lobbyModeKey = (lobbyId: string) => `lobby:${lobbyId}:mode`;
 // join timestamps (ms) per member — used to pick the longest-present player
 // as the new leader when the current leader walks out.
 const lobbyJoinedKey = (lobbyId: string) => `lobby:${lobbyId}:joinedAt`;
+/** WHO LEADS, as a field.
+ *
+ *  It used to be the lobby's NAME: a lobby was `L<leaderUid>`, so the id
+ *  answered "who runs this" for free. It also meant that handing the party on
+ *  renamed it — and everything keyed by that name had to be dragged across:
+ *  membership, join times, the mode, the team code, the game pick, the chat
+ *  session, the search binding, the socket rooms. The party RECORDING could
+ *  not come with it at all, so one group turned into two in the console, the
+ *  first still marked live, and voice had to leave one room and join another.
+ *
+ *  A party is now named once and keeps that name. This is the only thing that
+ *  moves when leadership does. */
+const lobbyLeaderKey = (lobbyId: string) => `lobby:${lobbyId}:leader`;
+/** A backstop only. Every path that dissolves a party clears this; the TTL is
+ *  there so a process killed mid-flight cannot leave a party permanently led
+ *  by somebody who is no longer in it. Twelve hours matches the party log. */
+const LOBBY_TTL = 12 * 60 * 60;
 
 // Free Fire-style party modes. The mode belongs to the lobby (i.e. its
 // leader) and caps how many players can join. "solo" means not in a group at
@@ -89,6 +197,29 @@ export async function getUserLobby(userId: string): Promise<string | null> {
 
 export async function getLobbyMembers(lobbyId: string): Promise<string[]> {
   return redis.smembers(lobbyKey(lobbyId));
+}
+
+/** A party is a lobby with a name of its own; `L<uid>` is one player's own
+ *  space and is never shared. Told apart by the shape of the id so no lookup
+ *  is needed on the hot path. */
+export const isPartyLobby = (lobbyId: string): boolean => lobbyId.startsWith("P");
+/** A fresh party id. Opaque, like a match id, and permanent for the life of
+ *  the group whatever happens to its leadership. */
+export const newPartyId = (): string => `P${randomUUID().slice(0, 12)}`;
+
+export const setLobbyLeader = (lobbyId: string, userId: string): Promise<unknown> =>
+  redis.set(lobbyLeaderKey(lobbyId), userId, "EX", LOBBY_TTL);
+export const getLobbyLeader = (lobbyId: string): Promise<string | null> => redis.get(lobbyLeaderKey(lobbyId));
+export const clearLobbyLeader = (lobbyId: string): Promise<number> => redis.del(lobbyLeaderKey(lobbyId));
+
+/** May this player act as the leader here?
+ *
+ *  Their OWN lobby is theirs by definition — nobody else is in it — so the
+ *  leader key is only consulted for a real party. That keeps a solo player's
+ *  every action free of a Redis round trip. */
+export async function isLobbyLeader(lobbyId: string, userId: string, uid: string): Promise<boolean> {
+  if (!isPartyLobby(lobbyId)) return lobbyId === `L${uid}`;
+  return (await getLobbyLeader(lobbyId)) === userId;
 }
 
 // Check-capacity-then-add as ONE atomic step. A plain SCARD-then-MULTI let two
@@ -233,6 +364,21 @@ export async function getTeamCode(lobbyId: string): Promise<string | null> {
 
 export async function getTeamCodeLobby(code: string): Promise<string | null> {
   return redis.get(codeToLobbyKey(code));
+}
+
+/** Carry a code across the one rename a lobby ever gets: a personal lobby
+ *  becoming a party on its first join. Both directions of the mapping move,
+ *  so a code somebody has already shared keeps working — which is the whole
+ *  point of it, and the most likely moment for it to be in flight. */
+export async function moveTeamCode(oldLobbyId: string, newLobbyId: string): Promise<void> {
+  const code = await redis.get(lobbyToCodeKey(oldLobbyId));
+  if (!code) return;
+  await redis
+    .multi()
+    .set(codeToLobbyKey(code), newLobbyId, "EX", TEAM_CODE_TTL_SECONDS)
+    .set(lobbyToCodeKey(newLobbyId), code, "EX", TEAM_CODE_TTL_SECONDS)
+    .del(lobbyToCodeKey(oldLobbyId))
+    .exec();
 }
 
 /** Drop a lobby's code (party dissolved, or the mapping turned out stale). */

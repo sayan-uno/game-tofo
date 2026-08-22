@@ -1,4 +1,6 @@
 import { Router } from "express";
+import { logEvent } from "../services/eventLog.js";
+import { requestOrigin } from "../services/clientIp.js";
 import { requireAuth } from "../middleware/auth.js";
 import { buildProfile } from "../services/profile.js";
 import { getUserById, getUserByUid } from "../services/users.js";
@@ -27,6 +29,18 @@ profileRouter.get("/me", async (req, res) => {
  *  buildProfile blanks the owner-only fields for a viewer who isn't them.
  *  Declared after /me so that stays a route, not a UID. */
 profileRouter.get("/:uid", async (req, res) => {
+    // Looking at another player is a deliberate act, and one an investigation
+    // asks about. Their OWN profile is not logged: opening your own page says
+    // nothing about anybody.
+    if (req.params.uid !== req.auth!.uid) {
+      logEvent({
+        type: "profile.view",
+        userId: req.auth!.userId,
+        uid: req.auth!.uid,
+        ip: requestOrigin(req).ip,
+        data: { viewed: req.params.uid },
+      });
+    }
   try {
     const target = await getUserByUid(req.params.uid.trim());
     if (!target) {

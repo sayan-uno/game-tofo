@@ -38,6 +38,10 @@ export class LobbyGameController {
   private abort: AbortController | null = null;
   private inMatch = false;
   private starting = false;
+  /** Who has said they want to play this. Server-owned; we only draw it. */
+  private saidReady = new Set<string>();
+  /** Members an admin has barred from the picked game. */
+  private barred: { uid: string; why: string }[] = [];
   private lastSentAt = 0;
   private sendTimer = 0;
   private pendingPct: number | null = null;
@@ -50,7 +54,11 @@ export class LobbyGameController {
   /** The room's state changed (members, pick, progress snapshot). */
   onLobbyState(state: LobbyState): void {
     this.members = state.members;
-    this.isLeader = state.lobbyId === `L${this.deps.localUid}`;
+    this.saidReady = new Set(state.ready ?? []);
+    this.barred = state.barred ?? [];
+    // Whoever the server says leads. A party is no longer named after its
+    // leader, so the id cannot answer this any more — and should not have to.
+    this.isLeader = state.members.find((m) => m.uid === this.deps.localUid)?.isLeader === true;
     this.leaderName = state.members.find((m) => m.isLeader)?.name ?? "the leader";
     const game = state.game ?? null;
     // Server-side snapshot of everyone's progress. Ours is authoritative here
@@ -220,15 +228,44 @@ export class LobbyGameController {
       if (!this.selected) this.deps.lobby.setLoading(m.uid, null);
       else if (m.uid === this.deps.localUid) this.deps.lobby.setLoading(m.uid, this.failed ? -1 : this.myPct);
       else this.deps.lobby.setLoading(m.uid, this.pcts.get(m.uid) ?? 0);
+      // A tick beside the name. The leader is not asked — pressing START is
+      // how they say it — so ticking them would be claiming something they
+      // were never asked for.
+      this.deps.lobby.setReady(m.uid, !m.isLeader && this.saidReady.has(m.uid));
     }
     this.paintStart();
   }
 
+  /** Everyone except the leader has to agree. Pressing START is the leader
+   *  agreeing, so asking them to tick a box first would be asking twice. */
+  private consent(): { said: number; needed: number } {
+    const others = this.members.filter((m) => !m.isLeader);
+    return { said: others.filter((m) => this.saidReady.has(m.uid)).length, needed: others.length };
+  }
+
   private paintStart(): void {
     const { ready, total } = this.allReady();
-    const everyoneReady = this.selected !== null && total > 0 && ready === total;
+    const downloaded = this.selected !== null && total > 0 && ready === total;
+    const { said, needed } = this.consent();
+    const everyoneWilling = said === needed;
+    const iAmReady = this.saidReady.has(this.deps.localUid);
+
     let hint: string | null = null;
     let retry: (() => void) | undefined;
+    // Before anything else: a barred player stops this party, and the hint
+    // says WHICH. It outranks "still downloading" and "waiting for ready"
+    // because neither of those will ever resolve into a startable match.
+    const stopper = this.barred[0];
+    if (stopper) {
+      const mine = stopper.uid === this.deps.localUid;
+      const who = this.members.find((m) => m.uid === stopper.uid)?.name ?? stopper.uid;
+      this.deps.hud.setStart({
+        enabled: false,
+        hint: mine ? stopper.why : `${who} cannot play this — ${stopper.why}`,
+      });
+      this.deps.hud.setReadyUp(null);
+      return;
+    }
     if (this.inMatch) hint = "Match in progress";
     else if (!this.selected) hint = this.isLeader ? "Choose a game to start" : "Leader picks the game";
     else if (this.failed) {
@@ -236,13 +273,28 @@ export class LobbyGameController {
       retry = () => {
         if (this.selected) void this.download(this.selected);
       };
-    } else if (!everyoneReady) hint = `Downloading… ${ready}/${total} ready`;
-    else if (!this.isLeader) hint = `Waiting for ${this.leaderName} to start`;
+    } else if (!downloaded) hint = `Downloading… ${ready}/${total} ready`;
+    else if (!everyoneWilling) {
+      hint = this.isLeader
+        ? `Waiting for ${needed - said} of ${needed} to be ready`
+        : iAmReady
+          ? `Ready — waiting for ${this.leaderName}`
+          : "Say you are ready to play this";
+    } else if (!this.isLeader) hint = `Waiting for ${this.leaderName} to start`;
+
     this.deps.hud.setStart({
-      enabled: this.isLeader && everyoneReady && !this.inMatch && !this.starting,
+      enabled: this.isLeader && downloaded && everyoneWilling && !this.inMatch && !this.starting,
       busy: this.starting,
       hint,
       retry,
     });
+    // A member in a group gets their own two controls: agree to this game, or
+    // say they would rather not play it. Neither exists on your own — there is
+    // nobody to agree with.
+    this.deps.hud.setReadyUp(
+      this.isLeader || this.members.length < 2 || this.inMatch
+        ? null
+        : { ready: iAmReady, canObject: this.selected !== null }
+    );
   }
 }

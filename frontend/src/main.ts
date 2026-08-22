@@ -1,3 +1,4 @@
+import { EV } from "./shared/core/protocol";
 import "./style.css";
 import { api, getToken, clearSession } from "./api/http";
 import { connectSocket, emitAck } from "./api/socket";
@@ -8,7 +9,15 @@ import { Hud } from "./ui/hud";
 import { FriendsPanel } from "./ui/friends";
 import { ChatPanel } from "./ui/chat";
 import { toast, actionToast } from "./ui/toast";
-import { joinVoice, leaveVoice } from "./voice/livekit";
+import { showPinned, toggleEvents, type GameEvent } from "./ui/events";
+import {
+  closeNoticeList,
+  showMaintenance,
+  showNotice,
+  toggleNotices,
+  type MaintenanceState,
+} from "./ui/platformNotice";
+import { joinVoice, leaveVoice, onMicChange } from "./voice/livekit";
 import type { LobbyGameController } from "./platform/lobbyGame";
 import type { MatchClient } from "./platform/matchClient";
 import type { LobbyState, User } from "./types";
@@ -130,7 +139,7 @@ async function enterLobby(user: User) {
     if (!state) return;
     const member = state.members.find((m) => m.uid === uid);
     if (!member) return;
-    const isLeader = state.lobbyId === `L${user.uid}`;
+    const isLeader = state.members.find((m) => m.uid === user.uid)?.isLeader === true;
     void loadProfileUi()
       .then(({ card }) =>
         card.showMemberCard(member, {
@@ -158,6 +167,20 @@ async function enterLobby(user: User) {
   const renderLobby = () => lobby.scene.render();
   startRenderLoop(engine, renderLobby);
 
+  /** Open the locker on one item — what an event's "See it" does. */
+  const openCollectionAt = (itemId: string) => {
+    void collectionChunk
+      .then((m) =>
+        m.openCollection({
+          engine,
+          lobbyScene: lobby.scene,
+          restoreLobby: () => startRenderLoop(engine, renderLobby),
+          focusItem: itemId,
+        })
+      )
+      .catch(() => toast("Couldn't open your collection", true));
+  };
+
   const uiRoot = document.getElementById("ui-root")!;
   const friendsPanel = new FriendsPanel(uiRoot);
   // The game platform's two halves are built once the socket exists (below);
@@ -165,6 +188,29 @@ async function enterLobby(user: User) {
   let lobbyGame: LobbyGameController | null = null;
   let matchClient: MatchClient | null = null;
   const hud = new Hud(user, {
+    onOpenEvents: () => {
+      void api
+        .get<{ events: GameEvent[] }>("/api/events")
+        .then((r) => toggleEvents(r.events, openCollectionAt))
+        .catch(() => toast("Couldn't load what's on", true));
+    },
+    onOpenNotices: () => {
+      void toggleNotices(async () => {
+        const { notices } = await api.get<{ notices: { id: string; body: string; sentAt: string }[] }>("/api/notices");
+        return notices;
+      });
+    },
+    onSayReady: (ready) => {
+      void emitAck(EV.sayReady, { ready }).then((res) => {
+        if (res.error) toast(res.error, true);
+      });
+    },
+    onObjectGame: () => {
+      void emitAck(EV.objectGame).then((res) => {
+        if (res.error) toast(res.error, true);
+        else toast("Your leader has been told");
+      });
+    },
     onToggleFriends: () => friendsPanel.toggle(),
     onToggleChat: () => chatPanel.toggle(),
     onOpenProfile: () => {
@@ -271,7 +317,7 @@ async function enterLobby(user: User) {
     localUid: user.uid,
     lobby,
     restoreLobby: () => startRenderLoop(engine, renderLobby),
-    isPartyLeader: () => lobbyState?.lobbyId === `L${user.uid}`,
+    isPartyLeader: () => lobbyState?.members.find((m) => m.uid === user.uid)?.isLeader === true,
     onEnter: () => {
       // The lobby chrome steps aside; the game draws its own HUD.
       document.body.classList.add("in-match");
@@ -286,7 +332,47 @@ async function enterLobby(user: User) {
     },
   });
 
+  // WHAT IS ON, on arrival. Fetched once per session — a pinned event is shown
+  // on a fresh sign-in or a reload and not again until the next one, which is
+  // why the "seen" mark lives in sessionStorage rather than localStorage.
+  whenIdle(() => {
+    void api
+      .get<{ events: GameEvent[] }>("/api/events")
+      .then((r) => showPinned(r.events, openCollectionAt))
+      .catch(() => {
+        /* an event nobody sees is not worth a toast */
+      });
+  });
+
+  // ---- what the platform has to say -------------------------------------
+  socket.on("platform:notice", (p: { message?: string; level?: string } | null) => {
+    if (p?.message) showNotice(p.message, p.level ?? "info");
+  });
+  // An admin took one back. The list is re-read from the server when it is
+  // next opened, so all this has to do is stop showing the stale one.
+  socket.on("platform:noticeGone", () => closeNoticeList());
+  socket.on("platform:maintenance", (p: MaintenanceState | null) => {
+    if (!p) return;
+    showMaintenance(p, matchClient?.active === true, () => {
+      // The platform is holding everybody: there is nobody left to talk to,
+      // and a live microphone into an empty room is the last thing a player
+      // wants left running while they walk away.
+      void leaveVoice();
+    });
+  });
+
   socket.on("connect_error", (err) => {
+    // The server refused us because the platform is shut. This is the honest
+    // signal — not a message we were politely sent, but the door being locked
+    // — so it is what the curtain is really driven by. It cannot be argued
+    // with by editing the page: every route and every socket event behind it
+    // is refused too.
+    if (err.message === "MAINTENANCE") {
+      showMaintenance({ active: true, at: Date.now(), message: "TOFO is down for maintenance." }, false, () => {
+        void leaveVoice();
+      });
+      return;
+    }
     // A session that slipped past the claim screen (stale token from another
     // tab/device) gets bounced back to boot, which lands on that screen.
     if (err.message === "USERNAME_REQUIRED") {
@@ -299,7 +385,12 @@ async function enterLobby(user: User) {
   socket.on("lobby:members", (state: LobbyState) => {
     lobbyState = state;
     lobby.setMembers(state.members);
-    hud.setLobby(state.members.length, state.lobbyId === `L${user.uid}`, state.mode, state.teamCode ?? null);
+    hud.setLobby(
+      state.members.length,
+      state.members.find((m) => m.uid === user.uid)?.isLeader === true,
+      state.mode,
+      state.teamCode ?? null
+    );
     // In the team while the party is open — even alone in it (the group only
     // dies when its last member leaves, not when teammates walk out).
     chatPanel.setTeam(state.mode !== "solo");
@@ -315,6 +406,23 @@ async function enterLobby(user: User) {
   });
 
   socket.on("lobby:error", ({ error }: { error: string }) => toast(error, true));
+
+  // Tell the server whenever this player's microphone opens or closes.
+  //
+  // Through the same subscription the two HUD buttons use, so the report and
+  // what the player sees can never disagree — and it fires on a room refusing
+  // the mic too, which is exactly the case worth having on record.
+  let micReported = false;
+  onMicChange((on) => {
+    // Subscribing paints the button with what is already true, and that first
+    // call is not a change — reporting it would stamp "closed their mic" on
+    // every player the moment they load the lobby.
+    if (!micReported) {
+      micReported = true;
+      return;
+    }
+    socket.emit("voice:mic", { on });
+  });
 
   // A squadmate performed an emote. Same call the performer made locally, so
   // both sides of the group are running one behaviour rather than two.

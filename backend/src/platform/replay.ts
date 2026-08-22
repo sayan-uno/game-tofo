@@ -350,7 +350,25 @@ export async function sweepReplays(limit = 500): Promise<number> {
 let sweepTimer: NodeJS.Timeout | null = null;
 export function startReplaySweeper(): void {
   if (sweepTimer) return;
-  sweepTimer = setInterval(() => void sweepReplays().catch((e) => console.error("[replay] sweep:", e)), SWEEP_MS);
+  // One timer for both: replays and voice recordings expire the same way and
+  // there is no reason for two schedules to drift apart.
+  sweepTimer = setInterval(() => {
+    void sweepReplays().catch((e) => console.error("[replay] sweep:", e));
+    void import("./voiceRecording.js")
+      .then(async (m) => {
+        await m.sweepVoice();
+        // …and anything in the bucket that no row points at, which retention
+        // by expiry date can never reach.
+        await m.sweepOrphanAudio();
+        const party = await import("./partyLog.js");
+        await party.sweepParties();
+        const ops = await import("./ops.js");
+        await ops.sweepHistory();
+        const log = await import("../services/eventLog.js");
+        await log.sweepEventLog();
+      })
+      .catch((e) => console.error("[voice] sweep:", e));
+  }, SWEEP_MS);
   sweepTimer.unref();
 }
 export function stopReplaySweeper(): void {

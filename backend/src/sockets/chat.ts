@@ -1,5 +1,6 @@
 import { getSanctions } from "../services/sanctions.js";
 import { randomUUID } from "node:crypto";
+import { noteLobbyChat } from "../platform/partyLog.js";
 import type { Server, Socket } from "socket.io";
 import type { AuthPayload } from "../middleware/auth.js";
 import {
@@ -131,6 +132,9 @@ export function registerChatHandlers(io: Server, socket: AuthedSocket): void {
         body: text,
         at: row.createdAt.toISOString(),
       });
+      // Onto the party's own timeline, so the studio shows the conversation
+      // where it happened rather than in a separate list.
+      void noteLobbyChat(lobbyId, uid, name, text).catch((e: unknown) => console.error("[party] chat:", e));
       ack?.({ ok: true });
     } catch (err) {
       console.error("chat:team error:", err);

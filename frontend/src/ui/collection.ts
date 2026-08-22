@@ -29,6 +29,12 @@ export interface OpenCollectionOptions {
   restoreLobby: () => void;
   /** Fires after a successful equip so the caller can refresh anything local. */
   onEquipped?: (characterId: string) => void;
+  /** Open with this item selected and scrolled to.
+   *
+   *  What makes an event worth pinning: an advert for a weapon that drops the
+   *  player at the top of a locker and leaves them to find it is an advert
+   *  that wastes their time. */
+  focusItem?: string;
 }
 
 /** Session cache — the catalog is identical every time and changes only when
@@ -378,6 +384,37 @@ export async function openCollection(opts: OpenCollectionOptions): Promise<void>
 
   function onKey(e: KeyboardEvent) {
     if (e.key === "Escape") close();
+  }
+
+  // Land on the thing they tapped the event for.
+  //
+  // THE TAB FIRST. Only the open tab's cards exist in the page, so looking for
+  // a weapon while Characters is showing finds nothing and leaves the player
+  // exactly where they did not want to be — which is what "I picked a weapon
+  // and it sent me to characters" was. Which tab owns the item is a question
+  // only the catalogue can answer, and the catalogue is right here.
+  if (opts.focusItem) {
+    const wanted = opts.focusItem;
+    const owner: Tab | null = data.characters.some((c) => c.id === wanted)
+      ? "characters"
+      : data.weapons.some((w) => w.id === wanted)
+        ? "weapons"
+        : data.emotes.some((e) => e.id === wanted)
+          ? "emotes"
+          : null;
+    if (owner) {
+      // Through the tab's own button, so everything switching a tab normally
+      // does — the grid, the footer, putting the equipped character back on
+      // stage for a weapon or an emote — happens here too.
+      const tabBtn = page.querySelector<HTMLButtonElement>(`.cl-tab[data-tab="${owner}"]`);
+      if (owner !== tab && tabBtn) tabBtn.click();
+      const target = page.querySelector<HTMLElement>(`.cl-card[data-id="${CSS.escape(wanted)}"]`);
+      if (target) {
+        target.scrollIntoView({ block: "center" });
+        target.classList.add("cl-focus");
+        target.click();
+      }
+    }
   }
 
   page.querySelector<HTMLButtonElement>(".cl-back")!.onclick = close;

@@ -1,4 +1,6 @@
 import { Router } from "express";
+import { logEvent } from "../services/eventLog.js";
+import { requestOrigin } from "../services/clientIp.js";
 import type { Server } from "socket.io";
 import { eq } from "drizzle-orm";
 import { db } from "../db/client.js";
@@ -6,6 +8,7 @@ import { users } from "../db/schema.js";
 import { requireAuth } from "../middleware/auth.js";
 import { canEquip, canEquipWeapon, publicCatalog, resolveCharacter, resolveWeapon } from "../services/catalog.js";
 import { getUserById } from "../services/users.js";
+import { withdrawnItems } from "../platform/gameLocks.js";
 import { getUserLobby } from "../redis.js";
 import { broadcastLobby } from "../sockets/index.js";
 
@@ -22,8 +25,17 @@ export function collectionRouter(io: Server) {
         res.status(404).json({ error: "User not found" });
         return;
       }
+      // Withdrawn items are not sent at all. Filtering here rather than in the
+      // catalog module keeps the game's own idea of what exists intact — the
+      // thing still resolves for anybody already wearing it, it is simply no
+      // longer offered.
+      const gone = new Set(await withdrawnItems());
+      const cat = publicCatalog();
       res.json({
-        ...publicCatalog(),
+        ...cat,
+        characters: cat.characters.filter((c) => !gone.has(c.id)),
+        weapons: cat.weapons.filter((w) => !gone.has(w.id)),
+        emotes: cat.emotes.filter((e) => !gone.has(e.id)),
         equippedCharacter: resolveCharacter(user.equippedCharacter),
         equippedWeapon: resolveWeapon(user.equippedWeapon),
       });
@@ -58,10 +70,20 @@ export function collectionRouter(io: Server) {
         res.status(400).json({ error: "You don't own that weapon" });
         return;
       }
+      // AND it must not be withdrawn. Leaving it out of the list is not a
+      // rule — a client can ask for anything, and the one that asks for a
+      // withdrawn item is exactly the client this is meant to stop.
+      const withdrawn = new Set(await withdrawnItems());
+      if ((wantsCharacter && withdrawn.has(characterId)) || (wantsWeapon && weaponId && withdrawn.has(weaponId))) {
+        res.status(400).json({ error: "That is not available any more" });
+        return;
+      }
 
       // Returning the row rather than echoing the request: a call that equips
       // only a weapon must still answer with the character the player is
       // wearing, because the client patches its cached collection from this.
+      // What they changed into. The GET above is not logged — it returns the
+      // same catalog every time and says nothing about anyone.
       const [row] = await db
         .update(users)
         .set({
@@ -70,6 +92,16 @@ export function collectionRouter(io: Server) {
         })
         .where(eq(users.id, req.auth!.userId))
         .returning();
+      logEvent({
+        type: "collection.equip",
+        userId: req.auth!.userId,
+        uid: req.auth!.uid,
+        ip: requestOrigin(req).ip,
+        data: {
+          ...(wantsCharacter ? { character: characterId } : {}),
+          ...(wantsWeapon ? { weapon: weaponId } : {}),
+        },
+      });
 
       // Squadmates are looking at this character right now — push the change to
       // whichever lobby the player is standing in. Best-effort: a failed

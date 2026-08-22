@@ -317,6 +317,14 @@ time { cursor: help; }
 .studio .clock { font-family: var(--mono); font-size: 12.5px; color: var(--dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .studio #scrub { flex: 1; accent-color: var(--crimson); height: 4px; cursor: pointer; }
 .studio .speeds { display: flex; gap: 4px; }
+/* Past the match's own end: the picture is frozen on the scoreboard and only
+   the sound is still moving. Beside the clock, not inside it. */
+.studio .after-chip {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--crimson); border: 1px solid var(--crimson-line); border-radius: 4px; padding: 2px 6px;
+}
+.studio .after-chip[hidden] { display: none; }
+
 .studio .speeds button {
   background: none; border: 1px solid var(--line); border-radius: 4px; cursor: pointer;
   color: var(--faint); font-family: var(--mono); font-size: 11px; padding: 3px 7px;
@@ -350,3 +358,175 @@ time { cursor: help; }
 .studio .said { padding: 7px 16px; border-bottom: 1px solid var(--line-soft); font-size: 13px; }
 .studio .said:last-child { border-bottom: 0; }
 .studio .said .at { font-family: var(--mono); font-size: 11px; color: var(--faint); }
+
+/* ---- recorded voice -------------------------------------------------- */
+/* One block per session, mix on top, separate voices under it. */
+.vsession { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; }
+.vhead { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 13px; }
+.vrow { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(0, 2fr) auto; gap: 10px;
+        align-items: center; padding: 5px 0; }
+.vrow audio { width: 100%; height: 34px; }
+.vwho { font-size: 13px; font-weight: 600; }
+.vsep { margin: 10px 0 4px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim);
+        border-top: 1px solid var(--line); padding-top: 8px; }
+@media (max-width: 700px) { .vrow { grid-template-columns: 1fr; } }
+
+/* ---- who is talking --------------------------------------------------- */
+/* Dark and inert until the sound says otherwise: a microphone that is always
+   lit tells a viewer nothing about who is speaking. */
+.mic { font-style: normal; opacity: .18; filter: grayscale(1); margin-right: 6px;
+       transition: opacity .08s linear, filter .08s linear; }
+.mic.live { opacity: 1; filter: none; text-shadow: 0 0 10px rgba(120, 220, 160, .75); }
+.mixerslot { margin-top: 14px; }
+.mixer { border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; }
+.mixhead { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin-bottom: 8px; }
+.mixrow { display: flex; align-items: center; gap: 10px; padding: 4px 0; font-size: 13px; cursor: pointer; }
+.mixrow input { accent-color: var(--accent, #7dd3a0); }
+
+/* ---- the party studio -------------------------------------------------- */
+/* Present-in-the-party as a soft band, actually-talking as a bright mark on
+   top of it: the shape of a conversation at a glance. */
+.marks.party .span { position: absolute; top: 6px; height: 10px; border-radius: 5px;
+                     background: rgba(125, 211, 160, .16); border: 1px solid rgba(125, 211, 160, .28); }
+.marks.party .talk { position: absolute; top: 8px; height: 6px; border-radius: 3px;
+                     background: var(--accent, #7dd3a0); box-shadow: 0 0 6px rgba(125, 211, 160, .5); }
+/* A stretch the group spent in a match: the one gap that looks exactly like
+   an idle lobby, so it is drawn in the warning colour rather than the
+   present-in-the-party green. */
+.marks.party .mgap { position: absolute; top: 5px; height: 12px; border-radius: 3px;
+                     background: repeating-linear-gradient(-45deg,
+                       rgba(229, 24, 46, .30) 0 5px, rgba(229, 24, 46, .13) 5px 10px);
+                     border: 1px solid var(--crimson-line); }
+
+/* Over the picture, not instead of it: the lobby keeps drawing underneath so
+   the gap can still be watched — somebody who dropped out early may be
+   standing there doing something. */
+.studio .matchbar {
+  position: absolute; left: 12px; right: 12px; bottom: 12px; z-index: 3;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 9px 12px; border-radius: 10px;
+  background: rgba(11, 5, 7, .86); border: 1px solid var(--crimson-line);
+  backdrop-filter: blur(3px);
+}
+.studio .matchbar[hidden] { display: none; }
+.studio .matchbar .mtag {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em; color: var(--crimson);
+  border: 1px solid var(--crimson-line); border-radius: 4px; padding: 2px 7px; flex: none;
+}
+.studio .matchbar .mtext { font-size: 12.5px; color: var(--text); flex: 1; min-width: 180px; }
+.studio .matchbar .btn { flex: none; }
+.studio .matchbar .btn[hidden] { display: none; }
+
+/* ---- when anybody was talking ------------------------------------------ */
+/* On the tape's own geometry, so the marks line up with the playhead, the
+   scrubber and the per-person lanes. Marks are POSITIONED by percentage, the
+   same way the lanes above are, rather than flowed — flow put an identical
+   little box in every slot of a recording where nobody had spoken. */
+.talk-strip { display: flex; align-items: center; gap: var(--gap, 10px); height: 26px; margin-bottom: 6px; }
+.talk-strip .who {
+  font-family: var(--mono); font-size: 10px; color: var(--faint);
+  width: var(--name-w, 96px); flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.talk-strip .tk-plot {
+  position: relative; flex: 1; height: 18px; cursor: pointer;
+  /* A hairline the marks stand on, so the axis reads as continuous through
+     the quiet stretches instead of disappearing. */
+  border-bottom: 1px solid var(--line);
+}
+/* Anchored to the baseline, rounded at the data end only — the end carrying
+   the value. The 2px inset is the spacer between neighbouring marks. */
+.talk-strip .tk {
+  position: absolute; bottom: 0; border-radius: 2px 2px 0 0;
+  box-sizing: border-box; border-left: 1px solid transparent; border-right: 1px solid transparent;
+  background-clip: padding-box;
+}
+.talk-strip .tk-plot.empty { cursor: default; display: flex; align-items: center; }
+.talk-strip .tk-none { font-size: 11px; color: var(--dim); }
+
+.ev { padding: 4px 0; font-size: 13px; display: flex; gap: 8px; align-items: center; }
+.ev .mono { color: var(--dim); font-size: 11.5px; min-width: 42px; }
+
+/* ---- history charts ---------------------------------------------------- */
+/* Two small multiples over one clock. Single series each, so no legend — the
+   title names it. Grid is hairline and recessive; the data is the only thing
+   with weight. */
+.ch { margin-bottom: 14px; }
+.ch-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 2px; }
+.ch-head h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin: 0; }
+.ch-read { font-size: 12.5px; color: var(--text); }
+.ch svg { width: 100%; height: 120px; display: block; }
+.ch-line { fill: none; stroke: var(--green); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round;
+           vector-effect: non-scaling-stroke; }
+.ch-area { fill: var(--green-soft); stroke: none; }
+.ch-grid { stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.ch-tick { fill: var(--faint); font-size: 10px; }
+/* An outage is a STATE, so it gets the reserved colour — and a label beside the
+   chart, never colour alone. */
+.ch-gap { fill: var(--crimson-soft); stroke: var(--crimson-line); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.ch-cross { stroke: var(--dim); stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: none; }
+.ranges button { background: none; border: 1px solid var(--line); color: var(--dim); border-radius: 6px;
+                 padding: 3px 9px; font-size: 12px; cursor: pointer; margin-right: 4px; }
+.ranges button.on { border-color: var(--green); color: var(--text); }
+#scrub { width: 100%; margin-top: 6px; }
+/* The scrubber is a control, not a chart: recessive until touched. */
+#scrub { -webkit-appearance: none; appearance: none; height: 4px; border-radius: 2px;
+         background: var(--line); outline: none; }
+#scrub::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%;
+         background: var(--text); border: 2px solid var(--panel); cursor: pointer; }
+#scrub::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: var(--text);
+         border: 2px solid var(--panel); cursor: pointer; }
+
+/* ---- activity log ------------------------------------------------------ */
+.logrow { display: flex; gap: 9px; align-items: baseline; padding: 5px 0;
+          border-bottom: 1px solid var(--line-soft); font-size: 13px; }
+.logrow:last-child { border-bottom: 0; }
+.logrow .when { color: var(--faint); font-size: 11.5px; white-space: nowrap; }
+.logrow .what { color: var(--dim); }
+.logrow .what strong { color: var(--text); font-weight: 600; }
+.logrow .addr { margin-left: auto; font-size: 11px; white-space: nowrap; }
+.logrow .click { cursor: pointer; }
+.logfilters { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.logfilters input[type="datetime-local"], .logfilters select, .logfilters input[type="text"] {
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--text);
+  border-radius: 6px; padding: 5px 8px; font-size: 12.5px; }
+/* A live button that is obviously on: the dot does the work, the colour
+   confirms it. */
+.btn.ghost.on { border-color: var(--green); color: var(--green); }
+
+/* ---- chats ------------------------------------------------------------- */
+.thgroup { margin-bottom: 12px; }
+.thhead { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim);
+          margin: 6px 0 4px; }
+.thread { cursor: pointer; border-radius: 8px; padding: 6px 8px; }
+.thread:hover { background: var(--panel-2); }
+.thread-head { font-size: 13px; margin-bottom: 8px; color: var(--dim); }
+.msgs { display: flex; flex-direction: column; gap: 6px; max-height: 460px; overflow-y: auto; }
+/* Theirs on the left, the player's own on the right — the shape of a
+   conversation, so who said what is read rather than worked out. */
+.msg { max-width: 78%; padding: 6px 10px; border-radius: 10px; font-size: 13px; line-height: 1.4;
+       background: var(--panel-2); border: 1px solid var(--line); align-self: flex-start; }
+.msg.out { align-self: flex-end; background: rgba(53, 211, 153, .07); border-color: rgba(53, 211, 153, .22); }
+.msg .who { display: block; font-size: 11px; color: var(--dim); margin-bottom: 2px; }
+.msg .body { display: block; color: var(--text); word-break: break-word; }
+.msg .stamp { display: block; font-size: 10.5px; color: var(--faint); margin-top: 3px; }
+
+
+/* A thumbnail in the events table. Small, fixed, and cropped: the point is to
+   recognise which picture this row is, not to review it at full size. */
+.ev-thumb { display: inline-block; width: 72px; height: 40px; border-radius: 4px; overflow: hidden;
+            background: var(--panel-2); font-size: 10px; color: var(--dim); line-height: 40px; text-align: center; }
+.ev-thumb img, .ev-thumb video { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+.ev-thumb.clickable { cursor: zoom-in; }
+/* The uploaded file at its own size. Contained, never cropped: an admin
+   checking a banner needs to see what players will see. */
+.ev-lightbox {
+  position: fixed; inset: 0; z-index: 120; display: flex; align-items: center; justify-content: center;
+  padding: 28px; background: rgba(4, 2, 4, .86); cursor: zoom-out;
+}
+.ev-lightbox-inner { max-width: 100%; max-height: 100%; display: flex; flex-direction: column; gap: 10px; align-items: center; }
+.ev-lightbox img, .ev-lightbox video {
+  max-width: 100%; max-height: calc(100vh - 100px); width: auto; height: auto;
+  object-fit: contain; border-radius: 10px; border: 1px solid var(--line); background: #000;
+}
+.ev-lightbox-cap { font-size: 12.5px; color: var(--dim); }

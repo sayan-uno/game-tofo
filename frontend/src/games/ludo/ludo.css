@@ -293,3 +293,8 @@
     padding: 5px 11px;
   }
 }
+
+/* Dark until they speak — see the Trackline board for why "mic on" is not
+   worth drawing. */
+.ld-mic { font-style: normal; font-size: 11px; margin: 0 4px; opacity: 0; transition: opacity .08s linear; }
+.ld-mic.live { opacity: 1; text-shadow: 0 0 8px rgba(120, 220, 160, .8); }

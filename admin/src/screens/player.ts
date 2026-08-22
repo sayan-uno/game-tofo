@@ -8,6 +8,10 @@
 import { ApiFailure, call } from "../api";
 import { ask } from "../modal";
 import { withSudo } from "../sudo";
+import { startRecording, stopRecording } from "./voice";
+import { loadParties, partyRow } from "./party";
+import { renderLog, type LogRow } from "../log";
+import { failure, loadConversation, loadFriends, loadThreads, renderFriends, renderMessages, renderThreads } from "../chats";
 import { duration, esc, num, pill, sanctionLabel, table, toast, when } from "../ui";
 
 interface Player {
@@ -37,6 +41,14 @@ interface Profile {
   player: Player; stats: Stats | null; matches: MatchRow[]; sanctions: Sanction[];
   activeSanctions: Record<string, { reason: string; until: number | null }>;
   friends: number; canSeeAddresses: boolean;
+  collection: {
+    character: { id: string; name: string; rarity?: string } | null;
+    weapon: { id: string; name: string; rarity?: string } | null;
+    /** False while every catalog item is free — there is nothing to own yet. */
+    ownershipTracked: boolean;
+    catalogSize: number;
+  } | null;
+  voice: { id: string; reason: string; expiresAt: string; matchesUsed: number; maxMatches: number } | null;
   sessions?: Session[]; devices?: Device[]; linked?: Linked[];
 }
 
@@ -144,6 +156,9 @@ function render(host: HTMLElement, p: Profile, go: (h: string) => void, reload: 
     u.online ? pill("online", "on") : pill("offline", "off"),
     ...active.map(([t]) => pill(sanctionLabel(t), "bad")),
     u.matchId ? pill("in a match", "warn") : "",
+    // Visible at the top of the page, not buried: an admin opening a profile
+    // should know before anything else that this account is being listened to.
+    p.voice ? pill("🎙 recording", "warn") : "",
   ].filter(Boolean).join(" ");
 
   const identity = `<div class="pad"><dl class="kv">
@@ -154,8 +169,18 @@ function render(host: HTMLElement, p: Profile, go: (h: string) => void, reload: 
     <dt>Joined</dt><dd>${when(u.createdAt)}</dd>
     <dt>Last login</dt><dd>${when(u.lastLoginAt)}</dd>
     <dt>Friends</dt><dd class="mono">${num(p.friends)}</dd>
-    <dt>Wearing</dt><dd class="mono muted">${esc(u.equippedCharacter ?? "default")}${
-      u.equippedWeapon ? ` · ${esc(u.equippedWeapon)}` : ""
+    <dt>Wearing</dt><dd>${
+      p.collection?.character
+        ? `${esc(p.collection.character.name)}${
+            p.collection.character.rarity ? ` ${pill(p.collection.character.rarity, "warn")}` : ""
+          }`
+        : `<span class="mono muted">${esc(u.equippedCharacter ?? "default")}</span>`
+    }${
+      p.collection?.weapon
+        ? ` · ${esc(p.collection.weapon.name)}`
+        : u.equippedWeapon
+          ? ` · <span class="mono muted">${esc(u.equippedWeapon)}</span>`
+          : ` · <span class="muted">empty hands</span>`
     }</dd>
     <dt>Right now</dt><dd class="muted">${
       u.matchId ? `in match <span class="mono">${esc(u.matchId)}</span>`
@@ -278,11 +303,85 @@ function render(host: HTMLElement, p: Profile, go: (h: string) => void, reload: 
       "Sanctions",
       `<div class="actions">${ACTIONS.map(
         (a) => `<button class="btn ${a.type === "ban" ? "" : "ghost"} act" data-type="${a.type}" title="${esc(a.blurb)}">${esc(a.verb)}</button>`
-      ).join("")}</div>` +
+      ).join("")}${
+        p.voice
+          ? `<button class="btn ghost" id="recstop" title="Stop recording this player's matches">🎙 Stop recording</button>`
+          : `<button class="btn ghost" id="rec" title="Records everyone at their table, budgeted and audited">🎙 Record voice</button>`
+      }</div>` +
+        (p.voice
+          ? `<p class="muted" style="font-size:12.5px;margin:-4px 0 12px">Being recorded — ${p.voice.matchesUsed} of ${
+              p.voice.maxMatches
+            } matches used, until ${when(p.voice.expiresAt)}. Reason: ${esc(p.voice.reason)}</p>`
+          : "") +
         table(th(["Type", "Reason", "Applied", "Until", "State", ""]), sanctionRows,
           "Nothing has ever been applied to this account."),
       p.sanctions.length
     )}
+
+    ${card(
+      "What they did",
+      `<div class="pad" style="display:flex;gap:8px;align-items:center">
+         <button class="btn ghost" id="own-refresh" title="Fetch the latest">↻ Refresh</button>
+         <button class="btn ghost" id="own-live" title="Refresh every 5 seconds">○ Live</button>
+         <span class="spacer"></span>
+         <span class="muted" id="own-count" style="font-size:12px"></span>
+       </div>
+       <div class="pad" id="own-log"><p class="muted">Loading…</p></div>
+       <div class="pad"><button class="btn ghost" id="own-more" hidden>Load more</button></div>`
+    )}
+
+    ${
+      p.canSeeAddresses
+        ? card(
+            "Messages",
+            `<div class="pad muted" style="font-size:12.5px">
+               Private messages, kept for 15 days. Opening a conversation is recorded in the audit trail
+               with whose it was. Squad chat is not here — it belongs to a party, and a party's chat is
+               read in the party studio where it happened.
+             </div>
+             <div class="grid2" style="padding:0 14px 14px">
+               <div id="threads"><p class="muted">Loading…</p></div>
+               <div id="conversation"><p class="muted">Pick a conversation.</p></div>
+             </div>
+             `
+          )
+        : ""
+    }
+
+    ${card(
+      "Collection",
+      `<div class="pad">
+         <dl class="kv">
+           <dt>Character</dt><dd>${
+             p.collection?.character
+               ? `${esc(p.collection.character.name)} <span class="mono muted">${esc(p.collection.character.id)}</span>`
+               : `<span class="muted">the default</span>`
+           }</dd>
+           <dt>Weapon</dt><dd>${
+             p.collection?.weapon
+               ? `${esc(p.collection.weapon.name)} <span class="mono muted">${esc(p.collection.weapon.id)}</span>`
+               : `<span class="muted">empty hands</span>`
+           }</dd>
+         </dl>
+         <p class="muted" style="font-size:12.5px;margin-top:10px">${
+           p.collection?.ownershipTracked
+             ? "Owned items are listed above."
+             : `Nothing in the catalogue is paid yet — all ${
+                 p.collection?.catalogSize ?? 0
+               } items are free to everyone, so there is no ownership to report.
+                What they have actually worn is in <strong>What they did</strong>.`
+         }</p>
+       </div>`
+    )}
+
+    ${card(
+      "Friends",
+      `<div class="pad"><input type="text" id="friendq" placeholder="Search their friends…" style="width:220px" /></div>
+       <div class="pad" id="friendlist"><p class="muted">Loading…</p></div>`,
+      p.friends
+    )}
+
+    ${card("Parties", `<div id="party-history"><p class="muted pad">Loading…</p></div>`)}
 
     ${privileged}`;
 
@@ -300,6 +399,139 @@ function render(host: HTMLElement, p: Profile, go: (h: string) => void, reload: 
     const action = ACTIONS.find((a) => a.type === b.dataset.type)!;
     b.onclick = () => void applyTo(u.uid, who, action, reload);
   });
+  // This player's own actions, in words. The same renderer the global log
+  // uses — it is the same question with one filter on it.
+  //
+  // The live timer is module-scoped and cleared here: the page re-renders
+  // after every moderation action, and a timer declared per render would leave
+  // one running for each of them.
+  clearInterval(ownTimer);
+  const ownLog = host.querySelector<HTMLElement>("#own-log");
+  const ownMore = host.querySelector<HTMLButtonElement>("#own-more");
+  if (ownLog) {
+    let cursor: string | null = null;
+    const page = async (append: boolean) => {
+      const params = new URLSearchParams({
+        uid: u.uid,
+        // Thirty days is the whole of it — nothing older than that is kept.
+        from: new Date(Date.now() - 30 * 86_400_000).toISOString(),
+        limit: "60",
+      });
+      if (append && cursor) params.set("cursor", cursor);
+      try {
+        const r = await call<{ events: LogRow[]; cursor: string | null }>(`/log?${params}`);
+        cursor = r.cursor;
+        const html = renderLog(r.events, { showWho: false });
+        if (append) ownLog.insertAdjacentHTML("beforeend", html);
+        else ownLog.innerHTML = html;
+        const counter = host.querySelector<HTMLElement>("#own-count");
+        if (counter) {
+          counter.textContent = `${ownLog.querySelectorAll(".logrow").length} action(s), newest first`;
+        }
+        if (ownMore) ownMore.hidden = !cursor;
+        ownLog.querySelectorAll<HTMLElement>(".click").forEach((el) => {
+          el.onclick = () => go(`#/players/${el.dataset.open}`);
+        });
+      } catch {
+        ownLog.innerHTML = `<p class="empty">Could not load this player's activity.</p>`;
+      }
+    };
+    void page(false);
+    if (ownMore) ownMore.onclick = () => void page(true);
+
+    host.querySelector<HTMLButtonElement>("#own-refresh")?.addEventListener("click", () => void page(false));
+    const liveBtn = host.querySelector<HTMLButtonElement>("#own-live");
+    if (liveBtn) {
+      liveBtn.onclick = () => {
+        const on = liveBtn.classList.toggle("on");
+        liveBtn.textContent = on ? "● LIVE" : "○ Live";
+        clearInterval(ownTimer);
+        // Only the first page: "live" means the newest, and re-fetching every
+        // page somebody has loaded would grow slower the longer they watch.
+        if (on) ownTimer = window.setInterval(() => void page(false), 5000);
+      };
+    }
+  }
+
+  // Their conversations. Admin-and-above only, and reading one is audited —
+  // see the note in admin/routes/chats.ts.
+  const threadsEl = host.querySelector<HTMLElement>("#threads");
+  if (threadsEl) {
+    void loadThreads(u.uid)
+      .then(({ threads }) => {
+        threadsEl.innerHTML = renderThreads(threads);
+        threadsEl.querySelectorAll<HTMLElement>(".thread").forEach((row) => {
+          row.onclick = () => {
+            const box = host.querySelector<HTMLElement>("#conversation")!;
+            box.innerHTML = `<p class="muted">Loading…</p>`;
+            void loadConversation(u.uid, row.dataset.with!)
+              .then((c) => {
+                box.innerHTML = renderMessages(c.with, u.uid, c.messages);
+              })
+              .catch((e) => {
+                box.innerHTML = `<p class="empty">${esc(failure(e))}</p>`;
+              });
+          };
+        });
+      })
+      .catch((e) => {
+        threadsEl.innerHTML = `<p class="empty">${esc(failure(e))}</p>`;
+      });
+  }
+
+  // Their friends, searchable — a long list is not a list you can use.
+  const friendList = host.querySelector<HTMLElement>("#friendlist");
+  const friendQ = host.querySelector<HTMLInputElement>("#friendq");
+  if (friendList) {
+    const show = (q: string) =>
+      void loadFriends(u.uid, q)
+        .then(({ friends }) => {
+          friendList.innerHTML = renderFriends(friends);
+          friendList.querySelectorAll<HTMLElement>(".vwho.click").forEach((el) => {
+            el.style.cursor = "pointer";
+            el.onclick = () => go(`#/players/${el.dataset.open}`);
+          });
+        })
+        .catch((e) => {
+          friendList.innerHTML = `<p class="empty">${esc(failure(e))}</p>`;
+        });
+    show("");
+    let t = 0;
+    if (friendQ) {
+      friendQ.oninput = () => {
+        // Debounced: a search box that fires per keystroke is a search box
+        // that queries five times for one word.
+        clearTimeout(t);
+        t = window.setTimeout(() => show(friendQ.value.trim()), 250);
+      };
+    }
+  }
+
+  // Every party this player was ever in, however briefly — loaded after the
+  // page paints so the profile never waits on it. Clicking one opens the party
+  // studio AT THE MOMENT THEY ARRIVED, which is the difference between reading
+  // a report and searching a two-hour recording for them.
+  const parties = host.querySelector<HTMLElement>("#party-history");
+  if (parties) {
+    void loadParties(u.uid)
+      .then((list) => {
+        parties.innerHTML = table(
+          ["Who was in it", "Started", "", "People", "Length", ""].map(
+            (h, i) => `<th${i === 3 || i === 4 ? ' style="text-align:right"' : ""}>${h}</th>`
+          ),
+          list.map(partyRow),
+          "This player has not been in a recorded party."
+        );
+        parties.querySelectorAll<HTMLElement>("tr.click").forEach((tr) => {
+          tr.onclick = () => go(`#/parties/${tr.dataset.key}${tr.dataset.at ? `?at=${tr.dataset.at}` : ""}`);
+        });
+      })
+      .catch(() => {
+        parties.innerHTML = `<p class="empty">Could not load parties.</p>`;
+      });
+  }
+  host.querySelector<HTMLButtonElement>("#rec")?.addEventListener("click", () => void startRecording(u.uid, who, reload));
+  host.querySelector<HTMLButtonElement>("#recstop")?.addEventListener("click", () => void stopRecording(p.voice!.id, who, reload));
   host.querySelectorAll<HTMLElement>("button.lift").forEach((b) => {
     b.onclick = (e) => {
       e.stopPropagation();
@@ -307,6 +539,9 @@ function render(host: HTMLElement, p: Profile, go: (h: string) => void, reload: 
     };
   });
 }
+
+/** The one live-refresh timer for a player's log — see the note in render(). */
+let ownTimer = 0;
 
 export function mountPlayer(host: HTMLElement, uid: string, go: (h: string) => void): () => void {
   let cancelled = false;
@@ -326,5 +561,6 @@ export function mountPlayer(host: HTMLElement, uid: string, go: (h: string) => v
   load();
   return () => {
     cancelled = true;
+    clearInterval(ownTimer);
   };
 }

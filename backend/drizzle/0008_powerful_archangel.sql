@@ -1,0 +1,1 @@
+ALTER TABLE "voice_recordings" ADD COLUMN "error" text;

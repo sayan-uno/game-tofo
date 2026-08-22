@@ -30,15 +30,71 @@ export type EventType =
   | "auth.username"
   | "session.start"
   | "session.end"
+  // Connected the whole time, but not THERE: the page went quiet (minimised,
+  // backgrounded, screen off) and then came back. Kept apart from start/end,
+  // which are the connection itself — one player can go away and back several
+  // times inside a single session.
+  /** A microphone opened or closed — in a party, or inside a match. Says what
+   *  was POSSIBLE to hear, which the audio itself cannot: a mic opened in
+   *  silence leaves no recording, and a mic that was shut is an alibi. */
+  | "voice.mic"
+  | "session.away"
+  | "session.back"
   | "session.rejected"
   | "match.created"
   | "match.joined"
   | "match.left"
   | "match.ended"
+  /** A game taken away, and given back. Two sizes of the same act: the whole
+   *  game held for everybody, or one player barred from one game.
+   *
+   *  These go in the ACTIVITY log as well as the admin audit trail, and the
+   *  two are not interchangeable. The audit answers "what have the admins been
+   *  doing"; the activity log answers "what happened to this player, and
+   *  why" — and a player who suddenly cannot start a game is a question asked
+   *  from that side, usually by a different person, often days later. */
+  /** The platform going down, and coming back. In the activity log as well as
+   *  the audit trail: "why did my match end at nine o'clock" is a question
+   *  asked from the players' side. */
+  | "platform.maintenance"
+  | "event.create"
+  | "event.delete"
+  | "notice.send"
+  | "notice.delete"
+  | "game.hide"
+  | "game.show"
+  | "collection.withdraw"
+  | "collection.restore"
+  | "game.hold"
+  | "game.release"
+  | "game.ban"
+  | "game.unban"
   | "sanction.applied"
   | "sanction.lifted"
   | "admin.login"
-  | "ops.command";
+  | "ops.command"
+  // Things a player DID, as opposed to things that happened to them. Only
+  // actions that already reach the server are here: a tap that never leaves
+  // the phone cannot be logged without sending a message that would not
+  // otherwise exist, and that message is what costs a battery.
+  | "profile.view"
+  | "collection.equip"
+  | "lobby.invite"
+  /** A group came into being, with the id it will keep for its whole life.
+   *  The one line that ties a party recording back to the person who started
+   *  it — search the id and everything about that group is in front of you. */
+  | "lobby.party"
+  | "lobby.join"
+  | "lobby.leave"
+  | "lobby.kick"
+  | "lobby.leader"
+  | "lobby.pick"
+  | "lobby.search"
+  | "lobby.cancel"
+  | "lobby.leave"
+  | "lobby.mode"
+  | "friend.request"
+  | "friend.respond";
 
 export interface EventInput {
   type: EventType;
@@ -176,4 +232,30 @@ export function stopEventLog(): void {
 /** For the ops snapshot and the self-check: is the writer keeping up? */
 export function eventLogStats() {
   return { buffered: buffer.length, written, dropped, failures };
+}
+
+/** Thirty days, then it goes.
+ *
+ *  One rule for every kind of row, which is the choice that was made: it keeps
+ *  the table small and the promise simple. Worth knowing what it costs — a
+ *  sign-in record from four months ago is not there to produce if somebody
+ *  asks for it later. Raising it is one number here.
+ */
+export const EVENT_RETENTION_DAYS = 30;
+
+export async function sweepEventLog(limit = 5000): Promise<number> {
+  const { db } = await import("../db/client.js");
+  const { eventLog } = await import("../db/schema.js");
+  const { sql, inArray } = await import("drizzle-orm");
+  // Deleted in bounded batches: an unbounded DELETE on a table this size takes
+  // a long lock, and this runs on the same timer as everything else.
+  const due = await db
+    .select({ id: eventLog.id })
+    .from(eventLog)
+    .where(sql`${eventLog.at} < now() - (${EVENT_RETENTION_DAYS} || ' days')::interval`)
+    .limit(limit);
+  if (due.length === 0) return 0;
+  await db.delete(eventLog).where(inArray(eventLog.id, due.map((d) => d.id)));
+  console.log(`✔ Swept ${due.length} activity row(s) past ${EVENT_RETENTION_DAYS} days`);
+  return due.length;
 }

@@ -12,7 +12,7 @@
 // recorded separately. "Who has been looking at whom" is a question a
 // moderation console must be able to answer about itself.
 import { safeRouter } from "../asyncRouter.js";
-import { and, desc, eq, inArray, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import {
   eventLog,
@@ -20,6 +20,7 @@ import {
   matches,
   playerStats,
   friendships,
+  recordingTargets,
   sanctions,
   userDevices,
   users,
@@ -27,7 +28,8 @@ import {
 import { getOnlineSet, getUserLobby } from "../../redis.js";
 import { getUserMatch } from "../../platform/store.js";
 import { requestOrigin } from "../../services/clientIp.js";
-import { getSanctions } from "../../services/sanctions.js";
+import { publicCatalog } from "../../services/catalog.js";
+import { getSanctions, getSanctionsMany } from "../../services/sanctions.js";
 import { requireAdmin } from "../guard.js";
 import { audit } from "../audit.js";
 
@@ -40,6 +42,93 @@ type MatchedOn = "uid" | "email" | "username" | "ip" | "device" | "none";
 const IP_RE = /^(\d{1,3}\.){3}\d{1,3}$|^[0-9a-f:]{3,45}$/i;
 const DEVICE_RE = /^[0-9a-f]{32}$/i;
 const UID_RE = /^\d{6,12}$/;
+
+/** One row as a list shows it. Shared by the browse list and by search, so the
+ *  two can never drift into showing different things about the same person. */
+type Listed = typeof users.$inferSelect;
+const listRow = (u: Listed, online: Set<string>, sanctionsOf: Map<string, object>) => ({
+  uid: u.uid,
+  username: u.username,
+  name: u.name,
+  email: u.email,
+  avatarUrl: u.avatarUrl,
+  createdAt: u.createdAt,
+  lastLoginAt: u.lastLoginAt,
+  online: online.has(u.id),
+  sanctions: Object.keys(sanctionsOf.get(u.id) ?? {}),
+});
+
+// ---------------------------------------------------------------------------
+// Everyone, newest first
+//
+// Opening Players with nothing typed used to be a blank page with a hint on
+// it, which is a poor answer to "who is on this platform". It lists them
+// instead — but a page at a time.
+//
+// PAGED ON A CURSOR, NEVER AN OFFSET. "skip the first 4000 rows" makes the
+// database walk those 4000 rows every time, so the further somebody scrolls
+// the slower it gets, and rows shift under them when a new account is created
+// mid-scroll. A cursor names the last row seen and asks for what is older than
+// it: the same work for page fifty as for page one, and a new sign-up cannot
+// push a row into a page that has already been drawn.
+// ---------------------------------------------------------------------------
+
+const PAGE = 50;
+
+/** `<created_at ms>.<id>` — the sort key of the last row sent. Opaque to the
+ *  client on purpose: it is a position, not a page number. */
+const encodeCursor = (at: Date, id: string) => Buffer.from(`${at.getTime()}.${id}`).toString("base64url");
+function decodeCursor(raw: string): { at: Date; id: string } | null {
+  try {
+    const [ms, id] = Buffer.from(raw, "base64url").toString("utf8").split(".");
+    const at = new Date(Number(ms));
+    return Number.isFinite(at.getTime()) && id ? { at, id } : null;
+  } catch {
+    return null;
+  }
+}
+
+playersRouter.get("/", requireAdmin("support"), async (req, res) => {
+  const cursor = req.query.cursor ? decodeCursor(String(req.query.cursor)) : null;
+  if (req.query.cursor && !cursor) {
+    res.status(400).json({ error: "That is not a position in the list", code: "BAD_CURSOR" });
+    return;
+  }
+  // Clamped, not trusted: a page size is a convenience for the caller and a
+  // query plan for the database, and "give me everything" is exactly the
+  // request this endpoint exists to refuse.
+  const asked = Number(req.query.limit);
+  const size = Number.isFinite(asked) ? Math.min(100, Math.max(1, Math.floor(asked))) : PAGE;
+  // Newest first, id breaking the tie: two accounts created in the same
+  // millisecond would otherwise be ordered differently on each query and one
+  // of them would fall through the gap between two pages.
+  const rows = await db
+    .select()
+    .from(users)
+    .where(cursor ? sql`(${users.createdAt}, ${users.id}) < (${cursor.at}, ${cursor.id})` : sql`true`)
+    .orderBy(desc(users.createdAt), desc(users.id))
+    .limit(size + 1);
+
+  const page = rows.slice(0, size);
+  const more = rows.length > size;
+  const ids = page.map((u) => u.id);
+  const [online, sanctionsOf] = await Promise.all([getOnlineSet(ids), getSanctionsMany(ids)]);
+
+  // Counted once, on the first page only: it is a number in a header, and
+  // making every scroll pay for a full count of the table is not worth it.
+  let total: number | null = null;
+  if (!cursor) {
+    const [{ n }] = await db.select({ n: sql<number>`count(*)::int` }).from(users);
+    total = n;
+  }
+
+  const last = page[page.length - 1];
+  res.json({
+    players: page.map((u) => listRow(u, online, sanctionsOf)),
+    cursor: more && last ? encodeCursor(new Date(last.createdAt), last.id) : null,
+    total,
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Search
@@ -115,23 +204,9 @@ playersRouter.get("/search", requireAdmin("support"), async (req, res) => {
     return;
   }
   const rows = await db.select().from(users).where(inArray(users.id, ids));
-  const online = await getOnlineSet(ids);
-  const banned = await Promise.all(rows.map((u) => getSanctions(u.id)));
+  const [online, sanctionsOf] = await Promise.all([getOnlineSet(ids), getSanctionsMany(ids)]);
 
-  res.json({
-    matchedOn,
-    results: rows.map((u, i) => ({
-      uid: u.uid,
-      username: u.username,
-      name: u.name,
-      email: u.email,
-      avatarUrl: u.avatarUrl,
-      createdAt: u.createdAt,
-      lastLoginAt: u.lastLoginAt,
-      online: online.has(u.id),
-      sanctions: Object.keys(banned[i]),
-    })),
-  });
+  res.json({ matchedOn, results: rows.map((u) => listRow(u, online, sanctionsOf)) });
 });
 
 // ---------------------------------------------------------------------------
@@ -190,6 +265,24 @@ playersRouter.get("/:uid", requireAdmin("support"), async (req, res) => {
       )
     );
 
+  const [voiceTarget] = await db
+    .select({
+      id: recordingTargets.id,
+      reason: recordingTargets.reason,
+      expiresAt: recordingTargets.expiresAt,
+      matchesUsed: recordingTargets.matchesUsed,
+      maxMatches: recordingTargets.maxMatches,
+    })
+    .from(recordingTargets)
+    .where(
+      and(
+        eq(recordingTargets.userId, user.id),
+        eq(recordingTargets.kind, "voice"),
+        isNull(recordingTargets.revokedAt),
+        gt(recordingTargets.expiresAt, sql`now()`)
+      )
+    );
+
   const body: Record<string, unknown> = {
     player: {
       uid: user.uid,
@@ -205,6 +298,22 @@ playersRouter.get("/:uid", requireAdmin("support"), async (req, res) => {
       lobbyId,
       matchId,
     },
+    // What they are wearing, resolved to real names and rarity rather than
+    // left as raw catalog ids.
+    collection: (() => {
+      const cat = publicCatalog();
+      const find = (list: { id: string; name: string; rarity?: string }[], id: string | null) =>
+        (id && list.find((c) => c.id === id)) || null;
+      return {
+        character: find(cat.characters as never, user.equippedCharacter),
+        weapon: find(cat.weapons as never, user.equippedWeapon),
+        // Nothing is purchasable yet — every catalog item is free, so there is
+        // no entitlement to report. Said plainly rather than shown as a list
+        // of everything, which would look like ownership and mean nothing.
+        ownershipTracked: (cat.characters as { owned?: boolean }[]).some((c) => c.owned === false),
+        catalogSize: cat.characters.length + cat.weapons.length + cat.emotes.length,
+      };
+    })(),
     stats: stats ?? null,
     matches: history,
     sanctions: sanctionRows,
@@ -212,6 +321,18 @@ playersRouter.get("/:uid", requireAdmin("support"), async (req, res) => {
     friends,
     /** So the console can explain a missing panel rather than just omitting it. */
     canSeeAddresses: privileged,
+    // Whether this player's matches are being recorded right now. Shown on the
+    // page so nobody starts a second one, and so an admin opening a profile
+    // knows what is already happening to it.
+    voice: voiceTarget
+      ? {
+          id: voiceTarget.id,
+          reason: voiceTarget.reason,
+          expiresAt: voiceTarget.expiresAt,
+          matchesUsed: voiceTarget.matchesUsed,
+          maxMatches: voiceTarget.maxMatches,
+        }
+      : null,
   };
 
   if (privileged) {

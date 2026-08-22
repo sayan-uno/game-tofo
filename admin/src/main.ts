@@ -19,9 +19,16 @@ import { mountOverview } from "./screens/overview";
 import { mountPlayers, searchBox } from "./screens/players";
 import { mountPlayer } from "./screens/player";
 import { mountSanctions } from "./screens/sanctions";
+import { mountGames } from "./screens/games";
+import { mountNotices } from "./screens/notices";
+import { mountEvents } from "./screens/events";
 import { mountPlatform } from "./screens/platform";
 import { mountMatches } from "./screens/matches";
 import { mountStudio } from "./screens/studio";
+import { mountVoice } from "./screens/voice";
+import { mountParty } from "./screens/party";
+import { mountParties } from "./screens/parties";
+import { mountHistory } from "./screens/history";
 
 const root = document.getElementById("root")!;
 let stopScreen: (() => void) | null = null;
@@ -33,7 +40,7 @@ const go = (hash: string) => {
 };
 
 interface Route {
-  nav: "overview" | "players" | "matches" | "sanctions" | "platform";
+  nav: "overview" | "history" | "players" | "matches" | "parties" | "sanctions" | "voice" | "games" | "notices" | "events" | "platform";
   title: string;
   crumb?: string;
   /** What the header box should be showing — a search you navigated to by URL
@@ -65,6 +72,31 @@ function parse(): Route {
   if (parts[0] === "sanctions") {
     return { nav: "sanctions", title: "Sanctions", mount: (h) => mountSanctions(h, go) };
   }
+  if (parts[0] === "history") {
+    return { nav: "history", title: "History", mount: (h) => mountHistory(h, go) };
+  }
+  if (parts[0] === "parties" && !parts[1]) {
+    return { nav: "parties", title: "Parties", mount: (h) => mountParties(h, go) };
+  }
+  if (parts[0] === "parties" && parts[1]) {
+    // "#/parties/<key>?at=<ms>" opens the party AT a moment — used by a
+    // player's history so it lands where they walked in.
+    const [key, query] = decodeURIComponent(parts[1]).split("?");
+    const at = Number(new URLSearchParams(query ?? "").get("at") ?? 0);
+    return { nav: "parties", title: "Party", mount: (h) => mountParty(h, key, go, at) };
+  }
+  if (parts[0] === "voice") {
+    return { nav: "voice", title: "Voice", mount: (h) => mountVoice(h, me?.role ?? "", go) };
+  }
+  if (parts[0] === "events") {
+    return { nav: "events", title: "Events", mount: (h) => mountEvents(h, me?.role ?? "") };
+  }
+  if (parts[0] === "notices") {
+    return { nav: "notices", title: "Notices", mount: (h) => mountNotices(h, me?.role ?? "") };
+  }
+  if (parts[0] === "games") {
+    return { nav: "games", title: "Games", mount: (h) => mountGames(h, me?.role ?? "") };
+  }
   if (parts[0] === "platform") {
     return { nav: "platform", title: "Platform", mount: (h) => mountPlatform(h, me?.role ?? "") };
   }
@@ -83,6 +115,12 @@ function shell(who: SignedIn): void {
           <a href="#/matches" data-nav="matches">${icon("play")} Matches</a>
           <div class="heading">Moderation</div>
           <a href="#/sanctions" data-nav="sanctions">${icon("shield")} Sanctions</a>
+          <a href="#/history" data-nav="history">${icon("clock")} History</a>
+          <a href="#/parties" data-nav="parties">${icon("users")} Parties</a>
+          <a href="#/voice" data-nav="voice">${icon("mic")} Voice</a>
+          <a href="#/games" data-nav="games">${icon("play")} Games</a>
+          <a href="#/notices" data-nav="notices">${icon("mail")} Notices</a>
+          <a href="#/events" data-nav="events">${icon("box")} Events</a>
           <a href="#/platform" data-nav="platform">${icon("power")} Platform</a>
         </nav>
         <div class="who">

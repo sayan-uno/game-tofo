@@ -108,6 +108,28 @@ export async function refresh(): Promise<boolean> {
   }
 }
 
+/** Fetch a binary body — recordings — with the same auth and the same one
+ *  retry as `call`. Returned as a blob URL so the browser treats it as
+ *  same-origin: the studio has to analyse the sound to show who is talking,
+ *  and cross-origin audio cannot be analysed at all.
+ *
+ *  The caller owns the URL and must revokeObjectURL it. */
+export async function fetchBlobUrl(path: string): Promise<string> {
+  let res: Response;
+  try {
+    res = await raw(path);
+    if (res.status === 401 && (await refresh())) res = await raw(path);
+  } catch {
+    throw unreachable();
+  }
+  if (!res.ok) {
+    accessToken = res.status === 401 ? null : accessToken;
+    if (res.status === 401) onLost?.();
+    throw new ApiFailure({ status: res.status, error: `Could not load that recording (${res.status})` });
+  }
+  return URL.createObjectURL(await res.blob());
+}
+
 export async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
   let res: Response;
   try {

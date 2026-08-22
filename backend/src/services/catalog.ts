@@ -1,4 +1,5 @@
 import { config } from "../config.js";
+import { isWithdrawn } from "../platform/gameLocks.js";
 
 /** ---------------------------------------------------------------------------
  *  The asset catalog — characters, weapons and animation clips.
@@ -173,7 +174,17 @@ export const emotes = (): EmoteItem[] => EMOTES;
 /** Resolve a stored character id to one that definitely exists. A player whose
  *  equipped character was removed from the catalog gets the default rather
  *  than an empty pedestal. */
+/** What everybody falls back to. Exposed so the console can refuse to withdraw
+ *  it: it is the floor, and a floor with a hole in it is not a floor. */
+export const defaultCharacterId = (): string => DEFAULT_CHARACTER;
+
 export function resolveCharacter(id: string | null | undefined): string {
+  // A WITHDRAWN character is treated exactly like a retired one: it resolves
+  // to the default, so somebody wearing it when it is pulled is wearing the
+  // default from the next broadcast onwards. Withdrawing has to take the thing
+  // off people — leaving it on whoever already had it is not withdrawing it,
+  // it is hiding it from everybody who did not get there first.
+  if (isWithdrawn(id)) return DEFAULT_CHARACTER;
   return id && CHARACTERS.some((c) => c.id === id) ? id : DEFAULT_CHARACTER;
 }
 
@@ -182,6 +193,9 @@ export function resolveCharacter(id: string | null | undefined): string {
  *  something: an unarmed player is correct, a player holding a weapon they
  *  didn't pick is not. A retired weapon therefore just disappears. */
 export function resolveWeapon(id: string | null | undefined): string | null {
+  // …and a withdrawn weapon simply leaves the hand, which is already what a
+  // retired one does.
+  if (isWithdrawn(id)) return null;
   return id && WEAPONS.some((w) => w.id === id) ? id : null;
 }
 

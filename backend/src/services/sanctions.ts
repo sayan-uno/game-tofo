@@ -65,6 +65,26 @@ export async function getSanctions(userId: string): Promise<SanctionCache> {
   }
 }
 
+/** The same read for a page of players, in ONE round trip.
+ *
+ *  A console list is fifty rows; asking Redis fifty separate times to draw one
+ *  screen is fifty network waits an admin sits through. MGET is one. Same
+ *  fail-open rule as the single read — a hiccup must never look like a ban. */
+export async function getSanctionsMany(userIds: string[]): Promise<Map<string, SanctionCache>> {
+  const out = new Map<string, SanctionCache>();
+  if (userIds.length === 0) return out;
+  try {
+    const raw = await redis.mget(userIds.map(key));
+    userIds.forEach((id, i) => {
+      const v = raw[i];
+      out.set(id, v ? live(JSON.parse(v) as SanctionCache) : {});
+    });
+  } catch {
+    for (const id of userIds) out.set(id, {});
+  }
+  return out;
+}
+
 export const bannedReason = (c: SanctionCache): string | null => c.ban?.reason ?? null;
 
 /** Rebuild one user's cache from the record. Called after every change, and

@@ -43,16 +43,27 @@ export function openGameSheet(opts: GameSheetOptions): void {
       // A game with no pack is ready the moment it is picked; one that HAS a
       // pack but no URL for it has not been published, and cannot be played.
       const free = !needsDownload(g);
-      const unavailable = !free && !g.packUrl;
+      // Three ways a game can be unpickable, and the player is told which.
+      // Hiding a held game would be worse than greying it: one that silently
+      // vanishes reads as a broken client, and somebody barred from a game
+      // deserves to know rather than wonder where it went.
+      const stopped = g.bannedReason ?? g.heldReason ?? null;
+      const unavailable = (!free && !g.packUrl) || stopped !== null;
       return `
         <button class="gs-card${selected ? " selected" : ""}" data-id="${esc(g.id)}" ${unavailable ? 'data-unavailable="1"' : ""}>
           <span class="gs-art" aria-hidden="true"><span class="gs-art-name">${esc(g.name)}</span></span>
           <span class="gs-body">
             <span class="gs-name">${esc(g.name)}</span>
-            <span class="gs-tag">${esc(g.tagline)}</span>
+            <span class="gs-tag">${esc(stopped ?? g.tagline)}</span>
             <span class="gs-meta">${players} · ${mins} · <span class="gs-size">${free ? "no download" : fmtBytes(g.packBytes)}</span>
               <span class="gs-badge hidden">${free ? "Ready" : "Downloaded"}</span>
-              ${unavailable ? '<span class="gs-badge warn">Not published</span>' : ""}
+              ${
+                stopped
+                  ? `<span class="gs-badge warn">${esc(g.bannedReason ? "You cannot play this" : "On hold")}</span>`
+                  : unavailable
+                    ? '<span class="gs-badge warn">Not published</span>'
+                    : ""
+              }
             </span>
           </span>
           ${selected ? '<span class="gs-check" aria-hidden="true">✓</span>' : ""}

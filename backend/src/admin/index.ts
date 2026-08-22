@@ -21,7 +21,12 @@ import { overviewRouter } from "./routes/overview.js";
 import { adminsRouter } from "./routes/admins.js";
 import { playersRouter } from "./routes/players.js";
 import { enforcementRouter } from "./routes/enforcement.js";
+import { eventsRouter } from "./routes/events.js";
 import { replaysRouter } from "./routes/replays.js";
+import { chatsRouter } from "./routes/chats.js";
+import { historyRouter } from "./routes/history.js";
+import { partiesRouter } from "./routes/parties.js";
+import { voiceRouter } from "./routes/voice.js";
 
 /** JSON only, so the headers that matter are the ones that stop a browser
  *  guessing at content and stop anything being cached on the way. */
@@ -50,6 +55,11 @@ export function mountAdmin(app: Express): void {
   router.use("/admins", adminsRouter);
   router.use("/players", playersRouter);
   router.use("/replays", replaysRouter);
+  router.use(voiceRouter);
+  router.use(partiesRouter);
+  router.use(historyRouter);
+  router.use(chatsRouter);
+  router.use(eventsRouter);
   // Mounted at the root: it owns /players/:uid/sanctions, /sanctions and
   // /platform, which do not all live under one noun.
   router.use(enforcementRouter);

@@ -76,7 +76,15 @@ export function ask(o: AskOptions): Promise<Record<string, string> | null> {
       }
       return out;
     };
+    // One at a time. `okBtn.disabled` guards the BUTTON, and the Enter key does
+    // not go through the button — so a second Enter while the first submit was
+    // still in flight ran the whole thing twice. For a dialog that creates
+    // something, that is two of them; for one that waits on a file picker,
+    // which is exactly when somebody presses Enter again, it is guaranteed.
+    let busy = false;
     const submit = async () => {
+      if (busy) return;
+      busy = true;
       err.textContent = "";
       okBtn.disabled = true;
       const v = values();
@@ -85,15 +93,24 @@ export function ask(o: AskOptions): Promise<Record<string, string> | null> {
         if (problem) {
           err.textContent = problem;
           okBtn.disabled = false;
+          busy = false;
           return;
         }
         close(v);
       } catch (e) {
         err.textContent = e instanceof Error ? e.message : "That did not work";
         okBtn.disabled = false;
+        busy = false;
       }
     };
     const onKey = (e: KeyboardEvent) => {
+      // ONLY THE DIALOG ON TOP. This listener is on the document, and dialogs
+      // stack: confirming with an authenticator code opens a second one over
+      // the first. Without this check a single Enter submitted BOTH — the
+      // sudo prompt and the action underneath it — so the action ran again,
+      // was told it needed confirming again, and asked again. Round and round.
+      const overlays = document.querySelectorAll(".overlay");
+      if (overlays[overlays.length - 1] !== overlay) return;
       if (e.key === "Escape") close(null);
       if (e.key === "Enter" && (e.target as HTMLElement)?.tagName !== "TEXTAREA") void submit();
     };

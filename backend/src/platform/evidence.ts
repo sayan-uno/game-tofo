@@ -73,6 +73,32 @@ export async function evidenceUrl(key: string, seconds = 60): Promise<string | n
   }
 }
 
+/** Everything under a prefix, with when it was written.
+ *
+ *  Used by the orphan sweep below. Bounded on purpose: this runs on a timer
+ *  against a bucket that only grows, and an unbounded listing is a job that
+ *  gets slower every day until it stops finishing. */
+export async function listEvidence(prefix: string, limit = 500): Promise<{ key: string; at: number }[]> {
+  if (evidenceBackend() === "r2") {
+    const { ListObjectsV2Command } = await import("@aws-sdk/client-s3");
+    const out = await s3().send(new ListObjectsV2Command({ Bucket: conf.bucket, Prefix: prefix, MaxKeys: limit }));
+    return (out.Contents ?? []).map((o) => ({ key: o.Key!, at: o.LastModified?.getTime() ?? 0 }));
+  }
+  const walk = async (dir: string): Promise<{ key: string; at: number }[]> => {
+    const found: { key: string; at: number }[] = [];
+    for (const entry of await fs.readdir(dir, { withFileTypes: true }).catch(() => [])) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) found.push(...(await walk(full)));
+      else {
+        const stat = await fs.stat(full).catch(() => null);
+        found.push({ key: path.relative(conf.localDir, full), at: stat?.mtimeMs ?? 0 });
+      }
+    }
+    return found;
+  };
+  return (await walk(path.join(conf.localDir, prefix))).slice(0, limit);
+}
+
 export async function deleteEvidence(keys: string[]): Promise<number> {
   if (keys.length === 0) return 0;
   if (evidenceBackend() === "r2") {

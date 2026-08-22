@@ -17,6 +17,7 @@
 //  - picking is one ray against ONE invisible box per member (4 max) rather
 //    than against skinned character meshes, so a tap costs microseconds
 //  - pointer-move picking disabled entirely
+import { plateText } from "./plate";
 import { Scene } from "@babylonjs/core/scene";
 import type { Engine } from "@babylonjs/core/Engines/engine";
 import { TargetCamera } from "@babylonjs/core/Cameras/targetCamera";
@@ -43,6 +44,8 @@ import type { Mesh } from "@babylonjs/core/Meshes/mesh";
 import { AdvancedDynamicTexture } from "@babylonjs/gui/2D/advancedDynamicTexture";
 import { TextBlock } from "@babylonjs/gui/2D/controls/textBlock";
 import { Rectangle } from "@babylonjs/gui/2D/controls/rectangle";
+import { Control } from "@babylonjs/gui/2D/controls/control";
+import { onTalkingChange } from "../voice/livekit";
 import { CHARACTER_HEIGHT, getPerformableEmotes, getStanceClip, hasAssets } from "./assets";
 import type { CharacterRig } from "./characterRig";
 import { attachAura, type Aura } from "./aura";
@@ -80,6 +83,10 @@ const FEET_AT = 0.835;
 
 const ACCENT = "#e5182e"; // brand crimson
 const ACCENT_LEADER = "#ffd45e";
+/** Ready. Green rather than the platform crimson: crimson is "act now" and
+ *  belongs to START, and a lobby where four plates shout at once says
+ *  nothing. */
+const ACCENT_READY = "#7ddca0";
 const PAD_TINT = new Color3(0.92, 0.1, 0.19);
 const PAD_TINT_LEADER = new Color3(1.0, 0.74, 0.26);
 
@@ -103,14 +110,20 @@ function fitPlateFontSize(text: string): number {
   return 9;
 }
 
-/** Name line of the base plate: leader gets the star and the gold. Reused
- *  in place when leadership moves so the plate never gets rebuilt. */
-function applyNameStyle(plate: Rectangle, label: TextBlock, member: LobbyMember) {
-  const text = `${member.name}${member.isLeader ? " ★" : ""}`;
+/** Name line of the base plate: leader gets the star and the gold, and anybody
+ *  who has said they are ready gets a tick. Reused in place when leadership
+ *  moves or somebody readies up, so the plate is never rebuilt.
+ *
+ *  The tick goes in the NAME, not in a badge of its own: the question it
+ *  answers is "who are we waiting for", and the answer is only readable if it
+ *  is attached to the person. */
+function applyNameStyle(plate: Rectangle, label: TextBlock, member: LobbyMember, ready = false) {
+  const text = plateText(member.name, member.isLeader, ready);
   label.text = text;
   label.fontSize = fitPlateFontSize(text);
-  label.color = member.isLeader ? ACCENT_LEADER : "#f2f5ff";
-  plate.color = member.isLeader ? ACCENT_LEADER : ACCENT;
+  const ticked = ready && !member.isLeader;
+  label.color = member.isLeader ? ACCENT_LEADER : ticked ? ACCENT_READY : "#f2f5ff";
+  plate.color = member.isLeader ? ACCENT_LEADER : ticked ? ACCENT_READY : ACCENT;
 }
 
 /** Where each member stands, for a squad of `count`.
@@ -192,6 +205,12 @@ interface CharacterInstance {
   plate: Rectangle;
   /** Name line of the base plate — updated in place when leadership moves. */
   label: TextBlock;
+  /** Microphone beside the name, shown ONLY while this member is actually
+   *  speaking. "Their mic is on" is not worth drawing: everyone's mic is on.
+   *  Toggled from LiveKit's active-speaker events, which fire a few times a
+   *  second at most — not per frame — so the GUI texture is not repainting
+   *  constantly (see the linkWithMesh notes above for why that matters). */
+  mic: TextBlock;
   /** Free Fire-style chat bubble over the head; hidden until a team message. */
   bubble: Rectangle;
   bubbleText: TextBlock;
@@ -200,6 +219,13 @@ interface CharacterInstance {
    *  use and shown only while a game is picked. -1 = failed. */
   loadBar: { track: Rectangle; fill: Rectangle; pct: number } | null;
   isLeader: boolean;
+  /** The undecorated name, kept because the plate's text is not it: that
+   *  carries the leader star and the ready tick, and rebuilding the line from
+   *  a decorated one would compound them. */
+  name: string;
+  /** Said they want to play what is picked. Held here so restyling the plate
+   *  for any other reason — leadership moving — does not drop the tick. */
+  ready: boolean;
   disposables: { dispose: () => void }[];
   uid: string;
   /** Slot this member is walking to — the anchor eases towards it, so a join
@@ -247,11 +273,21 @@ export class LobbyScene {
   private padMat!: StandardMaterial;
   private padMatLeader!: StandardMaterial;
   private characters = new Map<string, CharacterInstance>();
+  /** Stops listening to LiveKit's active-speaker events when the stage goes. */
+  private untalk: (() => void) | null = null;
   private localUid: string;
   private time = 0;
   /** How far the widest member stands from the middle — the camera pulls back
    *  to fit it. */
   private spread = 0;
+  /** performance.now() of the last frame this scene drew. See isBeingWatched.
+   *
+   *  Starts as "now" rather than zero: a scene is built because somebody is
+   *  about to look at it, and the first frame has not happened yet. Zero would
+   *  mean the first moment of a lobby's life counts as unwatched — which the
+   *  admin studio would hit every time, since it delivers the events for a
+   *  moment and only then draws it. */
+  private lastRenderAt = performance.now();
   /** How much room the backdrop's overscan leaves for the drift, in NDC. */
   private driftRoom = 0;
   /** Drawing surface the current framing was computed for — see refit(). */
@@ -264,10 +300,32 @@ export class LobbyScene {
   constructor(engine: Engine, localUid: string, onMemberTap?: (uid: string) => void) {
     this.localUid = localUid;
     this.scene = new Scene(engine);
+    // When this scene was last actually DRAWN.
+    //
+    // Measured rather than inferred. Whether the lobby is on screen has four
+    // different answers — the tab is hidden, a full-screen page has covered
+    // it, the collection has borrowed the canvas for its own preview, or the
+    // admin console is driving it a frame at a time — and a guard built by
+    // listing those gets one wrong the first time a fifth is added. A scene
+    // that is being watched renders; one that is not, does not. That is the
+    // whole condition, and this is it directly.
+    this.scene.onAfterRenderObservable.add(() => {
+      this.lastRenderAt = performance.now();
+    });
     const scene = this.scene;
 
     scene.clearColor = new Color4(0.02, 0.01, 0.02, 1);
     scene.skipPointerMovePicking = true; // no hover picking needed in the lobby
+
+    // Light the microphone on whoever is speaking. Event-driven, not polled:
+    // LiveKit tells every client the same thing at the same time, so the whole
+    // squad sees the same person light up, and nothing runs per frame.
+    this.untalk = onTalkingChange((uids) => {
+      for (const [uid, character] of this.characters) {
+        const talking = uids.has(uid);
+        if (character.mic.isVisible !== talking) character.mic.isVisible = talking;
+      }
+    });
     // Both pointer picks the input manager runs for us are narrowed to the hit
     // boxes, so POINTERDOWN (start a turn) and POINTERTAP (open a card) both
     // land on the member without a second raycast of our own.
@@ -562,11 +620,12 @@ export class LobbyScene {
       if (existing) {
         existing.slotX = x;
         existing.slotZ = z;
-        if (existing.isLeader !== member.isLeader) {
-          // Leadership moved (transfer / old leader left) — restyle the plate
-          // and the pad rather than rebuilding either.
+        if (existing.isLeader !== member.isLeader || existing.name !== member.name) {
+          // Leadership moved (transfer / old leader left), or they claimed a
+          // name — restyle the plate and the pad rather than rebuilding either.
           existing.isLeader = member.isLeader;
-          applyNameStyle(existing.plate, existing.label, member);
+          existing.name = member.name;
+          applyNameStyle(existing.plate, existing.label, member, existing.ready);
           existing.pad.material = member.isLeader ? this.padMatLeader : this.padMat;
         }
         // Someone equipped a different character — swap just that model, keep
@@ -756,6 +815,21 @@ export class LobbyScene {
    *  paints it as failed, null hides it. Costs a GUI repaint only when the
    *  value changes — and callers already throttle to a few updates a second,
    *  only ever during the loading phase, never in gameplay. */
+  /** Who has said they are ready. A tick beside the name, so the answer to
+   *  "who are we waiting for" is readable at a glance instead of being
+   *  something the leader has to work out from a hint line. */
+  setReady(uid: string, ready: boolean) {
+    const character = this.characters.get(uid);
+    if (!character || character.ready === ready) return;
+    character.ready = ready;
+    applyNameStyle(
+      character.plate,
+      character.label,
+      { uid, name: character.name, isLeader: character.isLeader } as LobbyMember,
+      ready
+    );
+  }
+
   setLoading(uid: string, pct: number | null) {
     const character = this.characters.get(uid);
     if (!character) return;
@@ -837,7 +911,32 @@ export class LobbyScene {
    *  Returns false when the character has no model yet: a player who emotes at
    *  a teammate whose skin is still downloading is not an error, there is just
    *  nothing to pose. */
+  /** Is anybody actually looking at this lobby right now?
+   *
+   *  Two dropped frames of slack: a render loop runs at 60fps and even a
+   *  struggling phone is nowhere near a fifth of a second between frames, so
+   *  this says "yes" whenever the lobby is genuinely being drawn and "no"
+   *  within a moment of it stopping. */
+  isBeingWatched(): boolean {
+    return performance.now() - this.lastRenderAt < 200;
+  }
+
+  /** Perform an emote on somebody's character.
+   *
+   *  FIRES ONCE, LIVE — and is dropped outright if this lobby is not being
+   *  watched. An emote is a gesture, not a message: it means "this happened
+   *  just now, in front of the people standing here", and one delivered late
+   *  is not a lesser version of that, it is a different and confusing event.
+   *
+   *  Dropping it also fixes a real fault rather than merely being tidy. A
+   *  Babylon animation only advances while its scene renders, and the lobby
+   *  stops rendering the moment the tab is hidden or the collection borrows
+   *  the canvas. A clip started then does not quietly skip — it FREEZES on
+   *  its first frame and performs when the player comes back, so a wave from
+   *  five seconds ago played out on return, out of time and with nothing on
+   *  screen to explain it. */
   async playEmote(uid: string, clipId: string): Promise<boolean> {
+    if (!this.isBeingWatched()) return false;
     const character = this.characters.get(uid);
     const rig = character?.rig;
     if (!character || !rig) return false;
@@ -848,6 +947,17 @@ export class LobbyScene {
 
     const started = await rig.play(clipId, { loop: false });
     if (!started || mine !== character.emoteToken) return false;
+    // That await can be a download — a squadmate's emote clip is not
+    // necessarily on this device — and the player may have looked away while
+    // it arrived. Starting it now would freeze it on its first frame and
+    // perform it whenever they come back, which is the very thing dropping
+    // stale emotes is meant to prevent. Put the stance back and let it go.
+    if (!this.isBeingWatched()) {
+      const stance = getStanceClip(character.weaponId);
+      character.clipId = stance;
+      if (stance) void rig.play(stance, { loop: true });
+      return false;
+    }
     character.clipId = clipId;
 
     character.emoteEnd = rig.onClipEnd(() => {
@@ -934,6 +1044,16 @@ export class LobbyScene {
     label.isHitTestVisible = false;
     applyNameStyle(plate, label, member); // text, colours AND the fitted size
     plate.addControl(label);
+
+    const mic = new TextBlock(`mic_${member.uid}`, "🎙");
+    mic.fontSize = 13;
+    mic.width = "18px";
+    mic.textHorizontalAlignment = Control.HORIZONTAL_ALIGNMENT_LEFT;
+    mic.horizontalAlignment = Control.HORIZONTAL_ALIGNMENT_LEFT;
+    mic.left = "5px";
+    mic.isHitTestVisible = false;
+    mic.isVisible = false; // silent until they actually say something
+    plate.addControl(mic);
     disposables.push(plate);
 
     // Chat bubble over the head. Linked to a tiny STATIC invisible mesh at
@@ -986,11 +1106,14 @@ export class LobbyScene {
       aura: null,
       plate,
       label,
+      mic,
       bubble,
       bubbleText,
       bubbleTimer: 0,
       loadBar: null,
       isLeader: member.isLeader,
+      name: member.name,
+      ready: false,
       disposables,
       slotX: x,
       slotZ: z,
@@ -1013,6 +1136,8 @@ export class LobbyScene {
   }
 
   dispose() {
+    this.untalk?.();
+    this.untalk = null;
     for (const character of this.characters.values()) {
       clearTimeout(character.bubbleTimer);
       character.emoteEnd?.();

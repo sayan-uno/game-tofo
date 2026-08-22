@@ -4,8 +4,8 @@
 // `payload ?? {}` — a null emit must never be able to crash the server.
 import type { Server, Socket } from "socket.io";
 import type { AuthPayload } from "../middleware/auth.js";
-import { getLobbyMembers, getLobbyMode, getUserLobby } from "../redis.js";
-import { getUsersByIds } from "../services/users.js";
+import { getLobbyMembers, getLobbyMode, getUserLobby, isLobbyLeader, isPartyLobby } from "../redis.js";
+import { displayName, getUsersByIds } from "../services/users.js";
 import { getGame } from "./games.js";
 import { findFriendshipBetween } from "../services/friends.js";
 import {
@@ -20,10 +20,23 @@ import {
   onQuick,
   onReconnect,
 } from "./match.js";
-import { getLoading, getLobbyGame, getLobbyMatch, getSearching, setLoading, setLobbyGame, throttle } from "./store.js";
+import {
+  getLoading,
+  getLobbyGame,
+  getLobbyMatch,
+  getSayReady,
+  getSearching,
+  setLoading,
+  setLobbyGame,
+  setSayReady,
+  throttle,
+} from "./store.js";
 import { FILL_DEADLINE_MS, dequeue, enqueue, packNow } from "./matchmaking.js";
 import { EV, PROGRESS_MAX_HZ, type MatchAddable, type MatchSync, type TimePong } from "../shared/core/protocol.js";
+import { noteLobbyPick, noteLobbyReady, noteLobbySearch } from "./partyLog.js";
+import { bannedAmong, gameHeld, hiddenGames } from "./gameLocks.js";
 import { getSanctions } from "../services/sanctions.js";
+import { logEvent } from "../services/eventLog.js";
 
 interface AuthedSocket extends Socket {
   data: { auth: AuthPayload; lastProgressAt?: number };
@@ -44,9 +57,28 @@ setInterval(() => {
   dropped.clear();
 }, 60_000).unref();
 
+/** Where an action came from. An action without an address is half a record,
+ *  and the handshake already resolved it — the same shape the lobby module
+ *  attaches, so a row from either side reads the same. */
+const trace = (socket: AuthedSocket) => {
+  const d = socket.data as {
+    origin?: { ip?: string; country?: string | null; ua?: string | null };
+    deviceHash?: string;
+  };
+  return { ip: d.origin?.ip, ipCountry: d.origin?.country ?? null, ua: d.origin?.ua ?? null, deviceHash: d.deviceHash };
+};
+
 export function registerPlatformHandlers(io: Server, socket: AuthedSocket, deps: PlatformDeps): void {
   const { userId, uid } = socket.data.auth;
   const soloLobby = `L${uid}`;
+  /** The name to put in front of teammates. Read from the row rather than
+   *  from the token, which carries whatever the name was when it was signed —
+   *  the lobby module makes the same choice, for the same reason. Only two
+   *  handlers below need it, and both are things a person does by hand. */
+  const myName = async (): Promise<string> => {
+    const [me] = await getUsersByIds([userId]);
+    return me ? displayName(me) : uid;
+  };
   registerSync(socket);
 
   // ---- lobby: game selection ----
@@ -54,16 +86,35 @@ export function registerPlatformHandlers(io: Server, socket: AuthedSocket, deps:
     try {
       const { gameId } = payload ?? {};
       const lobbyId = (await getUserLobby(userId)) ?? soloLobby;
-      if (lobbyId !== soloLobby) return ack?.({ error: "Only the party leader can choose the game" });
+      if (!(await isLobbyLeader(lobbyId, userId, uid))) {
+        return ack?.({ error: "Only the party leader can choose the game" });
+      }
       if (await getLobbyMatch(lobbyId)) return ack?.({ error: "Finish the current match first" });
       let picked: string | null = null;
       if (gameId !== null && gameId !== undefined) {
         if (typeof gameId !== "string" || !getGame(gameId)) return ack?.({ error: "That game isn't available" });
+        const held = await gameHeld(gameId);
+        if (held) return ack?.({ error: held });
+        // Not offered is not the same as not allowed. A client can name any
+        // id it likes, and one naming a hidden game is the client this exists
+        // to stop.
+        if ((await hiddenGames()).includes(gameId)) return ack?.({ error: "That game isn't available" });
         picked = gameId;
       }
       if (!(await throttle("pickgame", userId, 1))) return ack?.({ error: "Hold on a moment" });
       await setLobbyGame(lobbyId, picked);
+      void noteLobbyPick(lobbyId, uid, await myName(), picked).catch((e: unknown) =>
+        console.error("[party] pick:", e)
+      );
       await deps.broadcastLobby(io, lobbyId);
+      logEvent({
+        type: "lobby.pick",
+        userId,
+        uid,
+        lobbyId,
+        gameId: picked ?? undefined,
+        ...trace(socket),
+      });
       ack?.({ ok: true, gameId: picked });
     } catch (err) {
       console.error("lobby:pickGame error:", err);
@@ -99,7 +150,9 @@ export function registerPlatformHandlers(io: Server, socket: AuthedSocket, deps:
     const reply = typeof _payload === "function" ? (_payload as (r: object) => void) : ack;
     try {
       const lobbyId = (await getUserLobby(userId)) ?? soloLobby;
-      if (lobbyId !== soloLobby) return reply?.({ error: "Only the party leader can start" });
+      if (!(await isLobbyLeader(lobbyId, userId, uid))) {
+        return reply?.({ error: "Only the party leader can start" });
+      }
       // A match ban leaves the lobby and friends working — only playing stops.
       const active = await getSanctions(userId);
       if (active.match) return reply?.({ error: active.match.reason || "You cannot join matches right now" });
@@ -107,6 +160,11 @@ export function registerPlatformHandlers(io: Server, socket: AuthedSocket, deps:
       if (!gameId) return reply?.({ error: "Choose a game first" });
       const game = getGame(gameId);
       if (!game) return reply?.({ error: "That game isn't available right now" });
+      // Held between the pick and the press — which is the ordinary case, since
+      // a hold goes on while parties are already sitting in front of it.
+      const held = await gameHeld(gameId);
+      if (held) return reply?.({ error: held });
+      if ((await hiddenGames()).includes(gameId)) return reply?.({ error: "That game isn't available right now" });
       if (await getLobbyMatch(lobbyId)) return reply?.({ error: "Your party is already in a match" });
       const [memberIds, mode, loading] = await Promise.all([
         getLobbyMembers(lobbyId),
@@ -115,15 +173,75 @@ export function registerPlatformHandlers(io: Server, socket: AuthedSocket, deps:
       ]);
       const users = await getUsersByIds(memberIds);
       if (users.length === 0) return reply?.({ error: "Nobody to start with" });
+      // One barred player stops the party, and is NAMED. A start that fails
+      // without saying who is a party arguing with itself.
+      //
+      // BEFORE the download gate. Making a party fetch a twenty-megabyte pack
+      // and only then telling them somebody at the table cannot use it is a
+      // waste of their data and their time — and the answer was known before
+      // the first byte.
+      const barred = await bannedAmong(gameId, memberIds);
+      if (barred.size > 0) {
+        const who = users.filter((u) => barred.has(u.id)).map((u) => u.username ?? u.uid);
+        return reply?.({
+          error:
+            who.length === 1
+              ? users.length === 1
+                ? barred.get(memberIds.find((id) => barred.has(id))!) || "You cannot play this game"
+                : `${who[0]} cannot play this game`
+              : `${who.join(", ")} cannot play this game`,
+        });
+      }
       const notReady = users.filter((u) => (loading[u.uid] ?? 0) < 100);
       if (notReady.length > 0) {
         return reply?.({ error: `Waiting for ${notReady.length === 1 ? notReady[0].username ?? "a teammate" : `${notReady.length} teammates`} to finish downloading` });
+      }
+      // Downloaded is not the same as willing. Everybody EXCEPT the leader has
+      // to say they want to play this — pressing START is the leader saying
+      // it. One player who does not fancy this game can hold the party, which
+      // is the point: the alternative is being dragged into it.
+      if (users.length > 1) {
+        const saidYes = new Set(await getSayReady(lobbyId));
+        const waiting = users.filter((u) => u.uid !== uid && !saidYes.has(u.uid));
+        if (waiting.length > 0) {
+          return reply?.({
+            error:
+              waiting.length === 1
+                ? `${waiting[0].username ?? "A teammate"} has not said they are ready`
+                : `${waiting.length} teammates have not said they are ready`,
+          });
+        }
       }
       if (users.length > game.matchSizeFor(mode)) return reply?.({ error: "Your party is too big for this mode" });
       if (await getSearching(lobbyId)) return reply?.({ error: "Already searching" });
       if (!(await throttle("start", userId, 3))) return reply?.({ error: "Hold on a moment" });
 
       const size = game.matchSizeFor(mode);
+      // PRESSING START IS AN ACT, and until now only its consequence was on
+      // record: a match appeared, with nothing saying who asked for it or when
+      // — and nothing at all when the ask never turned into a match. Logged
+      // here, before either outcome, so a search that fills with bots, a
+      // search that is cancelled and a search that finds nobody all leave the
+      // same first line.
+      logEvent({
+        ...trace(socket),
+        type: "lobby.search",
+        userId,
+        uid,
+        lobbyId,
+        gameId,
+        data: { mode, party: users.length, size, solo: users.length === 1 },
+      });
+      // The same fact in the group's own recording, when there is a group to
+      // record it in. The global log answers "what did this account do"; a
+      // party's recording answers "what happened in this group" — and the
+      // run-up to a match is exactly what somebody watching one back is
+      // looking for.
+      if (isPartyLobby(lobbyId)) {
+        void noteLobbySearch(lobbyId, uid, await myName(), true, gameId).catch((e: unknown) =>
+          console.error("[party] search:", e)
+        );
+      }
       if (users.length >= size) {
         // A full party needs nobody: start at once rather than queue for a
         // pool that has nothing to add.
@@ -143,21 +261,89 @@ export function registerPlatformHandlers(io: Server, socket: AuthedSocket, deps:
     }
   });
 
-  // ---- lobby: cancel the search (leader) ----
+  // ---- lobby: cancel the search (ANY member) ----
+  //
+  // Starting is the leader's call; stopping is not. A search runs for up to
+  // ten seconds and then fills the empty seats with bots, and a player who has
+  // changed their mind — or who never wanted this game — should not have to
+  // sit through a match to get out of it. Anybody in the party can pull the
+  // handle, and everybody is told who did, so it is not a mystery.
   socket.on(EV.cancel, async (_payload: unknown, ack?: (r: object) => void) => {
     const reply = typeof _payload === "function" ? (_payload as (r: object) => void) : ack;
     try {
       const lobbyId = (await getUserLobby(userId)) ?? soloLobby;
-      if (lobbyId !== soloLobby) return reply?.({ error: "Only the party leader can cancel" });
       const pool = await getSearching(lobbyId);
       if (!pool) return reply?.({ ok: true }); // already out of the queue
       const [gameId, sizeText] = pool.split(":");
       await dequeue(gameId, Number(sizeText), lobbyId);
-      io.to(`room:${lobbyId}`).emit(EV.searchEnded, { reason: "cancelled" });
+      logEvent({
+        ...trace(socket),
+        type: "lobby.cancel",
+        userId,
+        uid,
+        lobbyId,
+        gameId,
+        // Any member can stop a search, so WHO did is the whole point of the
+        // line — "the party stopped looking" answers nothing.
+        data: { leader: await isLobbyLeader(lobbyId, userId, uid) },
+      });
+      if (isPartyLobby(lobbyId)) {
+        void noteLobbySearch(lobbyId, uid, await myName(), false, gameId).catch((e: unknown) =>
+          console.error("[party] search:", e)
+        );
+      }
+      io.to(`room:${lobbyId}`).emit(EV.searchEnded, {
+        reason: "cancelled",
+        by: { uid, name: await myName() },
+        mine: await isLobbyLeader(lobbyId, userId, uid),
+      });
       reply?.({ ok: true });
     } catch (err) {
       console.error("lobby:cancelSearch error:", err);
       reply?.({ error: "Could not cancel" });
+    }
+  });
+
+  // ---- lobby: I am ready / I am not ----
+  socket.on(EV.sayReady, async (payload: { ready?: unknown } | null, ack?: (r: object) => void) => {
+    const reply = typeof payload === "function" ? (payload as (r: object) => void) : ack;
+    try {
+      const ready = (payload ?? {}).ready !== false;
+      const lobbyId = (await getUserLobby(userId)) ?? soloLobby;
+      if (await getLobbyMatch(lobbyId)) return reply?.({ error: "You are already in a match" });
+      await setSayReady(lobbyId, uid, ready);
+      void noteLobbyReady(lobbyId, uid, await myName(), ready).catch((e: unknown) =>
+        console.error("[party] ready:", e)
+      );
+      // Everyone sees it, through the same broadcast that carries the rest of
+      // the lobby — one shape of truth, not a second channel that can drift.
+      await deps.broadcastLobby(io, lobbyId);
+      reply?.({ ok: true, ready });
+    } catch (err) {
+      console.error("lobby:sayReady error:", err);
+      reply?.({ error: "Could not change that" });
+    }
+  });
+
+  // ---- lobby: I would rather play something else ----
+  //
+  // The polite half of the cancel above. A member cannot change the game —
+  // that stays the leader's — but they can say so without leaving the party
+  // or typing it into chat and hoping somebody reads it.
+  socket.on(EV.objectGame, async (_payload: unknown, ack?: (r: object) => void) => {
+    const reply = typeof _payload === "function" ? (_payload as (r: object) => void) : ack;
+    try {
+      const lobbyId = (await getUserLobby(userId)) ?? soloLobby;
+      if (await isLobbyLeader(lobbyId, userId, uid)) {
+        return reply?.({ error: "You choose the game — nobody to ask" });
+      }
+      if (!(await throttle("object", userId, 20))) return reply?.({ error: "You have just said so" });
+      const gameId = await getLobbyGame(lobbyId);
+      io.to(`room:${lobbyId}`).emit(EV.objection, { uid, name: await myName(), gameId });
+      reply?.({ ok: true });
+    } catch (err) {
+      console.error("lobby:objectGame error:", err);
+      reply?.({ error: "Could not send that" });
     }
   });
 

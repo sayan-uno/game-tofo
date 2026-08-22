@@ -11,6 +11,11 @@ const userMatchKey = (userId: string) => `user:match:${userId}`;
  *  binding so the two states can be told apart in messages ("searching" vs
  *  "in a match"), while both block the same things. */
 const lobbySearchKey = (lobbyId: string) => `lobby:${lobbyId}:mm`;
+/** Who has said they actually want to play this. Separate from the download
+ *  progress above, which answers a different question: "ready" there means the
+ *  pack has finished arriving, and a player can be fully downloaded and still
+ *  not want to play the game somebody else picked. */
+const lobbySayReadyKey = (lobbyId: string) => `lobby:${lobbyId}:up`;
 
 /** A party's game selection lives as long as the party is used; the backstop
  *  is generous because a leader picking a game and coming back tomorrow to a
@@ -25,10 +30,28 @@ export async function setLobbyGame(lobbyId: string, gameId: string | null): Prom
   const m = redis.multi();
   if (gameId) m.set(lobbyGameKey(lobbyId), gameId, "EX", SELECTION_TTL);
   else m.del(lobbyGameKey(lobbyId));
-  // A new pick means a new pack: nobody is ready for it yet.
+  // A new pick means a new pack: nobody is ready for it yet…
   m.del(lobbyReadyKey(lobbyId));
+  // …and nobody has agreed to play it either. Carrying a ready-up across a
+  // change of game is exactly the trap this feature exists to close: somebody
+  // says yes to Ludo and finds themselves in a runner.
+  m.del(lobbySayReadyKey(lobbyId));
   await m.exec();
 }
+
+// ---- "I want to play this" -------------------------------------------------
+
+export async function setSayReady(lobbyId: string, uid: string, ready: boolean): Promise<void> {
+  const m = redis.multi();
+  if (ready) m.sadd(lobbySayReadyKey(lobbyId), uid);
+  else m.srem(lobbySayReadyKey(lobbyId), uid);
+  m.expire(lobbySayReadyKey(lobbyId), SELECTION_TTL);
+  await m.exec();
+}
+
+export const getSayReady = (lobbyId: string): Promise<string[]> => redis.smembers(lobbySayReadyKey(lobbyId));
+
+export const clearSayReady = (lobbyId: string): Promise<number> => redis.del(lobbySayReadyKey(lobbyId));
 
 export const getLobbyGame = (lobbyId: string): Promise<string | null> => redis.get(lobbyGameKey(lobbyId));
 
@@ -55,13 +78,14 @@ export async function moveLobbyGameState(oldLobbyId: string, newLobbyId: string)
     [lobbyReadyKey(oldLobbyId), lobbyReadyKey(newLobbyId)],
     [lobbyMatchKey(oldLobbyId), lobbyMatchKey(newLobbyId)],
     [lobbySearchKey(oldLobbyId), lobbySearchKey(newLobbyId)],
+    [lobbySayReadyKey(oldLobbyId), lobbySayReadyKey(newLobbyId)],
   ]) {
     if (await redis.exists(from)) await redis.rename(from, to);
   }
 }
 
 export async function clearLobbyGameState(lobbyId: string): Promise<void> {
-  await redis.del(lobbyGameKey(lobbyId), lobbyReadyKey(lobbyId));
+  await redis.del(lobbyGameKey(lobbyId), lobbyReadyKey(lobbyId), lobbySayReadyKey(lobbyId));
 }
 
 // ---- match membership ----

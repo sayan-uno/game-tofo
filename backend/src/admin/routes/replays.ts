@@ -11,12 +11,13 @@
 import { safeRouter } from "../asyncRouter.js";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../../db/client.js";
-import { matchPlayers, matchReplays, matches, users } from "../../db/schema.js";
+import { eventLog, matchPlayers, matchReplays, matches, users } from "../../db/schema.js";
 import { config } from "../../config.js";
 import { listGames } from "../../platform/games.js";
 import { publicCatalog } from "../../services/catalog.js";
 import { getEvidence } from "../../platform/evidence.js";
 import { unpackReplay } from "../../platform/replay.js";
+import { loadSessionVoice } from "../sessionVoice.js";
 import { requestOrigin } from "../../services/clientIp.js";
 import { requireAdmin, requireSudo } from "../guard.js";
 import { audit } from "../audit.js";
@@ -128,15 +129,54 @@ replaysRouter.get("/:matchKey", requireAdmin("moderator"), async (req, res) => {
     });
     return;
   }
+  // The audio for this match, if any was recorded. It arrives WITH the replay
+  // because that is exactly when the studio needs it, and because a second
+  // round trip would only mean the sound arrives after the picture.
+  const voice = await loadSessionVoice(row.matchKey);
   await audit(req.admin!, {
     action: "replay.open",
     targetType: "match",
     targetId: row.matchKey,
     ip: requestOrigin(req).ip,
+    after: voice.length > 0 ? { voice: voice.length } : undefined,
   });
+  // Listening is its own act, so it is recorded as one, naming whose voices
+  // were handed over — "who has heard whom" has to stay answerable.
+  if (voice.length > 0) {
+    await audit(req.admin!, {
+      action: "voice.play",
+      targetType: "match",
+      targetId: row.matchKey,
+      after: { heard: voice.filter((v) => v.kind === "track").map((v) => v.uid), mix: voice.some((v) => v.kind === "mix") },
+      ip: requestOrigin(req).ip,
+    });
+  }
+  // Microphones opened and closed during this match. Reported by the players'
+  // pages, not derived from the audio, because the two answer different
+  // questions: the recording says what was HEARD — and only for whoever was
+  // flagged — while this says what was possible, for everybody. A mic opened
+  // in silence leaves no audio at all, and a mic that was shut is an alibi.
+  const mics = await db
+    .select({ at: eventLog.at, uid: eventLog.uid, data: eventLog.data })
+    .from(eventLog)
+    .where(and(eq(eventLog.matchKey, row.matchKey), eq(eventLog.type, "voice.mic")))
+    .orderBy(eventLog.at)
+    .limit(200);
+
+  // What this match was BUILT FROM — the same line the activity log carries,
+  // handed to the studio so it can open its record with it. A roster is a flat
+  // list of four people and cannot say which of them walked in together.
+  const [made] = await db
+    .select({ data: eventLog.data })
+    .from(eventLog)
+    .where(and(eq(eventLog.matchKey, row.matchKey), eq(eventLog.type, "match.created")))
+    .limit(1);
+
   res.json({
+    madeFrom: (made?.data as { from?: { party?: string | null; uids?: string[] }[]; bots?: number } | null) ?? null,
     replay: unpackReplay(bytes),
     game: packInfo(row.gameId),
+    mics: mics.map((m) => ({ at: new Date(m.at).getTime(), uid: m.uid, on: (m.data as { on?: boolean })?.on === true })),
     // The character models are NOT in a game's pack — they come from the
     // platform catalog, which the player client fills in at sign-in and the
     // console otherwise never would. Without it every runner is a name plate
@@ -148,6 +188,7 @@ replaysRouter.get("/:matchKey", requireAdmin("moderator"), async (req, res) => {
     // origins and the console is not one of them.
     cdnBase: config.cdnBaseUrl || null,
     stored: { tier: row.tier, bytes: row.bytes, expiresAt: row.expiresAt, createdAt: row.createdAt },
+    voice,
   });
 });
 

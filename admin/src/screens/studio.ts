@@ -17,6 +17,9 @@
 //   A player's phone that drops mid-match already does exactly this, which is
 //   why the timeline needed no new game code at all.
 import { ApiFailure, call } from "../api";
+import { loadStudioAudio } from "../studioAudio";
+import { talkStrip } from "../talkStrip";
+import type { VoiceFile } from "../studioAudio";
 import { ask } from "../modal";
 import { withSudo } from "../sudo";
 import { duration, esc, num, pill, table, toast, when } from "../ui";
@@ -48,6 +51,18 @@ interface Answer {
   catalog: unknown;
   cdnBase: string | null;
   stored: { tier: string; bytes: number; expiresAt: string | null; createdAt: string };
+  /** What was said while this was played, if anyone at the table was flagged.
+   *  Each file knows how far into the match it starts, which is what lets the
+   *  studio lay it over the replay instead of beside it. */
+  voice?: VoiceFile[];
+  /** Microphones opened and closed during the match, in wall-clock ms.
+   *  Separate from `voice` on purpose: that is what was HEARD, and only for
+   *  players who were flagged; this is what was POSSIBLE to hear, for
+   *  everybody. A mic opened in silence leaves no audio at all. */
+  mics?: { at: number; uid: string | null; on: boolean }[];
+  /** Which parties and which lone players were put together to make this
+   *  match. Afterwards the roster is a flat list and cannot answer it. */
+  madeFrom?: { from?: { party?: string | null; uids?: string[] }[]; bots?: number } | null;
 }
 
 /** A fixed base for the virtual clock. Any constant works — what matters is
@@ -83,11 +98,13 @@ function catalogThroughProxy(catalog: unknown, cdnBase: string | null): unknown 
   return JSON.parse(JSON.stringify(catalog).split(cdnBase).join(prefix));
 }
 
+let audioDeck: import("../studioAudio").StudioAudio | null = null;
+
 export function mountStudio(host: HTMLElement, matchKey: string, go: (h: string) => void): () => void {
   let stopped = false;
   let raf = 0;
   let runtime: GameRuntime | null = null;
-  let engineHandle: { dispose(): void } | null = null;
+  let engineHandle: { dispose(): void; beginFrame(): void; endFrame(): void } | null = null;
   let releaseKeys: (() => void) | null = null;
 
   const cleanup = () => {
@@ -103,6 +120,8 @@ export function mountStudio(host: HTMLElement, matchKey: string, go: (h: string)
     runtime = null;
     engineHandle?.dispose();
     engineHandle = null;
+    audioDeck?.dispose();
+    audioDeck = null;
   };
 
   host.innerHTML = `<div class="card"><p class="empty">Loading the replay…</p></div>`;
@@ -119,11 +138,52 @@ export function mountStudio(host: HTMLElement, matchKey: string, go: (h: string)
     if (stopped) return;
 
     const file = data.replay;
+    const voice: VoiceFile[] = data.voice ?? [];
     const rate = file.tickRate;
+    // WHERE THE MATCH STOPS, AND WHERE THE RECORDING DOES — two different
+    // moments, and conflating them silently threw away the most interesting
+    // part of the audio.
+    //
+    // The game ends on its last tick. The players do not: the scoreboard is up
+    // for five seconds afterwards, everybody is still in the match's voice
+    // room, and what is said over a scoreboard is exactly what somebody
+    // listens to a match for. That audio was being recorded correctly and was
+    // simply unreachable — the timeline ended at the final tick, so the
+    // scrubber could not be dragged to it and playback stopped before it.
+    //
+    // The timeline runs to whichever ends later. Past the final tick the
+    // picture holds on its last frame, which is right: the match is over and
+    // the scoreboard is what was on screen.
     const endTick = Math.max(1, file.endTick);
-    const endMs = (endTick * 1000) / rate;
+    const matchEndMs = (endTick * 1000) / rate;
+    const voiceEndMs = voice.reduce(
+      (last, v) => Math.max(last, v.offsetMs + (v.durationSec ?? 0) * 1000),
+      0
+    );
+    const endMs = Math.max(matchEndMs, voiceEndMs);
+    /** The last position the scrubber may reach — the match's own end, or the
+     *  end of what was recorded, whichever is later. */
+    // Derived from the VOICE, not from endMs — converting the match's own end
+    // back into ticks round-trips through floating point and can land a tick
+    // past itself, which would put every match into a one-tick "results"
+    // stretch that never happened.
+    const endOfTape = Math.max(endTick, Math.ceil((voiceEndMs * rate) / 1000));
     const roster = [...file.roster].sort((a, b) => a.seat - b.seat);
     const seatOf = new Map(roster.map((r) => [r.seat, r]));
+
+    // Mic events arrive as wall-clock moments; the studio thinks in ticks. The
+    // match's own start time is the bridge, and it is in the replay file — so
+    // a mic opening lands on the same timeline as the input that fired at the
+    // same instant.
+    const nameOfUid = new Map(roster.map((r) => [r.uid, r.name]));
+    const matchStartedAt = file.startAt ?? file.createdAt;
+    const micTicks = (data.mics ?? [])
+      .map((m) => ({
+        tick: Math.max(0, Math.round(((m.at - matchStartedAt) * rate) / 1000)),
+        name: nameOfUid.get(m.uid ?? "") ?? m.uid ?? "?",
+        on: m.on,
+      }))
+      .sort((a, b) => a.tick - b.tick);
 
     // The input log, flattened and put in tick order — which is the order a
     // viewer watching from the start would have seen them in.
@@ -154,8 +214,53 @@ export function mountStudio(host: HTMLElement, matchKey: string, go: (h: string)
     const scrub = host.querySelector<HTMLInputElement>("#scrub")!;
     const playBtn = host.querySelector<HTMLButtonElement>("#play")!;
     const clock = host.querySelector<HTMLElement>("#clock")!;
+    const afterChip = host.querySelector<HTMLElement>("#afterchip")!;
     const feed = host.querySelector<HTMLElement>("#feed")!;
-    scrub.max = String(endTick);
+    scrub.max = String(endOfTape);
+
+    // ---- the sound -------------------------------------------------------
+    // Fetched after the shell paints and never awaited by the render path: a
+    // replay with no audio must still play, and audio that is slow to arrive
+    // must not hold the picture back.
+    const mixer = host.querySelector<HTMLElement>("#mixer");
+    // Present from the start, saying there is no voice, so a match with none
+    // cannot be mistaken for a line that failed to load.
+    host.querySelector<HTMLElement>("#talk")!.innerHTML = talkStrip(null, endMs);
+    if (voice.length > 0 && mixer) {
+      void loadStudioAudio(voice, mixer).then((deck) => {
+        if (stopped || !deck) {
+          deck?.dispose();
+          if (mixer) mixer.innerHTML = `<p class="muted" style="font-size:12.5px">The recordings for this match could not be loaded.</p>`;
+          return;
+        }
+        audioDeck = deck;
+        const strip = host.querySelector<HTMLElement>("#talk")!;
+        const drawStrip = () => {
+          strip.innerHTML = talkStrip(deck.timeline(), endMs);
+          // Click the picture, go to the moment — the same gesture as in the
+          // party studio, because it is the same picture. On the plot rather
+          // than the marks, so the quiet stretch beside a burst is aimable at.
+          const plot = strip.querySelector<HTMLElement>(".tk-plot:not(.empty)");
+          if (plot) {
+            plot.onclick = (ev) => {
+              const box = plot.getBoundingClientRect();
+              if (box.width <= 0) return;
+              // The strip speaks in milliseconds; this studio thinks in ticks.
+              const ms = ((ev.clientX - box.left) / box.width) * endMs;
+              void seek(Math.round((ms * rate) / 1000));
+            };
+          }
+        };
+        drawStrip();
+        deck.onSelect(drawStrip);
+        // The audio elements were mounted here; keep them and add the controls.
+        const controls = document.createElement("div");
+        controls.innerHTML = deck.render();
+        mixer.querySelectorAll(":scope > p").forEach((n) => n.remove());
+        mixer.appendChild(controls);
+        deck.wire(mixer);
+      });
+    }
 
     // ---- the virtual clock ----------------------------------------------
     let vTime = 0;
@@ -164,11 +269,21 @@ export function mountStudio(host: HTMLElement, matchKey: string, go: (h: string)
     let lastReal = performance.now();
     let cursor = 0;
     let quickCursor = 0;
+    /** How far through the microphone log the playhead is. Its own cursor, and
+     *  reset on every seek like the others, so scrubbing to a moment shows the
+     *  mics as they stood at that moment rather than as they were left. */
+    let micCursor = 0;
     let focus = roster.find((r) => !r.isBot)?.uid ?? roster[0]?.uid ?? "";
     let seeking = false;
 
-    const now = () => T0 + vTime;
-    const tickNow = () => Math.max(0, Math.min(endTick, Math.floor((vTime * rate) / 1000)));
+    // THE GAME'S clock, which stops when the game does. The studio's own clock
+    // carries on past it — the scoreboard stretch, where the sound is still
+    // moving and the picture is not — and letting the simulation follow it
+    // would keep running a match that had already finished.
+    const now = () => T0 + Math.min(vTime, matchEndMs);
+    // The STUDIO's position, which may be past the final tick: that is where
+    // the results are, and where the last of the audio lives.
+    const tickNow = () => Math.max(0, Math.min(endOfTape, Math.floor((vTime * rate) / 1000)));
 
     // ---- load the game ---------------------------------------------------
     if (!data.game) {
@@ -234,7 +349,7 @@ export function mountStudio(host: HTMLElement, matchKey: string, go: (h: string)
         /* ignore */
       }
       hudRoot.replaceChildren();
-      vTime = (Math.max(0, Math.min(endTick, target)) * 1000) / rate;
+      vTime = (Math.max(0, Math.min(endOfTape, target)) * 1000) / rate;
       const at = tickNow();
       const next = await pack.module.createRuntime(context());
       if (stopped) return;
@@ -245,6 +360,8 @@ export function mountStudio(host: HTMLElement, matchKey: string, go: (h: string)
       cursor = before.length;
       quickCursor = quick.findIndex((q) => q.tick > at);
       if (quickCursor < 0) quickCursor = quick.length;
+      micCursor = micTicks.findIndex((m) => m.tick > at);
+      if (micCursor < 0) micCursor = micTicks.length;
       for (const r of roster) {
         if (r.left && r.leftAtTick !== null && r.leftAtTick <= at) next.onLeft(r.uid);
       }
@@ -255,13 +372,26 @@ export function mountStudio(host: HTMLElement, matchKey: string, go: (h: string)
     }
 
     function deliverDue(): void {
+      const at = tickNow();
+      // Microphones FIRST, and outside the runtime guard. These are not
+      // inputs — nothing in the game reacts to them — so they must not wait
+      // for a runtime to exist, and they have to redraw the feed themselves:
+      // hanging that off a quick message meant a mic only appeared in the
+      // record when somebody happened to send chat after it, which for most
+      // matches is never.
+      let micMoved = false;
+      while (micCursor < micTicks.length && micTicks[micCursor].tick <= at) {
+        micCursor++;
+        micMoved = true;
+      }
+      if (micMoved) drawFeed();
+
       if (!runtime) return;
-      const horizon = tickNow() + LEAD_TICKS;
+      const horizon = at + LEAD_TICKS;
       while (cursor < flat.length && flat[cursor].tick <= horizon) {
         const i = flat[cursor++];
         runtime.onRemoteInput({ uid: i.uid, tick: i.tick, kind: i.kind });
       }
-      const at = tickNow();
       while (quickCursor < quick.length && quick[quickCursor].tick <= at) {
         const q = quick[quickCursor++];
         runtime.onQuick?.(q.uid, q.kind, q.id);
@@ -272,30 +402,71 @@ export function mountStudio(host: HTMLElement, matchKey: string, go: (h: string)
       }
     }
 
+    /** The opening line of the record: what this match was made of. Always
+     *  first, at tick zero, because it is the one thing that is true before
+     *  anything happens. */
+    const madeFromLine = (): string => {
+      const from = data.madeFrom?.from ?? [];
+      if (from.length === 0) return "";
+      const parts = from.map((f) =>
+        f.party
+          ? `party <b class="mono">${esc(f.party)}</b>${f.uids && f.uids.length > 1 ? ` (${f.uids.length})` : ""}`
+          : `<b class="mono">${esc((f.uids ?? []).join(", "))}</b>`
+      );
+      const bots = Number(data.madeFrom?.bots ?? 0);
+      return `<div class="said"><span class="at">0:00</span> match <b class="mono">${esc(
+        file.matchKey
+      )}</b> made from ${parts.join(" + ")}${bots > 0 ? ` + ${bots} bot${bots === 1 ? "" : "s"}` : ""}</div>`;
+    };
+
     function drawFeed(): void {
-      const said = quick.slice(0, quickCursor).slice(-8).reverse();
+      // Two kinds of line, one record. Quick chat is what was sent; a mic
+      // opening or closing is what could be heard, which the audio cannot
+      // answer for the players nobody was recording.
+      const said = [
+        ...quick.slice(0, quickCursor).map((q) => ({
+          tick: q.tick,
+          html: `<b>${esc(seatOf.get(q.seat)?.name ?? "?")}</b> ${esc(q.id)}`,
+        })),
+        ...micTicks.slice(0, micCursor).map((m) => ({
+          tick: m.tick,
+          html: `<b>${esc(m.name)}</b> ${m.on ? "🎙 opened their mic" : "🎙 closed their mic"}`,
+        })),
+      ]
+        .sort((a, b) => a.tick - b.tick)
+        .slice(-8)
+        .reverse();
       feed.innerHTML = said.length
         ? said
-            .map(
-              (q) =>
-                `<div class="said"><span class="at">${fmtTick(q.tick, rate)}</span> <b>${esc(
-                  seatOf.get(q.seat)?.name ?? "?"
-                )}</b> ${esc(q.id)}</div>`
-            )
-            .join("")
-        : `<p class="empty" style="padding:10px">Nothing said yet.</p>`;
+            .map((q) => `<div class="said"><span class="at">${fmtTick(q.tick, rate)}</span> ${q.html}</div>`)
+            .join("") + madeFromLine()
+        : // Even a silent match opens with what it was made of — that line is
+          // true from tick zero, and it is the one an admin came for.
+          madeFromLine() || `<p class="empty" style="padding:10px">Nothing said yet.</p>`;
     }
 
     function chrome(): void {
       const at = tickNow();
       if (!scrub.matches(":active")) scrub.value = String(at);
-      clock.textContent = `${fmtTick(at, rate)} / ${fmtTick(endTick, rate)}`;
+      // Past the final tick the picture is frozen on the scoreboard and only
+      // the sound is still moving. Said in a chip BESIDE the clock rather than
+      // inside it: the clock is "position / length" and something reads it as
+      // exactly that pair — putting a word in there changes what the clock
+      // means to everything that consumes it.
+      afterChip.hidden = at <= endTick;
+      clock.textContent = `${fmtTick(at, rate)} / ${fmtTick(endOfTape, rate)}`;
       playBtn.textContent = playing ? "❚❚" : "▶";
       playBtn.title = playing ? "Pause" : "Play";
       // A fraction, not a percentage: the stylesheet knows how much width the
       // name column and the padding take, and this does not have to.
       host.querySelectorAll<HTMLElement>("[data-tickmark]").forEach((el) => {
-        el.style.setProperty("--p", String(at / endTick));
+        el.style.setProperty("--p", String(at / endOfTape));
+      });
+      // A microphone lights only while somebody is actually talking — not
+      // while their mic is merely open, which tells a viewer nothing.
+      const talking = audioDeck?.speaking();
+      host.querySelectorAll<HTMLElement>("[data-mic]").forEach((el) => {
+        el.classList.toggle("live", !!talking?.has(el.dataset.mic!));
       });
     }
 
@@ -319,11 +490,25 @@ export function mountStudio(host: HTMLElement, matchKey: string, go: (h: string)
         if (vTime >= endMs) playing = false;
       }
       lastReal = real;
+      // The sound is moved by the SAME clock as the game, in the same frame,
+      // before anything draws. Give audio its own timer and the two drift.
+      audioDeck?.sync(vTime, playing && !seeking, speed);
       deliverDue();
       // Draw last. Never before deliverDue.
       if (!seeking) {
         try {
+          // Inside beginFrame/endFrame. Babylon measures the gap between
+          // frames in beginFrame, and nothing else calls it — the game uses
+          // engine.runRenderLoop, which does it for you; this studio drives
+          // its own clock so it can scrub. Without the pair the engine reports
+          // a delta of ZERO on every frame, and a game's between-tick
+          // smoothing is fed that zero: the simulation still advances, because
+          // that runs on ticks, but nothing interpolates between them and
+          // every skeletal animation crawls at Babylon's one-millisecond
+          // floor. Same fault, same fix, as the party studio.
+          engineHandle?.beginFrame();
           runtime?.render();
+          engineHandle?.endFrame();
         } catch (err) {
           console.error("[studio] render failed", err);
         }
@@ -334,7 +519,9 @@ export function mountStudio(host: HTMLElement, matchKey: string, go: (h: string)
 
     // ---- controls --------------------------------------------------------
     playBtn.onclick = () => {
-      if (tickNow() >= endTick) void seek(0);
+      // A browser will not start audio without a gesture; this is that gesture.
+      audioDeck?.resume();
+      if (tickNow() >= endOfTape) void seek(0);
       playing = !playing;
       lastReal = performance.now();
     };
@@ -360,7 +547,13 @@ export function mountStudio(host: HTMLElement, matchKey: string, go: (h: string)
 
     // Space to play, arrows to nudge — the keys anybody expects on a player.
     const keys = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement)?.tagName === "INPUT") return;
+      // Anything somebody can type into is off limits — a TEXTAREA as much as
+      // an INPUT. Space is a playback shortcut here and preventDefault on it
+      // means a space that never reaches whatever is being written, which
+      // reads as "I cannot type in this box" rather than as a stolen key.
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if ((e.target as HTMLElement)?.isContentEditable) return;
       if (e.code === "Space") {
         e.preventDefault();
         playBtn.click();
@@ -421,7 +614,9 @@ function shell(file: ReplayFile, data: Answer, roster: ReplayRoster[]): string {
         .filter((t) => t >= 0)
         .map((t) => `<i style="left:${((t / Math.max(1, file.endTick)) * 100).toFixed(3)}%"></i>`)
         .join("");
-      return `<div class="lane"><span class="who">${esc(r.name)}</span><div class="marks">${marks}</div></div>`;
+      return `<div class="lane"><span class="who"><i class="mic" data-mic="${esc(r.uid)}">🎙</i>${esc(
+        r.name
+      )}</span><div class="marks">${marks}</div></div>`;
     })
     .join("");
 
@@ -436,13 +631,20 @@ function shell(file: ReplayFile, data: Answer, roster: ReplayRoster[]): string {
       <div class="bar">
         <button class="btn" id="play" title="Play">▶</button>
         <span class="clock" id="clock">0:00</span>
+        <span class="after-chip" id="afterchip" hidden>results</span>
         <input type="range" id="scrub" min="0" value="0" step="1" />
         <span class="speeds">${SPEEDS.map(
           (s) => `<button data-speed="${s}" class="${s === 1 ? "on" : ""}">${s}×</button>`
         ).join("")}</span>
       </div>
 
-      <div class="tape">${tape}<div class="playhead" data-tickmark></div></div>
+      <div class="tape"><div id="talk"></div>${tape}<div class="playhead" data-tickmark></div></div>
+
+      <div id="mixer" class="mixerslot">${
+        data.voice && data.voice.length > 0
+          ? `<p class="muted" style="font-size:12.5px">Loading what was said…</p>`
+          : `<p class="muted" style="font-size:12.5px">No voice was recorded for this match.</p>`
+      }</div>
 
       <div class="grid2" style="margin-top:18px">
         <div>
@@ -453,7 +655,9 @@ function shell(file: ReplayFile, data: Answer, roster: ReplayRoster[]): string {
               roster.map((r) => {
                 const st = place.get(r.uid);
                 return `<tr>
-                  <td><strong>${esc(r.name)}</strong> ${r.isBot ? pill("bot") : ""} ${r.left ? pill("left", "warn") : ""}</td>
+                  <td><i class="mic" data-mic="${esc(r.uid)}">🎙</i><strong>${esc(r.name)}</strong> ${
+                    r.isBot ? pill("bot") : ""
+                  } ${r.left ? pill("left", "warn") : ""}</td>
                   <td class="mono">${st ? (st.placement === 1 ? "<strong>1st</strong>" : st.placement) : "—"}</td>
                   <td class="mono">${num(st?.score)}</td>
                   <td><button class="btn ghost" data-focus="${esc(r.uid)}">Watch</button></td>

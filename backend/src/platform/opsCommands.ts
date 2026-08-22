@@ -45,7 +45,7 @@ const MAX_AGE_MS = 30_000;
  *  already refused for being stale, so remembering costs nothing but memory. */
 const SEEN_TTL_MS = MAX_AGE_MS * 2;
 
-export type OpsCommandName = "ping" | "disconnect" | "endMatch" | "broadcast" | "silence";
+export type OpsCommandName = "ping" | "disconnect" | "endMatch" | "broadcast" | "silence" | "maintenance" | "noticeGone";
 
 export interface OpsCommand {
   id: string;
@@ -147,7 +147,64 @@ async function execute(io: Server, c: OpsCommand): Promise<unknown> {
     case "broadcast": {
       const message = String(c.args.message ?? "").slice(0, 300);
       if (!message) throw new Error("message required");
-      io.emit("platform:notice", { message, level: String(c.args.level ?? "info") });
+      const level = String(c.args.level ?? "info");
+      // Everyone, or named people. A notice to one player goes to their user
+      // room, which is where every other per-player message already goes, so
+      // it reaches every tab they have open and nobody else's.
+      const uids = Array.isArray(c.args.uids) ? (c.args.uids as string[]) : null;
+      if (!uids || uids.length === 0) {
+        io.emit("platform:notice", { message, level });
+        return { sockets: io.sockets.sockets.size };
+      }
+      const { getUserByUid } = await import("../services/users.js");
+      let sent = 0;
+      for (const uid of uids.slice(0, 200)) {
+        const user = await getUserByUid(String(uid).trim());
+        if (!user) continue;
+        io.to(`user:${user.id}`).emit("platform:notice", { message, level });
+        sent++;
+      }
+      return { sent, of: uids.length };
+    }
+
+    case "noticeGone": {
+      // Off every list that is open right now. The stored row already stops it
+      // reaching anybody who has not seen it; this is for the people who are
+      // looking at it as the admin takes it back.
+      io.emit("platform:noticeGone", { id: String(c.args.noticeId ?? "") });
+      return { sockets: io.sockets.sockets.size };
+    }
+
+    case "maintenance": {
+      // Push the state, whatever it is: scheduled, happening, or over. The
+      // client decides what that looks like — a line in the corner of a match,
+      // a notice nobody can close, or nothing at all.
+      const active = c.args.active === true;
+      const at = Number(c.args.at ?? 0) || 0;
+      const message = String(c.args.message ?? "").slice(0, 300);
+      io.emit("platform:maintenance", { active, at, message });
+      const { setGate } = await import("./flags.js");
+      setGate(active, message);
+      if (active) {
+        // Everything stops, AT THE SERVER.
+        //
+        // The notice is a courtesy; this is the enforcement. Matches are
+        // ended so nobody is left mid-run, and then every socket is closed —
+        // because a client that keeps its connection keeps its handlers, and
+        // anybody can delete a notice from the page with dev tools and carry
+        // on playing over a socket that still answers. With the socket gone
+        // and the handshake refusing, there is nothing left to talk to.
+        const { endAllMatches } = await import("./match.js");
+        const ended = await endAllMatches(io, "maintenance");
+        const open = io.sockets.sockets.size;
+        // A beat, so the notice and the results reach the page before its
+        // connection goes. Losing the socket first would leave people staring
+        // at a game that simply stopped.
+        setTimeout(() => {
+          for (const s of io.sockets.sockets.values()) s.disconnect(true);
+        }, 1500);
+        return { sockets: open, matchesEnded: ended, disconnecting: open };
+      }
       return { sockets: io.sockets.sockets.size };
     }
   }

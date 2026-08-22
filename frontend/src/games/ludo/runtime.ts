@@ -155,6 +155,7 @@ export class LudoRuntime implements GameRuntime {
         corner: cornerOf(seat, this.players),
         name: r.name,
         you: r.uid === ctx.you,
+        uid: r.uid,
       })),
       onQuick: (kind, id) => ctx.sendQuick(kind, id),
     });

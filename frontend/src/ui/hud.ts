@@ -1,6 +1,6 @@
 import { clearSession } from "../api/http";
 import { disconnectSocket } from "../api/socket";
-import { isMicEnabled, toggleMic } from "../voice/livekit";
+import { onMicChange, toggleMic } from "../voice/livekit";
 import { toast } from "./toast";
 import { setAvatar } from "./avatar";
 import { setNameView } from "./nameview";
@@ -13,6 +13,12 @@ export interface HudCallbacks {
   onOpenProfile: () => void;
   /** Characters and emotes the player owns. */
   onOpenCollection: () => void;
+  /** The list of notices this player has been sent, read back from the
+   *  server — a message seen once is a message half of them will say they
+   *  never got. */
+  onOpenNotices: () => void;
+  /** What is on: banners, clips, anything the platform wants seen. */
+  onOpenEvents: () => void;
   onLeaveLobby: () => void;
   onChangeMode: (mode: LobbyMode) => void;
   /** Resolves after the server answered (errors already toasted by the caller). */
@@ -23,6 +29,12 @@ export interface HudCallbacks {
   onChooseGame: () => void;
   /** START — leader only, lit once every member has the game downloaded. */
   onStart: () => void;
+  /** A member agreeing (or withdrawing) — the leader cannot press START until
+   *  everybody else has. */
+  onSayReady: (ready: boolean) => void;
+  /** A member asking for a different game, without leaving or typing it into
+   *  chat and hoping somebody reads it. */
+  onObjectGame: () => void;
 }
 
 export interface StartState {
@@ -62,6 +74,9 @@ export class Hud {
   private pickBtn: HTMLButtonElement;
   private pickName: HTMLElement;
   private startHint: HTMLElement;
+  private readyRow!: HTMLElement;
+  private readyBtn!: HTMLButtonElement;
+  private objectBtn!: HTMLButtonElement;
 
   constructor(user: User, callbacks: HudCallbacks) {
     this.root = document.createElement("div");
@@ -94,6 +109,8 @@ export class Hud {
         </div>
         <div class="hud-actions">
           <button class="btn btn-ghost mic-btn" title="Toggle microphone">🎙 On</button>
+          <button class="btn btn-ghost events-btn" title="What is on">★</button>
+          <button class="btn btn-ghost notices-btn" title="Notices from TOFO">✉</button>
           <button class="btn btn-ghost collection-btn">Collection</button>
           <button class="btn btn-ghost friends-btn">Friends</button>
           <button class="btn btn-ghost logout-btn" title="Log out">⎋</button>
@@ -103,6 +120,10 @@ export class Hud {
       <div class="hud-bottom">
         <div class="game-stack">
           <button class="game-start-btn is-blur" type="button" disabled>START</button>
+          <div class="ready-row hidden">
+            <button class="btn ready-btn" type="button">I'M READY</button>
+            <button class="btn btn-ghost object-btn" type="button" title="Ask the leader for a different game">Change game?</button>
+          </div>
           <div class="game-start-hint"></div>
           <button class="game-pick-btn" type="button" title="Choose game">
             <span class="gp-label">GAME</span>
@@ -138,6 +159,11 @@ export class Hud {
     this.pickBtn = this.root.querySelector(".game-pick-btn")!;
     this.pickName = this.root.querySelector(".gp-name")!;
     this.startHint = this.root.querySelector(".game-start-hint")!;
+    this.readyRow = this.root.querySelector(".ready-row")!;
+    this.readyBtn = this.root.querySelector(".ready-btn")!;
+    this.objectBtn = this.root.querySelector(".object-btn")!;
+    this.readyBtn.onclick = () => callbacks.onSayReady(!this.readyBtn.classList.contains("on"));
+    this.objectBtn.onclick = () => callbacks.onObjectGame();
     this.pickBtn.onclick = callbacks.onChooseGame;
     this.startBtn.onclick = () => {
       if (!this.startBtn.disabled) callbacks.onStart();
@@ -219,6 +245,8 @@ export class Hud {
     this.codeInput.onkeydown = (e) => {
       if (e.key === "Enter") void submit();
     };
+    this.root.querySelector<HTMLButtonElement>(".events-btn")!.onclick = callbacks.onOpenEvents;
+    this.root.querySelector<HTMLButtonElement>(".notices-btn")!.onclick = callbacks.onOpenNotices;
     this.root.querySelector<HTMLButtonElement>(".collection-btn")!.onclick = callbacks.onOpenCollection;
     this.root.querySelector<HTMLButtonElement>(".friends-btn")!.onclick = callbacks.onToggleFriends;
     this.root.querySelector<HTMLButtonElement>(".chat-fab")!.onclick = callbacks.onToggleChat;
@@ -229,12 +257,15 @@ export class Hud {
         .catch(() => toast("Couldn't switch your microphone", true))
         .finally(() => {
           this.micBtn.disabled = false;
-          this.micBtn.textContent = isMicEnabled() ? "🎙 On" : "🎙 Off";
-          this.micBtn.classList.toggle("muted", !isMicEnabled());
         });
     };
-    this.micBtn.textContent = isMicEnabled() ? "🎙 On" : "🎙 Off";
-    this.micBtn.classList.toggle("muted", !isMicEnabled());
+    // Painted by the voice module, not from a value read here once. This HUD
+    // is built at startup and never rebuilt, so muting inside a match used to
+    // leave it saying "On" for the rest of the session.
+    onMicChange((on) => {
+      this.micBtn.textContent = on ? "🎙 On" : "🎙 Off";
+      this.micBtn.classList.toggle("muted", !on);
+    });
 
     // Party mode picker.
     this.root.querySelector<HTMLButtonElement>(".mode-card")!.onclick = (e) => {
@@ -269,6 +300,17 @@ export class Hud {
     this.pickBtn.classList.toggle("picked", state.name !== null);
     this.pickBtn.classList.toggle("readonly", !state.isLeader);
     this.pickBtn.title = state.isLeader ? "Choose game" : "The party leader picks the game";
+  }
+
+  /** A member's half of starting: agree to the game, or say you would rather
+   *  not. Null for the leader and for anybody on their own — START is the
+   *  leader's own consent, and there is nobody to agree with alone. */
+  setReadyUp(state: { ready: boolean; canObject: boolean } | null) {
+    this.readyRow.classList.toggle("hidden", state === null);
+    if (!state) return;
+    this.readyBtn.classList.toggle("on", state.ready);
+    this.readyBtn.textContent = state.ready ? "READY ✓" : "I'M READY";
+    this.objectBtn.classList.toggle("hidden", !state.canObject);
   }
 
   /** START: blurred and inert until the leader may press it. */

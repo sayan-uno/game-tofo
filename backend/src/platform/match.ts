@@ -31,8 +31,12 @@ import type {
 } from "./games.js";
 import { recordBotOutcome, type BotIdentity } from "./bots.js";
 import { bindMatch, unbindMatch } from "./store.js";
+import { noteLobbyMatch } from "./partyLog.js";
+import { isPartyLobby } from "../redis.js";
+import { logEvent } from "../services/eventLog.js";
 import { encodeReplay, queueReplay, tierFor, type QuickLogEntry } from "./replay.js";
 import { deleteMatchVoiceRoom } from "./voice.js";
+import { considerMatch, noteMatchStart, stopForMatch } from "./voiceRecording.js";
 import {
   EV,
   type MatchEnd,
@@ -48,6 +52,7 @@ import {
   QUICK_MAX,
   QUICK_WINDOW_MS,
   type QuickRelay,
+  RESULTS_MS,
   type RosterEntry,
   type Standing,
 } from "../shared/core/protocol.js";
@@ -72,6 +77,19 @@ const graceFor = (m: Match): number =>
  *  friend, for one — and a match that has already been collected can only
  *  answer "nobody". */
 const LINGER_MS = 5 * 60_000;
+/** How long the recorder stays in the room AFTER the results window closes.
+ *
+ *  The clients leave the match's voice room when the results screen takes them
+ *  home, which is at exactly RESULTS_MS — so stopping the recorder at
+ *  RESULTS_MS is a tie, and a tie is decided by whichever timer fires first on
+ *  the day. Losing it means the last words of the match are missing from the
+ *  recording, and the last words of a match are the ones most likely to be the
+ *  reason somebody is listening.
+ *
+ *  So the recorder outlasts the players rather than racing them. It costs a
+ *  couple of seconds of an empty room, which costs nothing: no microphone is
+ *  publishing, so no bytes are written. */
+const RECORDER_TAIL_MS = 2000;
 
 /** How often the server advances its own simulations to see whether everyone
  *  is out. Coarse on purpose: a match is decided by the inputs, not by this
@@ -154,6 +172,15 @@ export const getMatch = (id: string): Match | undefined => matches.get(id);
 
 /** The real people in a match, as uid → userId. Bots are simply absent, which
  *  is what keeps them out of every list built from this. */
+/** The wall clock at which tick 0 lands — the replay's own zero.
+ *
+ *  Voice recordings are placed on the studio's timeline by subtracting this,
+ *  which is the whole reason the audio and the game agree about when things
+ *  happened. Null before the countdown has been set. */
+export function matchStartAt(id: string): number | null {
+  return matches.get(id)?.startAt ?? null;
+}
+
 export function humansIn(id: string): Map<string, string> {
   const m = matches.get(id);
   const out = new Map<string, string>();
@@ -298,6 +325,38 @@ export async function createMatch(
   const userIds = humans(m).map((r) => r.userId!);
   for (const uid of userIds) byUser.set(uid, id);
   await bindMatch(id, m.lobbyIds, userIds);
+  // WHO THIS MATCH IS MADE OF, by id, on one line.
+  //
+  // A match is assembled from whole parties and from players who came on their
+  // own, and afterwards there is nothing that says which — the roster is a
+  // flat list of people. So it is written down at the moment it is decided: a
+  // party by its own id, a solo player by theirs. That is what turns "these
+  // four were in a match" into "this group and these two strangers were put
+  // together", which is a different question and usually the one being asked.
+  logEvent({
+    type: "match.created",
+    matchKey: id,
+    gameId: m.game.id,
+    data: {
+      from: parties.map((p) => ({
+        party: isPartyLobby(p.lobbyId) ? p.lobbyId : null,
+        uids: p.users.map((u) => u.uid),
+      })),
+      bots: bots.length,
+    },
+  });
+  // Mark the gap in every party that just walked out of its lobby. From here
+  // until the match ends nothing happens in those lobbies, and an admin
+  // watching one back needs to be told that rather than left guessing.
+  for (const lobbyId of m.lobbyIds) {
+    void noteLobbyMatch(lobbyId, "start", id, m.game.id).catch((err) =>
+      console.error(`[party] match start on ${lobbyId}:`, err)
+    );
+  }
+  // Is anyone at this table flagged? Decided once, here, so the webhook that
+  // fires when somebody opens their microphone has a straight answer rather
+  // than a query to run on the hot path.
+  void considerMatch(id, userIds).catch((err) => console.error(`[match ${id}] voice decision failed:`, err));
 
   // Put every member's socket in the match room and hand each their own
   // prepare payload (it names them, so it is per-recipient).
@@ -330,6 +389,10 @@ async function go(io: Server, m: Match): Promise<void> {
   }
   m.phase = "countdown";
   m.startAt = Date.now() + m.game.countdownMs;
+  // Tick 0 is now known. Any recording of this match is placed relative to it,
+  // which is what lets the studio lay the sound over the replay instead of
+  // beside it. Never awaited: the countdown is on the path to play.
+  void noteMatchStart(m.id, m.startAt).catch((err) => console.error(`[match ${m.id}] anchor:`, err));
   const payload: MatchGo = { matchId: m.id, startAt: m.startAt, serverNow: Date.now() };
   io.to(m.room).emit(EV.go, payload);
   setTimeout(() => {
@@ -428,6 +491,18 @@ export async function leave(io: Server, m: Match, uid: string): Promise<void> {
     socket?.leave(m.room);
     await unbindMatch(m.id, [], [r.userId]);
   }
+  // …AND THE PARTY THEY CAME FROM, once its last member is out.
+  //
+  // A match is assembled from several parties and strangers, and it ends when
+  // the LAST of them is done — which for a party that finished early meant
+  // being held "in a match" by people they have never met. They could not
+  // start another, could not change the mode, and the leader could not even
+  // remove the member who was still playing, because every one of those asks
+  // whether the party is in a match.
+  //
+  // A party is in a match while one of ITS OWN is still in it. Not a moment
+  // longer.
+  await releaseLobbyIfDone(m, r.partyLobbyId);
   io.to(m.room).emit(EV.left, { uid });
   if (m.phase === "ended") return;
   if (present(m).length === 0) {
@@ -435,6 +510,20 @@ export async function leave(io: Server, m: Match, uid: string): Promise<void> {
   } else if (m.phase === "prepare") {
     markReadyCheck(io, m);
   }
+}
+
+/** Is anybody from this lobby still in this match? If not, the lobby is free.
+ *
+ *  Left deliberately silent when somebody remains: the check is cheap, runs
+ *  only when a player leaves, and being wrong in the other direction would
+ *  free a party that is still playing. */
+async function releaseLobbyIfDone(m: Match, lobbyId: string): Promise<void> {
+  if (!lobbyId) return;
+  const stillIn = [...m.runners.values()].some(
+    (x) => !x.left && !x.isBot && x.partyLobbyId === lobbyId
+  );
+  if (stillIn) return;
+  await unbindMatch(m.id, [lobbyId], []);
 }
 
 function markReadyCheck(io: Server, m: Match): void {
@@ -474,6 +563,22 @@ export function onReconnect(socket: Socket, userId: string): MatchResume | null 
     inputs,
     left: [...m.runners.values()].filter((x) => x.left).map((x) => x.uid),
   };
+}
+
+/** End every match this process is running.
+ *
+ *  Used when the platform goes down for maintenance. "aborted" rather than a
+ *  reason of its own: it is what the results screen already knows how to say,
+ *  and inventing a new one would mean every game had to learn a word for
+ *  something that is not about the game. Nobody is left mid-match wondering
+ *  why the socket went quiet. */
+export async function endAllMatches(io: Server, why: string): Promise<number> {
+  const live = [...matches.values()].filter((m) => isActive(m));
+  for (const m of live) {
+    await end(io, m, "aborted").catch((err) => console.error(`[match ${m.id}] ${why} end failed:`, err));
+  }
+  if (live.length > 0) console.log(`✔ Ended ${live.length} match(es) for ${why}`);
+  return live.length;
 }
 
 export async function end(io: Server, m: Match, reason: MatchEndReason): Promise<void> {
@@ -544,13 +649,33 @@ export async function end(io: Server, m: Match, reason: MatchEndReason): Promise
   const userIds = humans(m).map((r) => r.userId!);
   for (const id of userIds) if (byUser.get(id) === m.id) byUser.delete(id);
   await unbindMatch(m.id, m.lobbyIds, userIds);
+  // ...and close the gap. The party is a lobby again.
+  for (const lobbyId of m.lobbyIds) {
+    void noteLobbyMatch(lobbyId, "end", m.id, m.game.id).catch((err) =>
+      console.error(`[party] match end on ${lobbyId}:`, err)
+    );
+  }
   for (const r of humans(m)) {
     if (r.graceTimer) clearTimeout(r.graceTimer);
     const socketId = await getSocketId(r.userId!);
     const socket = socketId ? io.sockets.sockets.get(socketId) : null;
     socket?.leave(m.room);
   }
-  void deleteMatchVoiceRoom(m.id);
+  // KEEP RECORDING THROUGH THE RESULTS.
+  //
+  // The scoreboard is up for RESULTS_MS and everybody is still in the match's
+  // voice room for all of it — and what is said over a scoreboard is routinely
+  // the most telling thing in the whole match, because it is what follows
+  // losing. Stopping at the final tick threw exactly that away.
+  //
+  // Then un-register BEFORE the room goes away: the recorder finishes its
+  // files on the way out, and deleting the room first cuts them off
+  // mid-sentence.
+  void new Promise((r) => setTimeout(r, RESULTS_MS + RECORDER_TAIL_MS))
+    .then(() => stopForMatch(m.id))
+    .then(() => new Promise((r) => setTimeout(r, 2000)))
+    .then(() => deleteMatchVoiceRoom(m.id))
+    .catch((err) => console.error(`[match ${m.id}] could not stop recording:`, err));
   m.timers.linger = setTimeout(() => matches.delete(m.id), LINGER_MS);
 }
 

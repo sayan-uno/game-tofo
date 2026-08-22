@@ -519,19 +519,123 @@ export const recordingTargets = pgTable(
   ]
 );
 
+/** One minute of the platform, written down.
+ *
+ *  The live snapshot in Redis answers "what is happening"; it expires in
+ *  seconds and answers nothing about last night. This is the same numbers kept
+ *  on a minute's cadence so the console can go BACK — how many were online at
+ *  03:14, and what was running.
+ *
+ *  The absence of rows is the most valuable thing in the table: a minute with
+ *  no row is a minute the server was not writing one, which is how an outage
+ *  that happened while everyone was asleep becomes visible instead of being
+ *  something to guess about later.
+ */
+export const platformHistory = pgTable(
+  "platform_history",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+    /** Which process wrote it — several may, and each is its own line. */
+    instance: text("instance").notNull(),
+    online: integer("online").notNull(),
+    sockets: integer("sockets").notNull(),
+    matches: integer("matches").notNull(),
+    matchPlayers: integer("match_players").notNull(),
+    matchBots: integer("match_bots").notNull(),
+    queued: integer("queued").notNull(),
+    rssMb: integer("rss_mb").notNull(),
+    byGame: jsonb("by_game").notNull().default({}),
+  },
+  (t) => [index("idx_platform_history_at").on(t.at), unique("platform_history_at_instance_key").on(t.at, t.instance)]
+);
+
+/** A stretch of time during which one party was recorded.
+ *
+ *  A party has no identity of its own in the platform: its room is named after
+ *  whoever leads it (`L<uid>`), so the same three people appear under two
+ *  different names depending on who is leader, and a name is reused by a
+ *  different group later. That is fine for routing voice and useless as a
+ *  record — "what was said in that party" cannot be answered by a name that
+ *  means different things on different days.
+ *
+ *  So a recorded party gets an id of its own, and this row is what that id
+ *  means: which room, when it ran, and every arrival and departure while it
+ *  did. It is also what makes the party studio possible — a match has a replay
+ *  to lay voices over, and a party has this.
+ */
+export const partySessions = pgTable(
+  "party_sessions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** Matches `voice_recordings.match_key` for this session's audio. */
+    key: text("key").notNull().unique("party_sessions_key_key"),
+    /** The LiveKit room, which is the lobby id at the time. */
+    room: text("room").notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+    /** Everyone who was ever in it, with the name they had at the time. */
+    roster: jsonb("roster").notNull().default([]),
+    /** Kept only while the session is live and small; the finished log lives
+     *  in the evidence bucket, exactly like a match replay. */
+    events: jsonb("events").notNull().default([]),
+    /** Where the packed simulation is. Null while the party is still running. */
+    r2Key: text("r2_key"),
+    bytes: integer("bytes"),
+    eventCount: integer("event_count"),
+    /** Ten days, then it goes — the same promise as everything else here. */
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("idx_party_sessions_room").on(t.room, t.startedAt),
+    index("idx_party_sessions_started").on(t.startedAt),
+    index("idx_party_sessions_expiry").on(t.expiresAt),
+  ]
+);
+
 /** One audio file per participant per recorded match. The bytes live in the
  *  private evidence bucket; this row is how the console finds them. */
 export const voiceRecordings = pgTable(
   "voice_recordings",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    /** The room this belongs to: a match id, or a lobby id when `scope` says
+     *  lobby. Named for matches because they came first. */
     matchKey: text("match_key").notNull(),
+    /** match | lobby — shown in the console, because a recording made in a
+     *  party is not evidence about a match and must never read as one. */
+    scope: varchar("scope", { length: 8 }).notNull().default("match"),
     userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
     uid: varchar("uid", { length: 12 }).notNull(),
     r2Key: text("r2_key").notNull(),
+    /** The published microphone this file is. One per track, not per player:
+     *  turning the mic off and on publishes a second one. The room mix uses
+     *  the sentinel "mix", so the unique index below dedupes it too. */
+    trackSid: text("track_sid"),
+    /** track = one person's microphone; mix = everyone in the room, together.
+     *  Both are kept: the mix is how a conversation is understood, the tracks
+     *  are how "who said it" is answered. */
+    kind: varchar("kind", { length: 8 }).notNull().default("track"),
+    /** Where this file starts on the session's timeline, in milliseconds.
+     *  For a match that timeline is the REPLAY's — 0 is tick 0 — which is what
+     *  lets the studio play the audio in step with the game. */
+    offsetMs: integer("offset_ms"),
+    /** When this person was actually talking: [startMs, endMs] pairs on the
+     *  session's own timeline. Measured while recording, from the audio
+     *  itself — something an external recorder could never hand back. It is
+     *  what lets the console light a microphone from fact and jump a moderator
+     *  straight to where somebody spoke. */
+    speech: jsonb("speech"),
+    /** Parties only: who was in the group. Matches keep their roster in
+     *  match_players, but a party is not persisted anywhere else, so without
+     *  this "who were they with" is unanswerable a week later. */
+    roster: jsonb("roster"),
     egressId: text("egress_id"),
     /** starting | active | complete | failed */
     status: varchar("status", { length: 16 }).notNull().default("starting"),
+    /** Why it failed, in LiveKit's words. Kept because a console that says
+     *  only "failed" makes somebody read a database to find out. */
+    error: text("error"),
     bytes: bigint("bytes", { mode: "number" }),
     durationSec: integer("duration_sec"),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
@@ -542,6 +646,99 @@ export const voiceRecordings = pgTable(
     index("idx_voice_recordings_match").on(t.matchKey),
     index("idx_voice_recordings_user").on(t.userId, t.startedAt),
     index("idx_voice_recordings_expiry").on(t.expiresAt),
+    // One live recording per published microphone, enforced by the database
+    // rather than by a check-then-act in application code. LiveKit retries
+    // webhooks, so the same "track published" can arrive twice within
+    // milliseconds; without this both pass the check, both start an egress,
+    // and the two files overwrite each other at the same key while both rows
+    // claim to be the recording. Failed attempts are excluded so a retry can
+    // still claim the track.
+    uniqueIndex("voice_recordings_live_track_key")
+      .on(t.matchKey, t.trackSid)
+      .where(sql`status <> 'failed'`),
     check("voice_recordings_status_check", sql`status IN ('starting','active','complete','failed')`),
+    check("voice_recordings_scope_check", sql`scope IN ('match','lobby')`),
+    check("voice_recordings_kind_check", sql`kind IN ('track','mix')`),
+  ]
+);
+
+/** Notices sent to players from the console.
+ *
+ *  A record rather than a fire-and-forget broadcast, for three reasons an
+ *  admin runs into within a week of using it:
+ *
+ *    A notice sent by mistake has to be REMOVABLE. Deleting one takes it off
+ *    every player's list and stops it reaching anybody who was offline when it
+ *    went out — which is the only window in which "undo" means anything.
+ *
+ *    A player wants to read it again. A message that appears once and is gone
+ *    is a message half of them will say they never got.
+ *
+ *    And one send is ONE row, whoever it went to. A notice to the whole
+ *    platform must not become forty thousand rows an admin has to tidy.
+ */
+export const notices = pgTable(
+  "notices",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    body: text("body").notNull(),
+    /** everyone — including people who have not connected yet.
+     *  online   — whoever was connected at the moment it was sent.
+     *  players  — named accounts. */
+    audience: varchar("audience", { length: 12 }).notNull(),
+    /** Who it actually went to, for the two audiences that name people. Empty
+     *  for `everyone`, which is defined by the absence of a list rather than
+     *  by a snapshot of it — a notice for everybody should reach the player
+     *  who signs up tomorrow. */
+    uids: jsonb("uids").notNull().default(sql`'[]'::jsonb`),
+    sentBy: text("sent_by"),
+    sentAt: timestamp("sent_at", { withTimezone: true }).notNull().defaultNow(),
+    /** Deleted, not destroyed: an admin taking a notice back is itself a thing
+     *  that happened, and the audit trail refers to this row. */
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    deletedBy: text("deleted_by"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("idx_notices_sent").on(t.sentAt),
+    index("idx_notices_expiry").on(t.expiresAt),
+    check("notices_audience_check", sql`audience IN ('everyone','online','players')`),
+  ]
+);
+
+/** Events: something the platform wants a player to SEE.
+ *
+ *  A notice is a sentence; an event is a picture, a clip, or a piece of
+ *  markup — a new weapon, a season, a tournament. The difference that matters
+ *  in the code is that an event can be PINNED, which means it is put in front
+ *  of a player the next time they arrive rather than waiting to be found.
+ *
+ *  "The next time they arrive" is deliberately narrow: a fresh sign-in or a
+ *  reload, not coming back from another tab. Something that reappears every
+ *  time somebody glances away is not an announcement, it is a nuisance — and
+ *  the fastest way to teach people to close it without reading.
+ */
+export const events = pgTable(
+  "events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    title: text("title").notNull(),
+    /** image | video | html — what `body` means. */
+    kind: varchar("kind", { length: 8 }).notNull(),
+    /** A URL for image and video; the markup itself for html. */
+    body: text("body").notNull(),
+    /** Shown on arrival, not just in the list. */
+    pinned: boolean("pinned").notNull().default(false),
+    /** Catalog item this event is about. Clicking the event opens the
+     *  collection with it selected — an advert for a weapon that does not take
+     *  you to the weapon is an advert that wastes everybody's time. */
+    itemId: varchar("item_id", { length: 40 }),
+    createdBy: text("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("idx_events_created").on(t.createdAt),
+    check("events_kind_check", sql`kind IN ('image','video','html')`),
   ]
 );

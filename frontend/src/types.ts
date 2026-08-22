@@ -192,12 +192,24 @@ export interface LobbyState {
   game?: string | null;
   /** Download progress per member uid (0–100) for the picked game. */
   loading?: Record<string, number>;
+  /** Uids who have said they want to play what is picked. The leader is not
+   *  in here — pressing START is how they say it. Absent from an older
+   *  backend, which reads as "nobody has been asked yet". */
+  ready?: string[];
+  /** Members who may not play the game that is picked, and why. Named rather
+   *  than counted: a party told "somebody here cannot play this" spends the
+   *  next minute working out who. */
+  barred?: { uid: string; why: string }[];
 }
 
 /** One entry of GET /api/games — what the picker shows and what the pack
  *  loader downloads. Mirrors backend/src/routes/games.ts. */
 export interface GameInfo {
   id: string;
+  /** Why nobody may start this right now (an admin hold), or null. */
+  heldReason?: string | null;
+  /** Why THIS player may not play it, or null. */
+  bannedReason?: string | null;
   name: string;
   tagline: string;
   matchSizes: Record<LobbyMode, number>;

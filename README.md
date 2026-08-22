@@ -440,6 +440,239 @@ specific origins and does not include this one. **In production the console's
 origin must be added to the bucket's CORS rules** or Trackline replays will not
 load.
 
+### Voice recording (A6)
+
+An admin can flag a player; from then on, **their matches and their party** are
+recorded — everyone with them, not only them, because a conversation has more
+than one side and half of one proves nothing. That is exactly why the feature
+is shaped the way it is rather than left as a switch.
+
+The two are recorded on different terms, and the console always says which a
+recording is:
+
+| | match | party |
+| --- | --- | --- |
+| decided | once, when the match is assembled | when somebody opens a microphone in it |
+| costs | one match of the flag's budget | nothing — a party is not a match |
+| ends | when the match ends | when no flagged player is left in the party |
+
+A party has no moment of assembly — people drift in and out for as long as they
+like — so there is nothing to decide *at*, and the question is asked when it
+matters instead: is anybody in this party flagged, right now? Two Redis reads,
+and for almost every party the answer is no. It also has no natural end, which
+is why one recording may not run past `VOICE_MAX_SESSION_MINUTES` (default 120).
+Nothing is lost when that fires: the file is closed and kept, and the next thing
+anyone says opens a new one.
+
+**A separate process does the capturing.** `ROLE=recorder` joins each recorded
+room as a **hidden LiveKit participant** — invisible in the participant list,
+because players are told in the Terms and not by a badge in the game — receives
+the audio, mixes it, and writes the files. It runs alongside the game and admin
+processes and shares nothing with them but Redis and Postgres, so a recording
+can never touch the event loop that carries player inputs.
+
+It replaced LiveKit's **egress**, and the reason is a number: egress
+concurrency is capped per project — **2** sessions on the free plan, 100 at
+$50/month, 500 at $500/month. Measured on this project, nine microphones across
+three rooms: two egresses started and seven were refused with *"concurrent
+egress sessions limit exceeded"*, regardless of room. A moderation feature
+whose ceiling is somebody else's price list has a cliff in it. The recorder's
+only ceiling is CPU: decoding Opus is about 1% of a core per stream, mixing is
+addition, and encoding is another 1–2% — roughly **a tenth of a core per
+recorded match**. It is also about fifteen times cheaper per match, because a
+bot is billed as a participant rather than an export.
+
+Every recorded session keeps **two things**, and both are wanted:
+
+- a **room mix** — everyone together, which is how a conversation is followed
+- **each voice separately** — one person alone, which is how "who said that" is
+  answered
+
+Mixing runs on a 20 ms clock rather than a queue: frames arrive per track
+whenever the network delivers them, so every tick takes whatever each speaker
+has buffered and a track with nothing ready contributes silence. That keeps the
+mix in real time and lets it heal after a stall instead of drifting further
+behind with every hiccup.
+
+**Every file knows where it belongs in time.** Each recording carries an
+`offsetMs` from the session's own zero — for a match, the instant tick 0 lands,
+which is the replay's zero too. The studio therefore lays the sound over the
+replay rather than beside it. And because the recorder holds the actual samples,
+it also writes down **when each person was talking**, as speech segments — data
+an external recorder could never hand back, and what lets the console light a
+microphone from fact rather than from guesswork.
+
+### A party is not a match, and needed its own studio
+
+A match has a replay to lay voices over. A party had nothing — and no identity
+either: its voice room is named after whoever leads it (`L<uid>`), so one group
+appeared under two names the moment leadership moved, and the same name was
+handed to a different group later.
+
+So **every party is now recorded the way a match is**, whether or not anybody
+in it is flagged, and kept for **ten days**. Not video — the same trick the
+match replay uses. A match is fully described by its inputs; a party is
+described by something simpler still: **who was standing there, in what, and
+what they said.** So that is what is stored, and the console replays it through
+the game's own lobby scene — the real one, the same pedestals and characters
+and name plates a player sees.
+
+A whole party comes to a few hundred bytes:
+
+```
+  504ms  state  [Alice★:kai, Bob:kai]
+  938ms  state  [Alice★:kai, Bob:nova]          ← Bob changed outfit
+ 1124ms  chat   Alice: ready?
+ 1433ms  state  [Alice★:kai, Bob:nova, Cara:kai]
+ 1742ms  state  […] game=trackline
+ 2054ms  state  [Alice★:kai, Cara:kai]          ← Bob left
+
+  277 bytes gzipped, 7 events, 3 people, kept until 2026-08-30
+```
+
+Two rules keep it free for the players:
+
+- **Nothing is written when nothing changed.** Every broadcast is fingerprinted
+  against the last one; a repeat costs a single Redis read and returns. Most
+  broadcasts are repeats.
+- **Nothing is awaited.** A party is a lobby, not a match, but it is still
+  somebody's screen.
+
+A session is a **group**: it opens when a second person arrives and closes when
+the group falls apart. One player alone in their own lobby is not a party and
+is not recorded at all.
+
+**Voice attaches to that same session** — same id, same clock — so audio lies
+over the simulation instead of beside it. Every group is replayed; only groups
+with a flagged player in them are also heard.
+
+#### Two assets the console must keep copies of
+
+`admin/public/meshopt_decoder.js` and `admin/public/lobby-bg.webp` are copies of
+the player app's, and must stay copies. Both are loaded from fixed same-origin
+paths by code that is otherwise perfectly happy: without the decoder every
+compressed model fails to parse, and without the backdrop Babylon draws its
+missing-texture checkerboard — a red-and-black grid behind the characters —
+while nothing errors and nothing warns.
+
+#### What the party studio does
+
+- Draws the lobby as it was at whatever moment you scrub to, in the game's own
+  scene: who was standing there, what they were wearing, who was leading.
+  Drawing is the STUDIO's job — the lobby scene runs no loop of its own, so the
+  frame loop calls `scene.render()` last, after the state for that moment has
+  been applied. Forgetting it produced a perfect, correct, completely black
+  canvas that every other assertion passed straight through; `e2e:console` now
+  screenshots the canvas and fails if it is a solid colour.
+- Plays the voice on the same clock, with a microphone lighting beside whoever
+  is talking — measured from the audio, not guessed.
+- Shows chat where it happened, as bubbles over their heads and in a feed —
+  and **plays emotes on the characters**, through the same method the game
+  calls, so an admin sees the animation the squad saw rather than a note that
+  one happened. Scrubbing counts them as passed instead of performing them; a
+  seek would otherwise be a fit of dancing.
+- Says **how each person came to be there** — "invited by Ravi", "joined with a
+  team code", "joined a friend's party". An invite and the join it leads to are
+  separate events minutes apart, so an invite is remembered for ten minutes and
+  claimed when they arrive; that is the only way "who brought whom" can be
+  answered at all.
+- **A party still happening can be watched live**, and you can still scrub back
+  through its past while it runs.
+- **Clicking a player jumps to the moment they walked in.** A player's profile
+  lists every party they were ever in — even two minutes of a two-hour one —
+  and opens the studio right there. Finding somebody in a long party is a
+  click, not a search.
+
+Voice is heard **only inside a studio**, match or party. There is no standalone
+audio player anywhere in the console: a recording without the picture around it
+is evidence with the context stripped off.
+
+### Built for the day it dies
+
+It will die at a bad moment eventually, so every piece assumes it:
+
+| | |
+| --- | --- |
+| **the registry is durable** | sessions live in a Redis hash, not in a message. A session that starts while the recorder is restarting is picked up by the next sweep instead of being lost |
+| **the sweep is the mechanism** | pub/sub only makes the usual case instant; correctness never depends on a message arriving |
+| **files upload as they go** | every 30 seconds the part-written file is pushed to the bucket. Ogg is a streaming container, so a partial file is a valid, playable one |
+| **one recorder per room** | a Redis lease. A rolling deploy runs two containers at once, and without it both would join and write two of everything |
+| **a dead recorder lets go** | the lease is 20 seconds and refreshed every 5, so a crashed instance's rooms are taken over rather than stranded |
+| **orphans are recovered** | part-written files left by a crash are uploaded at the next boot — and never deleted unless that succeeded |
+| **ghost rows are closed** | a row still marked "recording" is checked against the bucket and closed as complete or failed, so the console never shows something that stopped an hour ago as running |
+| **SIGTERM finishes cleanly** | a deploy ends every file properly, which matters because it is the path that runs on nearly every restart |
+
+One bug found by actually killing it is worth recording, because it was
+invisible any other way: **ffmpeg's Ogg output stayed at zero bytes on disk
+until the process exited.** Eight seconds of audio, and every periodic upload
+found an empty file. The crash resilience was decorative until `-flush_packets`
+was added; a `SIGKILL` test now proves the audio survives.
+
+Starting one is admin-and-above, behind sudo, needs a written reason of at
+least ten characters, is audited, and sends an alert. *Listening* is audited
+separately as its own act — "who has heard whom" has to be answerable. The link
+the browser gets is signed and lives sixty seconds; nothing in the evidence
+bucket is ever public. Recordings are deleted by retention alone
+(`VOICE_RETENTION_DAYS`, default 90), on the same sweeper as replays.
+
+The only way a room gets recorded is the registry: the game process writes an
+entry when it has checked the flags, and the recorder makes reality match. That
+is a deliberate reduction — the previous design had a public webhook endpoint
+that started recordings, and an endpoint which starts recordings is a way to
+make somebody's microphone upload itself if its signature check is ever wrong.
+There is no such endpoint any more.
+
+### What the studio does with it
+
+The replay reconstructs what people *did*; the audio is what they said while
+doing it, on the same clock. Under the transport there is a small mixer: the
+room mix plays by default, every separate voice is decoded but silent, and
+ticking one hears only them.
+
+Those silent voices are not idle. Their levels are what light the **microphone
+beside a name** — so the studio shows who is talking while you listen to the
+mix. The same indicator is in the game itself, in the party and in both games'
+match HUDs, driven by LiveKit's active-speaker events. In every case it lights
+only while somebody is *actually speaking*: "their microphone is on" would
+light everybody and say nothing.
+
+Sound is moved by the studio's one frame loop, from the same clock the game
+gets, before anything draws — give audio its own timer and the two drift apart.
+Above 4× the picture keeps its speed and the sound drops out.
+
+The audio reaches the browser through the admin API rather than as a link to
+the bucket. That is deliberate: analysing sound requires it to be same-origin,
+and the alternative was opening an evidence bucket to a browser origin.
+
+To switch voice recording on in production — **env only, no code change**:
+
+```bash
+R2_EVIDENCE_ACCOUNT_ID=…        # a PRIVATE bucket, not the asset-pack one
+R2_EVIDENCE_BUCKET=tofo-evidence
+R2_EVIDENCE_ACCESS_KEY_ID=…     # its own scoped token, read+write on that bucket only
+R2_EVIDENCE_SECRET_ACCESS_KEY=…
+VOICE_RECORDING_ENABLED=true
+```
+
+…and deploy **a third service** with `ROLE=recorder`, carrying the same
+`DATABASE_URL`, `REDIS_URL`, `LIVEKIT_*` and `R2_EVIDENCE_*` values. It listens
+on no port and serves nothing, so it needs no domain, no health route and no
+inbound access. Nothing has to be configured in the LiveKit dashboard: the
+webhook the old design depended on is gone.
+
+The console's Voice screen shows whether every piece is in place — **including
+whether the recorder is actually running** — and names what is missing when it
+is not, rather than saying "armed" while nothing is listening.
+
+`check:voice` proves the deciding and never touches audio. That the recorder
+turns a live microphone into a playable file is proved separately, and for
+real: `check:recorder` starts an actual recorder process, opens two fake
+microphones in an actual LiveKit room six seconds apart, and checks that what
+comes out is Opus, that its length matches what the console claims, that its
+size matches the object in the bucket, and that the later joiner really does
+start later on the timeline. A `SIGKILL` test — no cleanup, no warning — is
+what proved the audio survives a crash at all.
+
 The check that matters plays a real match through a real game's server
 definition, ranks it, puts it through the encoder, the gzip, the decoder and
 back into the ranker, and requires the standings to be **identical** — then
@@ -455,14 +688,130 @@ be watched in slow motion. The studio (A5) supplies a clock it controls.
 ```bash
 npm run check:admin      # crypto, TOTP replay, sessions, roles, limits, sudo
 npm run e2e:admin        # sign-in and the role gates over HTTP, against a RUNNING admin API
+npm run check:voice      # voice recording: the deciding — flags, budgets, parties, leases
+npm run check:recorder   # the recorder itself: real microphones in, real files out
 npm run e2e:console      # the real console in a real browser (needs both running)
 ```
 
 The Google stage is not automated in any of them: faking it would mean putting a
 bypass in production code. Everything on either side of it is exercised for real.
 
+## Going back in time (platform history)
+
+The overview says what is happening now, and the live snapshot it reads expires
+in seconds. So there is one question it can never answer, and it is the one
+asked at breakfast: *the server was unreachable for six minutes overnight — how
+many people were on, who were they, and what were they doing?*
+
+One row a minute, kept for thirty days. The rows carry the numbers. **The gaps
+between them carry the outages**, because a minute with no row is a minute
+nothing was able to write one.
+
+The History screen draws two small multiples over one shared clock — players
+online, matches running — with a scrubber. Deliberately two charts rather than
+two lines on one grid: they are different scales, and one axis for both makes a
+picture that is easy to misread. Where minutes are missing the **line breaks**
+and a labelled band marks the outage; filling the hole with zero would turn
+"the server was down" into "nobody was playing" — the same picture, a different
+fact.
+
+Drag to any moment and it answers **who was online then** — reconstructed from
+the activity trail, since for each player the last thing they did before that
+moment was either arriving or leaving — plus every event from the five minutes
+either side.
+
+Cost: one insert per minute per process, and 30 days is about 43,000 rows.
+
+```bash
+npm run check:ops        # includes the gap detection: a hole is found, and sized right
+```
+
+## The activity log
+
+`event_log` already held sessions, logins, sanctions and admin commands. It now
+also holds **what players did** — but only actions that already reach the
+server:
+
+| logged | not logged |
+| --- | --- |
+| viewing another player's profile | scrolling your own collection |
+| equipping a character or weapon | tapping a weapon to preview it |
+| inviting, joining (and how), kicking, handing over the party | opening a screen |
+| picking a game, searching for a match | anything that never leaves the phone |
+
+That distinction is the whole design. A request the client was making anyway
+costs **nothing extra** to record: the packet was sent, the radio was already
+awake, and writing the row is 2.7 µs into a buffer that flushes in batches. A
+tap that does NOT reach the server could only be logged by inventing a message
+— and it is the message, not the row, that drains a phone.
+
+It reads as sentences, not JSON: *"looked at 8741554743's profile"*, *"invited
+AnuGarai"*, *"had their chat mute lifted"*, *"equipped character nova and empty
+hands"*. A log nobody can read at a glance is a log nobody reads.
+
+Two places, one renderer, because they are the same question with a different
+filter: **every player's page** shows their own actions, and the History screen
+carries the **whole platform between two moments**, filtered by kind or by UID
+and paged by cursor (never OFFSET — a log grows while you read it, and OFFSET
+silently skips or repeats rows when it does).
+
+**Everything is deleted after 30 days.** One rule for every kind of row. Worth
+recording what that costs: a sign-in record from four months ago is not there
+to produce if somebody asks for it later. Raising it is one constant —
+`EVENT_RETENTION_DAYS` in `services/eventLog.ts`.
+
+### Why not just print to the platform's logs?
+
+Railway keeps logs 7 days on Hobby, 30 on Pro, and drops them above **500 lines
+per second per replica** — silently, exactly when something is going wrong. They
+cannot be filtered by player, joined to a match or a sanction, or shown in this
+console. Keep them for what they are good at — crashes, boot lines, an incident
+you are reading chronologically at 3 a.m. — and keep evidence in the database
+where it can be queried.
+
+## Messages, friends and what they own
+
+Chat was the one thing the console could not see, and it is kept for fifteen
+days — so a report about something said last week arrived at a wall.
+
+**Private messages** are now on the player page: their conversations split into
+*Friends* and *Recent* exactly as their own app splits them (by whether they are
+friends right now), and squad chat filtered to what they could actually see —
+team messages carry the members who were in the squad at send time, so "was
+this even addressed to them" is answered rather than assumed.
+
+It is gated the way voice is, and for the same reason: **admin-and-above, and
+opening a conversation is audited by name.** Reading somebody's private
+messages is the second most intrusive thing here, and "who has read whom" has
+to stay answerable. The panel says so on its face rather than presenting itself
+as an ordinary list. Nothing extra is stored — it reads what the fifteen-day
+retention already holds, so a conversation an admin opened last month expires
+on the same schedule as one nobody read.
+
+Squad chat is deliberately **not** on the player page. Pulled there it merges
+every group they were ever in into one stream, which reads as a single
+conversation and is not one; it belongs to a party, and the party studio shows
+it where it happened, with who else was standing there.
+
+Both log panels carry **Refresh** and **Live** (every 5 s). Refresh replaces
+only the data — the charts, the scrubber's range and the rows — so what you
+typed, what you selected and where you scrolled all survive and the screen does
+not blink. Live turns itself off the moment you scrub to a past moment, because
+watching live and studying a moment are opposites.
+
+**Friends** are listed with a debounced search inside the list, showing which
+way round the request went — "they asked" or "asked them" — and pending
+requests as well as accepted ones.
+
+**Collection** shows what they are wearing, resolved to real names and rarity
+rather than raw ids. On what they *own*, it says the truthful thing: every
+catalogue item is free today, so there is no entitlement to report and showing
+a list of everything would look like ownership while meaning nothing. When paid
+items ship, that panel reads a `user_items` table and this note goes away. What
+they have actually *worn* is already in **What they did**.
+
 ## What's next (planned)
 
 - Trackline gameplay: obstacles, jump/roll, crashes, coins, scoring.
-- The admin console: voice recording (A6), reports and cases (A7), analytics (A8).
+- The admin console: reports and cases (A7), analytics and anti-cheat signals (A8).
 - Matchmaking that fills a party from a pool, and server bots for empty slots.
