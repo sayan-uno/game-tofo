@@ -22,6 +22,7 @@ import {
   bigserial,
   inet,
   char,
+  date,
 } from "drizzle-orm/pg-core";
 
 export const users = pgTable(
@@ -219,6 +220,21 @@ export const matchPlayers = pgTable(
     placement: integer("placement").notNull(),
     score: integer("score").notNull(),
     forfeit: boolean("forfeit").notNull().default(false),
+    /** ─ Anti-cheat signals (A8) ─ measured by the server while the match ran.
+     *  Kept per match rather than summed onto the career, because a signal
+     *  without the match it came from cannot be checked in the studio, and an
+     *  unverifiable number is worse than none. */
+    inputs: integer("inputs").notNull().default(0),
+    rejects: integer("rejects").notNull().default(0),
+    /** Refusals by reason — rate | early | late | tick | kind | phase. The
+     *  breakdown is what separates a bad connection (late) from a clock that
+     *  has run ahead (early) from a client sending faster than a hand can
+     *  (rate). */
+    rejectKinds: jsonb("reject_kinds").notNull().default(sql`'{}'::jsonb`),
+    /** 0–100: the share of input gaps that are exactly the commonest gap.
+     *  NULL when there was not enough to say — which is not the same as 0 and
+     *  must never be stored as one. */
+    cadence: integer("cadence"),
     /** Per-game numbers (distance, coins, near misses…). */
     detail: jsonb("detail").notNull().default({}),
   },
@@ -742,3 +758,178 @@ export const events = pgTable(
     check("events_kind_check", sql`kind IN ('image','video','html')`),
   ]
 );
+
+/** ─── Reports and cases (A7) ───────────────────────────────────────────────
+ *
+ *  A report is what a player says. A case is what an admin does about it.
+ *  Keeping them apart is the whole design: five people reporting one cheater
+ *  is five reports and ONE case, and the case is what carries the evidence,
+ *  the decision, and the export you would hand to somebody who demands proof.
+ *
+ *  Reports are never edited. An admin attaches one to a case or dismisses it;
+ *  either way the row it arrived as stays exactly as the player wrote it,
+ *  because a report that can be rewritten is not evidence of anything.
+ */
+export const cases = pgTable(
+  "cases",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** Short, searchable, and safe to say out loud — "C-7K3QX". A UUID is
+     *  correct and unusable; this is what an admin actually types. */
+    ref: varchar("ref", { length: 12 }).notNull().unique(),
+    /** Who the case is ABOUT. Always a real account: a case against a bot is
+     *  a case against nobody. */
+    subjectUserId: uuid("subject_user_id").references(() => users.id, { onDelete: "set null" }),
+    subjectUid: varchar("subject_uid", { length: 12 }).notNull(),
+    /** open — being worked on, and the reason retention leaves its evidence
+     *  alone. resolved — a decision was recorded. */
+    status: varchar("status", { length: 12 }).notNull().default("open"),
+    /** Free text, because a case is about a person and not a category: what
+     *  it is really about is decided after reading, not before. */
+    title: text("title").notNull(),
+    assignedTo: text("assigned_to"),
+    openedBy: text("opened_by"),
+    openedAt: timestamp("opened_at", { withTimezone: true }).notNull().defaultNow(),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+    resolvedBy: text("resolved_by"),
+    /** What was actually DONE — no-action | warned | sanctioned. Separate from
+     *  the note, so "how often does a report end in nothing?" is answerable
+     *  without reading prose. */
+    resolution: varchar("resolution", { length: 16 }),
+    resolutionNote: text("resolution_note"),
+  },
+  (t) => [
+    index("idx_cases_status").on(t.status, t.openedAt),
+    index("idx_cases_subject").on(t.subjectUid),
+    check("cases_status_check", sql`status IN ('open','resolved')`),
+  ]
+);
+
+export const reports = pgTable(
+  "reports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** report — one player about another.
+     *  appeal — a sanctioned player about their own ban. The plan puts both in
+     *  one queue deliberately: an appeal is a report about a decision, and an
+     *  admin working the queue should meet them in the order they arrived. */
+    kind: varchar("kind", { length: 8 }).notNull().default("report"),
+    reporterUserId: uuid("reporter_user_id").references(() => users.id, { onDelete: "set null" }),
+    reporterUid: varchar("reporter_uid", { length: 12 }).notNull(),
+    subjectUserId: uuid("subject_user_id").references(() => users.id, { onDelete: "set null" }),
+    subjectUid: varchar("subject_uid", { length: 12 }).notNull(),
+    /** voice | text | cheating | griefing | name | appeal. Short on purpose:
+     *  a long list is a list nobody reads to the end of, and every extra
+     *  category is one more way to file the same complaint in the wrong place. */
+    category: varchar("category", { length: 12 }).notNull(),
+    note: text("note"),
+    /** Present whenever the report was filed from a results screen, which is
+     *  the point of putting the button there: the replay and any voice
+     *  recording are already attached before an admin has read a word. */
+    matchKey: text("match_key"),
+    lobbyId: text("lobby_id"),
+    caseId: uuid("case_id").references(() => cases.id, { onDelete: "set null" }),
+    /** new — waiting in the queue.
+     *  attached — part of a case, which is now where the work happens.
+     *  dismissed — read and judged to need nothing. Still kept: a player who
+     *  files forty dismissed reports is himself a pattern worth seeing. */
+    status: varchar("status", { length: 12 }).notNull().default("new"),
+    handledBy: text("handled_by"),
+    handledAt: timestamp("handled_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("idx_reports_queue").on(t.status, t.createdAt),
+    index("idx_reports_subject").on(t.subjectUid, t.createdAt),
+    index("idx_reports_reporter").on(t.reporterUserId, t.createdAt),
+    index("idx_reports_case").on(t.caseId),
+    /** One player, one subject, one match, one report. Pressing the button
+     *  twice is a slip; forty rows about the same three seconds is noise that
+     *  buries the queue. Without a match it is not deduped — two complaints
+     *  about somebody's behaviour a week apart are two real complaints. */
+    uniqueIndex("uq_reports_once")
+      .on(t.reporterUserId, t.subjectUid, t.matchKey)
+      .where(sql`match_key is not null`),
+    check("reports_kind_check", sql`kind IN ('report','appeal')`),
+    check("reports_status_check", sql`status IN ('new','attached','dismissed')`),
+  ]
+);
+
+/** Everything that has happened to a case, in one append-only list: the
+ *  reports folded into it, the evidence bundled onto it, the notes an admin
+ *  left, and the action taken. It is the timeline, and it is also what the
+ *  export walks — which is why a note and a piece of evidence are the same
+ *  kind of row rather than two tables that have to be merged and sorted later.
+ */
+export const caseItems = pgTable(
+  "case_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    caseId: uuid("case_id")
+      .notNull()
+      .references(() => cases.id, { onDelete: "cascade" }),
+    /** report | note | replay | voice | moment | sanction | status */
+    kind: varchar("kind", { length: 12 }).notNull(),
+    /** What it points at: a report id, a match key, a recording id, a sanction
+     *  id. Deliberately untyped text — the kind says how to read it. */
+    refId: text("ref_id"),
+    /** For `moment`: where in the replay, in milliseconds from tick 0. The
+     *  studio can jump straight to it, which is the difference between
+     *  evidence and a claim that something happened somewhere in ten minutes. */
+    atMs: integer("at_ms"),
+    body: text("body"),
+    addedBy: text("added_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("idx_case_items_case").on(t.caseId, t.createdAt),
+    check("case_items_kind_check", sql`kind IN ('report','note','replay','voice','moment','sanction','status')`),
+  ]
+);
+
+/** ─── Analytics (A8) ───────────────────────────────────────────────────────
+ *
+ *  SERVED FROM HERE, NEVER FROM RAW LOGS. A dashboard that scans event_log is
+ *  a dashboard that gets slower every week and eventually competes with the
+ *  thing it is measuring. One row per day, written by a nightly job, read in
+ *  milliseconds forever.
+ */
+export const dailyStats = pgTable("daily_stats", {
+  /** The day being described, in UTC. */
+  day: date("day").primaryKey(),
+  /** Distinct accounts that did anything at all. */
+  dau: integer("dau").notNull().default(0),
+  /** Distinct accounts over the 30 days ENDING on this day. Stored rather
+   *  than derived: thirty daily numbers cannot be added into a monthly one,
+   *  and the only honest way to get it is to ask the raw data once a night. */
+  mau: integer("mau").notNull().default(0),
+  newAccounts: integer("new_accounts").notNull().default(0),
+  matches: integer("matches").notNull().default(0),
+  matchesByGame: jsonb("matches_by_game").notNull().default(sql`'{}'::jsonb`),
+  /** Mean seconds between a session starting and ending. */
+  avgSessionSec: integer("avg_session_sec").notNull().default(0),
+  /** The signup funnel, for accounts created on this day: signed in, claimed
+   *  a username, played a match. Where people fall out is the one question a
+   *  totals dashboard cannot answer. */
+  funnelSignedIn: integer("funnel_signed_in").notNull().default(0),
+  funnelNamed: integer("funnel_named").notNull().default(0),
+  funnelPlayed: integer("funnel_played").notNull().default(0),
+  reports: integer("reports").notNull().default(0),
+  sanctions: integer("sanctions").notNull().default(0),
+  computedAt: timestamp("computed_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** Retention, by the day people arrived.
+ *
+ *  Kept apart from daily_stats because a cohort is not finished when its day
+ *  is: the row for last Tuesday gains its d7 number a week later. Recomputed
+ *  over a trailing window every night, so a late-arriving fact lands.
+ */
+export const cohorts = pgTable("cohorts", {
+  day: date("day").primaryKey(),
+  size: integer("size").notNull().default(0),
+  d1: integer("d1").notNull().default(0),
+  d7: integer("d7").notNull().default(0),
+  d30: integer("d30").notNull().default(0),
+  computedAt: timestamp("computed_at", { withTimezone: true }).notNull().defaultNow(),
+});

@@ -22,7 +22,7 @@ export interface AuditActor {
 
 export interface AuditInput {
   action: string;
-  targetType?: "user" | "match" | "party" | "sanction" | "recording" | "admin" | "platform";
+  targetType?: "user" | "match" | "party" | "sanction" | "recording" | "admin" | "platform" | "report" | "case";
   targetId?: string | null;
   reason?: string | null;
   before?: unknown;

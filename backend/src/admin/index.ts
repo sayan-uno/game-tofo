@@ -27,6 +27,8 @@ import { chatsRouter } from "./routes/chats.js";
 import { historyRouter } from "./routes/history.js";
 import { partiesRouter } from "./routes/parties.js";
 import { voiceRouter } from "./routes/voice.js";
+import { reportsRouter } from "./routes/reports.js";
+import { analyticsRouter } from "./routes/analytics.js";
 
 /** JSON only, so the headers that matter are the ones that stop a browser
  *  guessing at content and stop anything being cached on the way. */
@@ -57,6 +59,8 @@ export function mountAdmin(app: Express): void {
   router.use("/replays", replaysRouter);
   router.use(voiceRouter);
   router.use(partiesRouter);
+  router.use(reportsRouter);
+  router.use(analyticsRouter);
   router.use(historyRouter);
   router.use(chatsRouter);
   router.use(eventsRouter);

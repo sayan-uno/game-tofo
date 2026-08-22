@@ -66,7 +66,14 @@ a { color: inherit; text-decoration: none; }
   padding: 20px 18px 18px; border-bottom: 1px solid var(--line);
 }
 .rail .brand i { color: var(--crimson); font-style: normal; }
-.rail nav { padding: 12px 10px; display: flex; flex-direction: column; gap: 2px; flex: 1; }
+/* min-height:0 and its own scroll: without them a flex child refuses to
+   shrink below its content, so adding rail entries pushed the sign-out
+   block off the bottom of a 100vh rail — visible, unreachable, and only
+   on short screens. */
+.rail nav {
+  padding: 12px 10px; display: flex; flex-direction: column; gap: 2px;
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+}
 .rail nav a {
   display: flex; align-items: center; gap: 10px;
   padding: 8px 10px; border-radius: 5px; color: var(--dim);
@@ -530,3 +537,91 @@ time { cursor: help; }
   object-fit: contain; border-radius: 10px; border: 1px solid var(--line); background: #000;
 }
 .ev-lightbox-cap { font-size: 12.5px; color: var(--dim); }
+
+/* ---- reports and cases ------------------------------------------------- */
+/* The count on the rail. A moderation console you have to remember to open is
+   one nobody opens; this is the whole of the reminder. */
+.rail nav a .badge {
+  margin-left: auto;
+  background: var(--crimson);
+  color: #fff;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 999px;
+}
+.rail nav a .badge.hidden { display: none; }
+
+.btn.btn-tiny { padding: 3px 7px; font-size: 10.5px; }
+
+/* The case timeline: notes, evidence and decisions in the order they
+   happened, because that is how somebody reads a case they did not work. */
+ol.timeline { list-style: none; margin: 0; padding: 0; }
+ol.timeline li {
+  position: relative;
+  padding: 0 0 14px 18px;
+  border-left: 1px solid var(--line);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+ol.timeline li::before {
+  content: "";
+  position: absolute;
+  left: -4px;
+  top: 6px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--panel);
+  border: 1.5px solid var(--faint);
+}
+ol.timeline li:last-child { border-left-color: transparent; padding-bottom: 0; }
+ol.timeline li > span.muted { font-family: var(--mono); font-size: 11px; margin-right: 8px; }
+ol.timeline li > div { color: var(--dim); }
+
+/* ---- analytics ---------------------------------------------------------- */
+/* Stat tiles: a single headline number is not a chart, and drawing one as a
+   chart is how a dashboard starts lying about precision it does not have. */
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin-bottom: 12px; }
+.tile {
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--r);
+  padding: 12px 14px; display: flex; flex-direction: column; gap: 3px;
+}
+.t-label { font-family: var(--mono); font-size: 9.5px; letter-spacing: .16em; text-transform: uppercase; color: var(--faint); }
+.t-value { font-family: var(--mono); font-size: 25px; font-weight: 700; letter-spacing: -.02em; color: var(--text); }
+.t-sub { font-size: 12px; color: var(--dim); }
+
+/* Charts. Grid and axes stay recessive; the marks carry the data. */
+.ch { width: 100%; height: auto; display: block; overflow: visible; }
+.ch-dl { font-family: var(--mono); font-size: 10px; }
+.ch-hit { fill: transparent; cursor: crosshair; }
+.ch-tip {
+  position: absolute; z-index: 5; pointer-events: none;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 5px;
+  padding: 5px 9px; font-size: 11.5px; color: var(--text); white-space: nowrap;
+  transform: translateY(-100%);
+}
+.card .pad { position: relative; }
+
+.legend { display: inline-flex; gap: 12px; align-items: center; }
+.lg { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--dim); }
+.lg i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+
+/* The funnel: three stages, so bars with their own numbers rather than a
+   shape that has to be decoded. */
+.funnel { display: flex; flex-direction: column; gap: 7px; }
+.fn-row { display: grid; grid-template-columns: 130px 1fr 110px; gap: 10px; align-items: center; }
+.fn-label { font-size: 12.5px; color: var(--dim); }
+.fn-bar { background: var(--panel-2); border-radius: 3px; height: 15px; overflow: hidden; }
+.fn-bar i { display: block; height: 100%; background: #199e70; border-radius: 3px; }
+.fn-num { font-family: var(--mono); font-size: 12.5px; text-align: right; }
+.fn-num em { color: var(--faint); font-style: normal; }
+
+/* Retention: the ramp carries magnitude, the number carries the fact — never
+   colour alone. */
+table.rt .rt-cell { text-align: center; padding: 6px 10px; }
+table.rt .rt-cell b { display: block; font-size: 12.5px; color: #fff; }
+table.rt .rt-cell i { font-style: normal; font-size: 10.5px; color: rgba(255,255,255,.7); }
+table.rt .rt-cell.muted b, table.rt .rt-cell.muted { color: var(--faint); }

@@ -1,6 +1,7 @@
-import { and, arrayContains, desc, eq, gt, lt, or } from "drizzle-orm";
+import { and, arrayContains, arrayOverlaps, desc, eq, gt, inArray, lt, not, notInArray, or, sql } from "drizzle-orm";
 import { db } from "../db/client.js";
-import { blocks, dmClears, dmMessages, teamMessages } from "../db/schema.js";
+import { blocks, dmClears, dmMessages, teamMessages, users } from "../db/schema.js";
+import { subjectsWithOpenCases } from "./reports.js";
 
 export const RETENTION_DAYS = 15;
 export const MAX_MESSAGE_LENGTH = 500;
@@ -173,13 +174,42 @@ export async function listBlockedIds(userId: string): Promise<string[]> {
 
 /** Hourly sweep deleting anything older than the retention window. Read
  *  queries also filter by the window, so expired rows never surface between
- *  sweeps. */
+ *  sweeps.
+ *
+ *  WITH ONE EXEMPTION: anybody who is the subject of an OPEN case keeps their
+ *  messages. Fifteen days is a sensible life for chatter and a disastrous one
+ *  for evidence — a report filed on day fourteen about something said on day
+ *  one would otherwise be investigated against a conversation the platform had
+ *  already deleted. The exemption lasts exactly as long as the case: resolve
+ *  it and the next sweep takes the messages with it. */
 export function startChatRetention(): void {
   const sweep = async () => {
     try {
       const cutoff = retentionCutoff();
-      await db.delete(dmMessages).where(lt(dmMessages.createdAt, cutoff));
-      await db.delete(teamMessages).where(lt(teamMessages.createdAt, cutoff));
+      const spared = await subjectsWithOpenCases();
+      // uid → internal id, because the messages are keyed by the latter and a
+      // case is opened against the former.
+      const keep = spared.length
+        ? (await db.select({ id: users.id }).from(users).where(inArray(users.uid, spared))).map((r) => r.id)
+        : [];
+      const safeDm = keep.length
+        ? and(
+            lt(dmMessages.createdAt, cutoff),
+            notInArray(dmMessages.senderId, keep),
+            notInArray(dmMessages.recipientId, keep)
+          )
+        : lt(dmMessages.createdAt, cutoff);
+      // Squad chat carries who could see it, so a message is spared when the
+      // person under a case sent it OR was in the room to hear it.
+      const safeTeam = keep.length
+        ? and(
+            lt(teamMessages.createdAt, cutoff),
+            notInArray(teamMessages.senderId, keep),
+            not(arrayOverlaps(teamMessages.visibleTo, keep))
+          )
+        : lt(teamMessages.createdAt, cutoff);
+      await db.delete(dmMessages).where(safeDm);
+      await db.delete(teamMessages).where(safeTeam);
     } catch (err) {
       console.error("Chat retention sweep failed:", err);
     }

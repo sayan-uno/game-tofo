@@ -654,6 +654,48 @@ try:
             pass
         ok(took_back, "taking it back is visible on the same row, not a silent delete")
 
+        print("\nthe dashboard")
+        page.click('.rail a[data-nav="analytics"]')
+        page.wait_for_function("() => document.getElementById('title')?.textContent === 'Analytics'", timeout=15000)
+        page.wait_for_selector(".tile", timeout=20000)
+        ok(page.locator(".tile").count() >= 4, "the headline numbers are tiles, not charts of one value")
+
+        # An empty dashboard reads as a broken one, so if there is nothing to
+        # draw the screen has to SAY so rather than show an empty frame.
+        charts = page.locator("svg.ch").count()
+        empties = page.locator(".card .empty").count()
+        ok(charts > 0 or empties > 0, f"it either draws or explains itself ({charts} chart(s), {empties} note(s))")
+        if charts > 0:
+            ok(page.locator("svg.ch path[stroke-width='2']").count() > 0, "the line chart has real marks in it")
+            ok(page.locator(".lg").count() >= 2, "with a legend, so identity is never colour alone")
+
+        # The rule that makes the whole screen affordable, checked at the wire:
+        # it must read the aggregate, never the activity log.
+        asked = []
+        page.on("request", lambda r: asked.append(r.url) if "/log?" in r.url or "/analytics" in r.url else None)
+        page.select_option("#range", "14")
+        page.wait_for_timeout(3000)
+        ok(any("/analytics" in u for u in asked), "changing the range asks the aggregate")
+        ok(not any("/log?" in u for u in asked), "and never the raw activity log")
+
+        ok("the same data, readable without colour" in page.inner_text("#screen"),
+           "and the numbers are there as a table, for anybody who cannot use the colours")
+
+        print("\nsignals")
+        page.click('.rail a[data-nav="signals"]')
+        page.wait_for_function("() => document.getElementById('title')?.textContent === 'Signals'", timeout=15000)
+        page.wait_for_selector("#win", timeout=15000)
+        said = page.inner_text("#screen").lower()
+        # The wording is load-bearing: this screen ranks, it does not accuse.
+        ok("a ranking, not an accusation" in said, "the screen says outright that it is a ranking, not a verdict")
+        ok("innocent explanation" in said, "and that every signal on it has an innocent explanation")
+        # Nobody flagged is the ordinary state of a healthy platform, and the
+        # screen must say so rather than show an empty frame.
+        ranked = page.locator("table.tbl").count()
+        ok(ranked >= 1 or "nobody stands out" in said,
+           f"the ranking is a table, or says plainly that there is nothing in it ({ranked} table(s))")
+        ok(errors == [], f"no JavaScript errors across either screen ({errors})")
+
         print("\nthe studio")
         page.click('.rail a[data-nav="matches"]')
         page.wait_for_function("() => document.getElementById('title')?.textContent === 'Matches'", timeout=15000)
@@ -1000,6 +1042,14 @@ try:
         ok(errors == [], f"all of that without a JavaScript error ({errors})")
 
         print("\nsigning out")
+        # The rail grew past the window once and pushed this off the bottom —
+        # visible to a selector, unreachable to a person. Checked explicitly so
+        # the next time it happens the failure says why.
+        reachable = page.eval_on_selector(
+            "#out",
+            "el => { const r = el.getBoundingClientRect();"
+            "        return r.top >= 0 && r.bottom <= innerHeight; }")
+        ok(reachable, "the sign-out button is actually inside the window, not merely in the DOM")
         page.click("#out")
         page.wait_for_selector("#google-btn", timeout=15000)
         ok(page.locator(".rail").count() == 0, "the console is gone")

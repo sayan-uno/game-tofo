@@ -1,6 +1,6 @@
 import { EV } from "./shared/core/protocol";
 import "./style.css";
-import { api, getToken, clearSession } from "./api/http";
+import { api, ApiError, getToken, clearSession } from "./api/http";
 import { connectSocket, emitAck } from "./api/socket";
 import { showLogin } from "./ui/login";
 import { showUsernameSetup } from "./ui/username";
@@ -370,6 +370,25 @@ async function enterLobby(user: User) {
     if (err.message === "MAINTENANCE") {
       showMaintenance({ active: true, at: Date.now(), message: "TOFO is down for maintenance." }, false, () => {
         void leaveVoice();
+      });
+      return;
+    }
+    // Banned. The socket refusal is the honest signal — the door being locked,
+    // not a message we were politely sent — but it carries only the reason, so
+    // the expiry is read off the API's own 403, which has it. Shown as a
+    // screen with a way to appeal, because "Connection error: BANNED:Cheating"
+    // in a toast is the truth delivered as though it were a bug.
+    if (err.message.startsWith("BANNED:")) {
+      const reason = err.message.slice("BANNED:".length);
+      void leaveVoice();
+      void import("./ui/banned").then(async ({ showBanned }) => {
+        let until: string | null = null;
+        try {
+          await api.get("/api/profile/me");
+        } catch (e) {
+          if (e instanceof ApiError) until = e.until ?? null;
+        }
+        showBanned(reason, until);
       });
       return;
     }

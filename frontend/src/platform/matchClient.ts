@@ -375,6 +375,39 @@ export class MatchClient {
    *  waiting on a round trip to show a scoreboard would be the wrong trade.
    *  Nothing is shown at all if the answer is empty, which is also the answer
    *  for a lobby full of bots. */
+  /** A report button on every row except your own.
+   *
+   *  Offered for EVERY other player, including the ones no friend request is
+   *  offered for. Bots look exactly like people on this table by design, and a
+   *  button that quietly vanished for three of six rows would announce which
+   *  three. The server takes a report about a bot, answers the same sentence,
+   *  and writes nothing.
+   *
+   *  The sheet deliberately outlives the results screen: the countdown takes
+   *  everybody back to the lobby on its own clock, and losing what somebody
+   *  was typing because a timer fired would be a worse bug than a dialog
+   *  sitting over the lobby for a moment.
+   */
+  private offerReports(el: HTMLElement, e: MatchEnd): void {
+    for (const s of e.standings) {
+      if (s.uid === this.deps.localUid) continue;
+      const cell = el.querySelector<HTMLElement>(`tr[data-uid="${CSS.escape(s.uid)}"] .mr-add`);
+      if (!cell) continue;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "mr-report-btn";
+      btn.textContent = "⚑";
+      btn.title = `Report ${s.name}`;
+      btn.setAttribute("aria-label", `Report ${s.name}`);
+      btn.onclick = () => {
+        void import("../ui/report").then(({ openReport }) =>
+          openReport({ uid: s.uid, name: s.name, matchId: e.matchId })
+        );
+      };
+      cell.appendChild(btn);
+    }
+  }
+
   private offerFriendRequests(el: HTMLElement, matchId: string): void {
     void emitAck<MatchAddable>(EV.addable, { matchId })
       .then(({ uids }) => {
@@ -611,6 +644,7 @@ export class MatchClient {
     const nameCells = el.querySelectorAll<HTMLElement>(".mr-name");
     e.standings.forEach((s, i) => (nameCells[i].textContent = s.name));
     this.offerFriendRequests(el, e.matchId);
+    this.offerReports(el, e);
     el.querySelector<HTMLButtonElement>(".mr-lobby")!.onclick = () => this.exit();
 
     // EVERYBODY GOES BACK, on a clock they can see.

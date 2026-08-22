@@ -543,6 +543,11 @@ export function mountStudio(host: HTMLElement, matchKey: string, go: (h: string)
       };
     });
     host.querySelector<HTMLButtonElement>("#hold")!.onclick = () => void holdReplay(matchKey, data.stored.tier);
+    // Watching IS the investigation, so the moment goes onto a case from here
+    // rather than being written down and typed in somewhere else. Attaching it
+    // also holds the replay, because evidence that expires under an open case
+    // is not evidence.
+    host.querySelector<HTMLButtonElement>("#tocase")!.onclick = () => void flagMoment(matchKey, Math.round(vTime));
     host.querySelector<HTMLButtonElement>("#back")!.onclick = () => go("#/matches");
 
     // Space to play, arrows to nudge — the keys anybody expects on a player.
@@ -572,6 +577,48 @@ export function mountStudio(host: HTMLElement, matchKey: string, go: (h: string)
   })();
 
   return cleanup;
+}
+
+async function flagMoment(matchKey: string, atMs: number): Promise<void> {
+  let open: { id: string; ref: string; subjectUid: string; subjectName: string | null }[] = [];
+  try {
+    open = (await call<{ cases: typeof open }>("/cases?status=open")).cases;
+  } catch {
+    toast("Could not read the open cases");
+    return;
+  }
+  if (!open.length) {
+    toast("No case is open. Open one from Reports first.");
+    return;
+  }
+  const at = `${Math.floor(atMs / 60000)}:${String(Math.floor((atMs % 60000) / 1000)).padStart(2, "0")}`;
+  const answer = await ask({
+    title: `Flag ${at} into a case`,
+    intro: "The case gets a link straight back to this moment, and this replay stops being swept.",
+    confirm: "Flag it",
+    fields: [
+      {
+        name: "caseId",
+        label: "Which case",
+        type: "select",
+        value: open[0].id,
+        options: open.map((c) => ({ value: c.id, label: `${c.ref} — ${c.subjectName ?? c.subjectUid}` })),
+      },
+      { name: "body", label: "What it shows", type: "textarea", placeholder: "e.g. walks through the wall" },
+    ],
+    async onSubmit(v) {
+      try {
+        await call(`/cases/${v.caseId}/items`, {
+          method: "POST",
+          body: JSON.stringify({ kind: "moment", refId: matchKey, atMs, body: v.body }),
+        });
+        return null;
+      } catch (e) {
+        return e instanceof ApiFailure ? e.info.error : "That did not work";
+      }
+    },
+  });
+  if (answer) toast("Flagged onto the case.");
 }
 
 async function holdReplay(matchKey: string, tier: string): Promise<void> {
@@ -687,6 +734,7 @@ function shell(file: ReplayFile, data: Answer, roster: ReplayRoster[]): string {
             </dl></div>
             <div class="actions">
               <button class="btn ghost" id="hold">${data.stored.tier === "hold" ? "Release" : "Keep this replay"}</button>
+              <button class="btn ghost" id="tocase">Flag this moment</button>
               <button class="btn ghost" id="back">All matches</button>
             </div>
           </div>

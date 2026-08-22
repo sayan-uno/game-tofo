@@ -12,6 +12,7 @@ import { profileRouter } from "./routes/profile.js";
 import { collectionRouter } from "./routes/collection.js";
 import { gamesRouter } from "./routes/games.js";
 import { noticesRouter } from "./routes/notices.js";
+import { reportsRouter } from "./routes/reports.js";
 import { playerEventsRouter } from "./routes/events.js";
 // Registers every game with the platform (one import per game folder).
 import "./games/index.js";
@@ -140,6 +141,7 @@ if (config.role === "recorder") {
   app.use("/api/collection", collectionRouter(io));
   app.use("/api/games", gamesRouter);
   app.use("/api/notices", noticesRouter);
+  app.use("/api/reports", reportsRouter);
   app.use("/api/events", playerEventsRouter);
   registerSockets(io);
   // The packer: fills waiting parties from the pool, then with bots.
@@ -225,6 +227,19 @@ async function start() {
     await startRecorder();
   } else {
     await prepareAdmin();
+    // The aggregate job lives HERE, in the console's own process, and not in
+    // the game's. It is a handful of heavy grouped reads over the biggest
+    // tables the platform has, and the whole point of the two-process split is
+    // that work like that can never land on the event loop serving inputs.
+    // The cost is that the dashboard stops advancing when the console is down
+    // — which is exactly when nobody is reading it.
+    const { startAnalytics } = await import("./services/analytics.js");
+    startAnalytics();
+    console.log("✔ Analytics aggregate running (hourly, three-day rolling rebuild)");
+    // And the watches that reach a phone. Here for the same reason: they are
+    // aggregate reads, and the game process must never do those.
+    const { startWatchdog } = await import("./services/watchdog.js");
+    startWatchdog();
   }
 
   // The recorder has no HTTP surface; a listening socket would only be one

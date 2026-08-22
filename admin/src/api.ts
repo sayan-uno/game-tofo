@@ -130,6 +130,32 @@ export async function fetchBlobUrl(path: string): Promise<string> {
   return URL.createObjectURL(await res.blob());
 }
 
+/** Like `call`, but the answer is a FILE the API BUILT — a case export, as
+ *  opposed to a recording R2 signed for. Errors are still JSON and the code
+ *  inside them still matters: this is a sudo route, and `withSudo` can only
+ *  put up the prompt if the reason survives the round trip, which is exactly
+ *  what `fetchBlobUrl` throws away. */
+export async function callBlob(path: string): Promise<Blob> {
+  let res: Response;
+  try {
+    res = await raw(path);
+    if (res.status === 401 && (await refresh())) res = await raw(path);
+  } catch {
+    throw unreachable();
+  }
+  if (res.ok) return res.blob();
+  if (res.status === 401) {
+    accessToken = null;
+    onLost?.();
+  }
+  const body = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+  throw new ApiFailure({
+    status: res.status,
+    error: typeof body?.error === "string" ? body.error : `Could not build that file (HTTP ${res.status})`,
+    code: typeof body?.code === "string" ? body.code : undefined,
+  });
+}
+
 export async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
   let res: Response;
   try {

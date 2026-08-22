@@ -20,6 +20,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import type { Server, Socket } from "socket.io";
 import { getSocketId } from "../redis.js";
 import { recordMatch } from "../services/matchResults.js";
+import { cadence } from "./signals.js";
 import { displayName, type UserRow } from "../services/users.js";
 import { resolveCharacter, resolveWeapon } from "../services/catalog.js";
 import type {
@@ -130,6 +131,17 @@ export interface Runner {
   left: boolean;
   leftAtTick: number | null;
   inputs: MatchInput[];
+  /** Inputs the server REFUSED, by reason.
+   *
+   *  Already worked out on every rejection and, until now, thrown away — the
+   *  socket layer counted them platform-wide, printed a line and cleared the
+   *  map. Per player and per match they are a cheating signal: a client that
+   *  sits on the rate ceiling, or sends ticks it cannot have reached yet, is
+   *  not a client anybody is playing by hand.
+   *
+   *  Costs nothing in the normal path: written only when an input is already
+   *  being thrown away. */
+  rejects: Record<string, number>;
   /** Timestamps of recent inputs, for the per-second ceiling. */
   recent: number[];
   /** Timestamps of recent quick messages — the chat wheel's own rate window. */
@@ -277,6 +289,7 @@ export async function createMatch(
         left: false,
         leftAtTick: null,
         inputs: [],
+        rejects: {},
         recent: [],
       recentQuick: [],
         graceTimer: null,
@@ -313,6 +326,7 @@ export async function createMatch(
       left: false,
       leftAtTick: null,
       inputs: [],
+      rejects: {},
       recent: [],
       recentQuick: [],
       graceTimer: null,
@@ -413,26 +427,39 @@ async function go(io: Server, m: Match): Promise<void> {
   }
 }
 
+/** One refusal, attributed to the player it came from.
+ *
+ *  The platform-wide counter in the socket layer stays as it was — it answers
+ *  "is something wrong with the build". This answers "is something wrong with
+ *  THIS player", which is a different question and the one an investigation
+ *  starts from. Touched only when an input is already being thrown away. */
+const refuse = (r: Runner, why: string): string => {
+  r.rejects[why] = (r.rejects[why] ?? 0) + 1;
+  return why;
+};
+
 /** Validate and relay one input. Returns a reason string when dropped (for a
  *  counter/log), never throws — the hot path must stay cheap. */
 export function onInput(socket: Socket, m: Match, uid: string, raw: unknown): string | null {
   const r = m.runners.get(uid);
   if (!r || r.left) return "not-in-match";
-  if (m.phase !== "countdown" && m.phase !== "running") return "phase";
+  if (m.phase !== "countdown" && m.phase !== "running") return refuse(r, "phase");
   const { tick, kind } = (raw ?? {}) as { tick?: unknown; kind?: unknown };
-  if (typeof tick !== "number" || !Number.isInteger(tick) || tick < 1 || tick > m.game.durationTicks) return "tick";
-  if (typeof kind !== "string" || !m.game.isValidInputKind(kind)) return "kind";
+  if (typeof tick !== "number" || !Number.isInteger(tick) || tick < 1 || tick > m.game.durationTicks) {
+    return refuse(r, "tick");
+  }
+  if (typeof kind !== "string" || !m.game.isValidInputKind(kind)) return refuse(r, "kind");
   const now = Date.now();
   const tickAt = m.startAt! + (tick * 1000) / m.game.tickRate;
   // Not from the past beyond the rewind window, and not from the future
   // (a little skew is normal — clocks are synced to within a few ms, but a
   // frame of latency in the client's stamping is fine).
-  if (tickAt < now - m.game.inputLateLimitMs) return "late";
-  if (tickAt > now + 250) return "early";
+  if (tickAt < now - m.game.inputLateLimitMs) return refuse(r, "late");
+  if (tickAt > now + 250) return refuse(r, "early");
   // Rate ceiling: sliding one-second window.
   const cutoff = now - 1000;
   while (r.recent.length && r.recent[0] < cutoff) r.recent.shift();
-  if (r.recent.length >= m.game.inputMaxPerSec) return "rate";
+  if (r.recent.length >= m.game.inputMaxPerSec) return refuse(r, "rate");
   r.recent.push(now);
 
   const input: MatchInput = { tick, kind };
@@ -619,7 +646,17 @@ export async function end(io: Server, m: Match, reason: MatchEndReason): Promise
     ticks: endTick,
     tickRate: m.game.tickRate,
     standings,
-    runners: [...m.runners.values()].map((r) => ({ uid: r.uid, userId: r.userId, isBot: r.isBot })),
+    runners: [...m.runners.values()].map((r) => ({
+      uid: r.uid,
+      userId: r.userId,
+      isBot: r.isBot,
+      inputs: r.inputs.length,
+      rejects: r.rejects,
+      // Only where the player's own timing IS the input. A game the server
+      // authors moves for is turn-based by construction, and "regular" there
+      // means the rules are working, not that somebody is scripting.
+      cadence: m.game.serverInputs ? null : cadence(r.inputs.map((i) => i.tick)),
+    })),
   });
   // Difficulty tuning needs evidence, not guesswork: how often bots win, and
   // how far they got in the games that measure such a thing. Recorded against

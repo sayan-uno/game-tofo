@@ -94,7 +94,19 @@ export type EventType =
   | "lobby.leave"
   | "lobby.mode"
   | "friend.request"
-  | "friend.respond";
+  | "friend.respond"
+  /** A player said somebody spoiled their game, or that a sanction against
+   *  them is wrong. In the activity log as well as the reports queue: a wave
+   *  of complaints against one player at one moment is itself a signal, and
+   *  it is unreadable afterwards if only the ones an admin acted on were
+   *  written down. */
+  | "report.filed"
+  | "appeal.filed"
+  /** What an admin did with them. */
+  | "report.dismissed"
+  | "case.opened"
+  | "case.resolved"
+  | "case.export";
 
 export interface EventInput {
   type: EventType;

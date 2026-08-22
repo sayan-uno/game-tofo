@@ -4280,3 +4280,228 @@ body.in-match .chat-panel {
   .ev-rail { width: auto; display: flex; gap: 8px; overflow-x: auto; border-right: 0; border-bottom: 1px solid rgba(255,255,255,.08); }
   .ev-tile { width: auto; margin-bottom: 0; white-space: nowrap; }
 }
+
+/* ── Reporting ─────────────────────────────────────────────────────────────
+   The flag on a results row and on a profile, and the sheet both open.
+   Deliberately quieter than "+ Add": reporting is not the thing we are
+   encouraging on a scoreboard, it is the thing we are making possible. */
+.mr-report-btn,
+.pf-report {
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.62);
+  border-radius: 999px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.mr-report-btn {
+  margin-left: 6px;
+  padding: 3px 8px;
+  line-height: 1;
+}
+.pf-report {
+  padding: 3px 10px;
+  letter-spacing: 0.04em;
+}
+.mr-report-btn:hover,
+.pf-report:hover {
+  border-color: rgba(229, 24, 46, 0.55);
+  background: rgba(229, 24, 46, 0.16);
+  color: #ff8494;
+}
+
+.rp-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  background: rgba(4, 2, 3, 0.62);
+  backdrop-filter: blur(6px);
+  animation: em-fade 0.15s ease;
+}
+.rp-sheet {
+  width: min(460px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  background: rgba(13, 6, 8, 0.96);
+  border: 1px solid rgba(229, 24, 46, 0.4);
+  border-radius: 18px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+  padding: 14px 14px 12px;
+}
+.rp-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.rp-kicker {
+  font-family: var(--display-font);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--red);
+}
+.rp-title {
+  flex: 1;
+  font-family: var(--display-font);
+  font-size: 18px;
+  letter-spacing: 0.06em;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rp-close {
+  background: rgba(255, 255, 255, 0.08);
+  border: none;
+  color: #fff;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 14px;
+}
+.rp-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.rp-cat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  padding: 9px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: #fff;
+  font-family: inherit;
+  cursor: pointer;
+}
+.rp-cat:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+.rp-cat.picked {
+  border-color: var(--red);
+  background: rgba(229, 24, 46, 0.14);
+}
+.rp-cat-label {
+  font-size: 13px;
+  font-weight: 700;
+}
+.rp-cat-hint {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.5);
+}
+.rp-note-wrap {
+  margin-top: 10px;
+}
+.rp-note {
+  width: 100%;
+  resize: none;
+  padding: 9px 11px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+}
+.rp-note::placeholder {
+  color: rgba(255, 255, 255, 0.35);
+}
+.rp-note:focus {
+  outline: none;
+  border-color: rgba(229, 24, 46, 0.5);
+}
+.rp-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.rp-msg {
+  flex: 1;
+  font-size: 11.5px;
+  color: #ff8494;
+  min-height: 1em;
+}
+
+/* ── Suspended ─────────────────────────────────────────────────────────────
+   A sanction should say what it is, how long it lasts, and how to argue with
+   it. Full-screen and opaque: there is nothing behind it to play. */
+.bn-screen {
+  position: absolute;
+  inset: 0;
+  z-index: 70;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: #0b0507;
+}
+.bn-card {
+  width: min(480px, 100%);
+  background: rgba(13, 6, 8, 0.96);
+  border: 1px solid rgba(229, 24, 46, 0.4);
+  border-radius: 18px;
+  padding: 22px 22px 20px;
+}
+.bn-kicker {
+  font-family: var(--display-font);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--red);
+  margin-bottom: 8px;
+}
+.bn-title {
+  font-family: var(--display-font);
+  font-size: 22px;
+  letter-spacing: 0.04em;
+  margin: 0 0 12px;
+}
+.bn-reason {
+  font-size: 14px;
+  line-height: 1.5;
+  margin: 0 0 6px;
+}
+.bn-until {
+  font-size: 12.5px;
+  color: rgba(255, 255, 255, 0.55);
+  margin: 0 0 16px;
+}
+.bn-appeal .bn-note {
+  width: 100%;
+  resize: none;
+  padding: 9px 11px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+}
+.bn-appeal .bn-note:focus {
+  outline: none;
+  border-color: rgba(229, 24, 46, 0.5);
+}
+.bn-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.bn-msg {
+  flex: 1;
+  font-size: 11.5px;
+  color: #ff8494;
+}
+.bn-sent {
+  font-size: 13px;
+  color: #46c98a;
+  margin: 0;
+}

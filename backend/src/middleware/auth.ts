@@ -29,6 +29,27 @@ export function verifyToken(token: string): AuthPayload | null {
   }
 }
 
+/** Verify the caller and let them through EVEN IF BANNED.
+ *
+ *  For exactly one thing: appealing. A ban that also removes the way to say
+ *  "this is wrong" is a decision with no way back, and the appeal route sits
+ *  behind the ordinary guard would be unreachable by precisely the people it
+ *  exists for. Nothing else may use this — it is a hole in the enforcement,
+ *  and it is only safe because the route behind it writes one row a day into
+ *  a moderation queue and reads nothing.
+ */
+export async function requireAuthEvenIfBanned(req: Request, res: Response, next: NextFunction) {
+  const header = req.headers.authorization;
+  const token = header?.startsWith("Bearer ") ? header.slice(7) : null;
+  const payload = token ? verifyToken(token) : null;
+  if (!payload) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  req.auth = payload;
+  next();
+}
+
 /** Verify the caller, and refuse a banned one.
  *
  *  The ban check is a single Redis GET against a key that only exists for

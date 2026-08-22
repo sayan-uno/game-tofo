@@ -25,9 +25,17 @@ export function clearSession() {
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  /** The machine-readable reason, when the server gave one — "BANNED",
+   *  "MAINTENANCE". A message is for a person; this is for the code. */
+  code?: string;
+  /** When a sanction lifts. A ban with no end reads as forever, and most of
+   *  them are not. */
+  until?: string | null;
+  constructor(status: number, message: string, code?: string, until?: string | null) {
     super(message);
     this.status = status;
+    this.code = code;
+    this.until = until;
   }
 }
 
@@ -41,8 +49,10 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  const data = (await res.json().catch(() => ({}))) as { error?: string };
-  if (!res.ok) throw new ApiError(res.status, data.error || `Request failed (${res.status})`);
+  const data = (await res.json().catch(() => ({}))) as { error?: string; code?: string; until?: string | null };
+  if (!res.ok) {
+    throw new ApiError(res.status, data.error || `Request failed (${res.status})`, data.code, data.until);
+  }
   return data as T;
 }
 

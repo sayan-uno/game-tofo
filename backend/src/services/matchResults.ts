@@ -27,6 +27,12 @@ export interface RecordedRunner {
   /** null for a server bot — bots are stored, but they own no career. */
   userId: string | null;
   isBot: boolean;
+  /** ─ Anti-cheat signals (A8), measured by the server while it played along.
+   *  Optional so that anything else building this input — a test, a replay
+   *  re-record — does not have to fake them. */
+  inputs?: number;
+  rejects?: Record<string, number>;
+  cadence?: number | null;
 }
 
 export interface RecordMatchInput {
@@ -99,6 +105,7 @@ export async function recordMatch(input: RecordMatchInput): Promise<RecordedResu
       await tx.insert(matchPlayers).values(
         standings.map((s) => {
           const runner = byUid.get(s.uid);
+          const rejects = runner?.rejects ?? {};
           return {
             matchId,
             userId: runner?.userId ?? null,
@@ -108,6 +115,10 @@ export async function recordMatch(input: RecordMatchInput): Promise<RecordedResu
             score: s.score,
             forfeit: s.forfeit,
             detail: s.detail,
+            inputs: runner?.inputs ?? 0,
+            rejects: Object.values(rejects).reduce((a, b) => a + b, 0),
+            rejectKinds: rejects,
+            cadence: runner?.cadence ?? null,
           };
         })
       );

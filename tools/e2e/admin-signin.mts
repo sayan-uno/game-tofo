@@ -72,10 +72,25 @@ let secret = "";
 /** The TOTP code spent on enrolment, so replaying it can be tested exactly. */
 let spentCode = "";
 
+/** One throwaway admin per role, signed in once and reused.
+ *
+ *  Cached because the address is derived from the role: asking for the same
+ *  role twice used to try to create the same account twice, and the second
+ *  section of the suite that wanted an analyst crashed the first one's run.
+ *  Reuse is also closer to the truth — a role is a person, not a request. */
+const signedIn = new Map<string, Promise<string>>();
+const signInAs = (role: string): Promise<string> => {
+  const existing = signedIn.get(role);
+  if (existing) return existing;
+  const fresh = createAdmin(role);
+  signedIn.set(role, fresh);
+  return fresh;
+};
+
 /** Create a throwaway admin of a given role and sign them all the way in.
  *  Used to prove the role gates from the OUTSIDE — the only way to know a
  *  support account cannot see addresses is to be one and try. */
-async function signInAs(role: string): Promise<string> {
+async function createAdmin(role: string): Promise<string> {
   const em = `${MARK}-${role}@check.invalid`;
   const enrolment = newEnrolment(em);
   const { rows } = await db.query(
@@ -118,7 +133,8 @@ async function loggedRow(
   }
 }
 
-const asRole = (token: string, path: string) => fetch(BASE + path, { headers: { authorization: `Bearer ${token}` } });
+const asRole = (token: string, path: string, method = "GET") =>
+  fetch(BASE + path, { method, headers: { authorization: `Bearer ${token}` } });
 
 try {
   // A throwaway owner, parked mid-enrolment exactly as POST /session/google
@@ -252,6 +268,48 @@ try {
       const ares = await asRole(analyst, `/players/${uid}`);
       ok(ares.status === 403, "an analyst cannot open a player at all — they get aggregates, not people");
     }
+  }
+
+  console.log("\nthe dashboard, and who may see it");
+  {
+    // The whole reason the analyst role exists: aggregates, and nothing that
+    // is about a person. Proved from the OUTSIDE, by being one and trying.
+    const analyst = await signInAs("analyst");
+
+    const dash = await asRole(analyst, "/analytics?days=14");
+    const dbody = (await dash.json()) as Record<string, unknown>;
+    ok(dash.status === 200, "an analyst can open the dashboard");
+    ok(Array.isArray(dbody.daily), "and gets the daily aggregate");
+    ok(Array.isArray(dbody.cohorts), "and the cohorts");
+    // If a single row named somebody, the role would be a fiction.
+    const asText = JSON.stringify(dbody);
+    ok(!/"uid"/.test(asText) && !/"username"/.test(asText), "with nothing in it that names a person");
+
+    ok((await asRole(analyst, "/signals")).status === 403, "an analyst cannot open the signals — those name people");
+    ok((await asRole(analyst, "/reports")).status === 403, "nor the reports queue");
+
+    const mod = await signInAs("moderator");
+    const sig = await asRole(mod, "/signals?days=7");
+    ok(sig.status === 200, "a moderator can");
+    const sbody = (await sig.json()) as { players?: unknown[] };
+    ok(Array.isArray(sbody.players), "and gets a ranked list");
+
+    const { rows: someone } = await db.query("select uid from users order by created_at limit 1");
+    if (someone[0]?.uid) {
+      const alts = await asRole(mod, `/signals/alts/${someone[0].uid}`);
+      ok(alts.status === 403, "but not the device and address linkage — that is an admin's to open");
+      const asOwner = await call(`/signals/alts/${someone[0].uid}`, { method: "GET" });
+      ok(asOwner.status === 200, "an owner can");
+      ok(Array.isArray(asOwner.body.nodes) && Array.isArray(asOwner.body.edges), "and gets the graph");
+      const { rows: trail } = await db.query(
+        "select count(*)::int n from admin_audit where action = 'alts.view' and target_id = $1",
+        [someone[0].uid]
+      );
+      ok(Number(trail[0]?.n ?? 0) >= 1, "and opening it is written to the audit trail — a sensitive READ is still logged");
+    }
+
+    const rebuild = await asRole(mod, "/analytics/rebuild", "POST");
+    ok(rebuild.status === 403, "rebuilding the aggregate is not a moderator's to do either");
   }
 
   console.log("\nhanding out a sanction, and who may");

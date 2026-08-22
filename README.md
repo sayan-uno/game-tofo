@@ -810,8 +810,195 @@ a list of everything would look like ownership while meaning nothing. When paid
 items ship, that panel reads a `user_items` table and this note goes away. What
 they have actually *worn* is already in **What they did**.
 
+## Reports and cases (A7)
+
+Every screen before this one answers a question. This is where the question
+arrives — and until it existed, nothing else in the console had a way to start.
+
+**A player reports somebody from the results screen or from their profile.**
+Five categories, an optional note, and nothing else: a long list is a list
+nobody reads to the end of, and every extra entry is one more way to file the
+same complaint in the wrong place.
+
+A report filed from a results screen carries the **match id**, which is the
+whole reason the button is there. It lands in the queue with the replay one
+click away instead of a forensic exercise in working out which match was meant.
+
+Three things the reporting button deliberately does *not* do:
+
+| | why |
+| --- | --- |
+| say anything about the person reported | a button that reveals whether somebody was already reported is a button people press to find things out |
+| behave differently for a bot | bots carry uids shaped exactly like real ones and the client contract hides which players are bots; a button that vanished for three of six rows would announce which three. The server answers the same sentence and writes nothing |
+| let one person flood the queue | fifteen a day, and one report per player per match — pressing it twice is a slip, not a second complaint |
+
+**Appeals land in the same queue.** An appeal is a report about a decision, and
+an admin working through the morning should meet it in the order it arrived
+rather than in a screen they have to remember to open. Only somebody actually
+under a sanction can file one, once a day.
+
+That route is the **one thing a full ban does not refuse**. `requireAuth` turns
+a banned caller away with a 403, which would have left the appeal unreachable by
+exactly the people it exists for — so it is declared before the router-wide
+guard with one of its own. The hole is one route wide, and `e2e:enforcement`
+proves both halves: a banned player can appeal, and still cannot report anybody
+else.
+
+A banned player used to see `Connection error: BANNED:Cheating` in a toast — the
+truth, delivered as though it were a bug. They now get a screen that says what
+the sanction is, when it lifts (read off the API's own 403, which carries the
+expiry the socket refusal does not), and offers to send an appeal.
+
+### A report is what a player said; a case is what we did about it
+
+Five people reporting one cheater is five reports and **one case**. Keeping them
+apart is what stops a queue from being a pile — and reports are never edited,
+because a report that can be rewritten is not evidence of anything. Triage is
+two buttons: dismiss it (the row is kept — forty dismissed reports from one
+person is itself a pattern) or open a case.
+
+A case has a short ref — `C-7K3QX` — because that is what gets written down and
+read back off a screen. A UUID is correct and unusable.
+
+Its screen is one timeline: notes, evidence and decisions in the order they
+happened, which is how somebody reads a case they did not work on, and exactly
+what the export writes out.
+
+**Attaching evidence is not decoration.** A replay attached to a case moves to
+the `hold` tier and stops being swept. And while a case is open, its subject's
+chat is exempt from the fifteen-day sweep — fifteen days is a sensible life for
+chatter and a disastrous one for evidence, and a report filed on day fourteen
+about something said on day one would otherwise be investigated against a
+conversation the platform had already deleted. Resolve the case and both go
+back to the ordinary schedule.
+
+### The case file
+
+One zip, built on demand, behind sudo and audited — this is evidence leaving
+the building, and the console's rule is that sensitive *reads* are logged too.
+
+```
+MANIFEST.txt   what is inside, and the SHA-256 of every part
+case.json      the case, its timeline and its reports, as data
+timeline.txt   the same thing as prose, for a reader with no tooling
+log.ndjson     the player's activity log, hash-chained line by line
+replays/…      the match files attached to the case
+voice/…        the recordings attached to the case
+```
+
+**The hash chain is the point of the log extract.** Each line carries the digest
+of the line before it, so removing or altering one row breaks every digest after
+it and the chain head printed in the manifest. A log that can be quietly edited
+proves nothing, and no amount of careful storage fixes that afterwards.
+`check:reports` proves it the only way that means anything: it alters one line,
+and then deletes one, and requires both to be detected.
+
+The zip is written by hand — a zip is a header, some deflated bytes and a
+directory at the end, and the format has not changed since 1989. The check reads
+it back with its own reader rather than the code that wrote it.
+
+### The trap this milestone cost
+
+A correlated subquery in Drizzle must **name the outer table itself**.
+Interpolating a column object renders it *unqualified*, and an unqualified name
+inside a subquery binds to the inner table first. `reports` has an `id`, so
+`where cr.case_id = ${cases.id}` silently became "reports whose case_id equals
+their own id" — zero, always, with no error anywhere. Every case showed nought
+reports. The name lookups beside it got away with the same mistake only because
+`users` happens to have no column of the same name.
+
+## Analytics and signals (A8)
+
+The last milestone, and the one that turns a pile of records into something you
+can look at in ten seconds.
+
+### The dashboard never reads the raw log
+
+A screen that scans `event_log` gets slower every week it succeeds, and
+eventually competes for the database with the game it is measuring. So an
+hourly job writes **one row per day** into `daily_stats`, and every chart reads
+those rows — a few hundred of them, forever.
+
+It rebuilds a **three-day trailing window** each time rather than only
+yesterday: a session that ended after midnight, a match written late, a cohort
+that gains its `d7` a week from now. Cheap to redo, expensive to get quietly
+wrong. Running it twice writes the same numbers, which `check:analytics` pins
+down, because it runs every hour.
+
+The job lives in the **console's process, not the game's**. It is a handful of
+heavy grouped reads over the biggest tables the platform has, and the whole
+point of the two-process split is that work like that can never land on the
+event loop serving inputs. The cost — the dashboard stops advancing when the
+console is down — is paid at exactly the moment nobody is reading it.
+
+**Retention means exactly that day, not "within".** Within-N is monotonic: it
+can only ever look like it is going up, which makes it useless as a measure and
+worse than useless as a reassurance.
+
+**The analyst role is real, and proved from the outside.** `e2e:admin` signs in
+as one and checks that the dashboard opens, that its payload contains no `uid`
+and no `username` anywhere, and that the signals, the reports queue and every
+player page are refused. A dashboard is exactly where "just this once" starts.
+
+### Signals: what the server already knew and was throwing away
+
+The server plays every match itself and refuses the inputs it does not believe.
+Until now those refusals were counted platform-wide, printed to the log and
+cleared — the plan's own words were "a cheating signal you are already
+collecting and throwing away". They are now attributed **per player, per
+match**, which costs nothing in the normal path because the counter is only
+touched when an input is already being discarded.
+
+| Signal | What it means | Why it is not proof |
+| --- | --- | --- |
+| `rate` refusals | over the per-second ceiling | a human hits it in a panic |
+| `early` refusals | a tick that had not happened yet | latency makes inputs *late*, not early — but a clock nudge can too |
+| cadence | the share of input gaps that are exactly the commonest gap | a held key, a turn-based game, a short match |
+| contested win rate | firsts in matches with other people in them | somebody is genuinely good |
+
+Cadence is blank for a game the server takes turns for — regular timing there
+means the rules are working, not that anybody is scripting.
+
+Every score is **capped, explainable and printed with its reasons in words**,
+next to a button that opens the match. It is a ranking, not a verdict: nothing
+here bans anybody, nothing here is ever shown to a player, and the studio is
+what actually decides. A cheating score that leaks teaches whoever is cheating
+which dial to turn down.
+
+### The alt-account graph
+
+Accounts clustered by shared **device hash** (the same browser on the same
+machine — strong) and shared **address** (weak: families, campuses and mobile
+carriers put strangers behind one all day, so IP edges are capped and labelled
+as weak). Banned relatives are flagged, which is the whole reason to look: ban
+the person, not the account.
+
+Opening it is behind `admin` **and audited** — the console's standing rule is
+that sensitive *reads* are logged too, so "who has been looking at whom" stays
+answerable.
+
+### Alerts that do not cry wolf
+
+Four watches reach a phone: a report spike, a ban wave, the matchmaker starving,
+and refused connections climbing. **Every one latches** — it fires on the way in
+and stays quiet while the condition holds, because an alarm that repeats every
+five minutes is one you mute, and a muted channel is worse than none.
+
+The latch is deliberately in memory rather than Redis: a restart *should*
+re-announce a condition that is still true, because a restart is exactly when
+somebody wants to know.
+
+### The charts
+
+Validated rather than chosen. The categorical hues are fixed in order and never
+cycled (worst adjacent CVD ΔE 8.4, normal-vision ΔE 19.7, all ≥ 3:1 on the
+console's surface); the retention grid uses a single-hue ramp whose light end
+still clears the surface at 2.42:1, so an empty-looking cell is genuinely empty.
+One axis per chart, a legend wherever there is more than one series, direct
+labels on the last point, and the same data as a plain table underneath for
+anybody who cannot use the colours at all.
+
 ## What's next (planned)
 
 - Trackline gameplay: obstacles, jump/roll, crashes, coins, scoring.
-- The admin console: reports and cases (A7), analytics and anti-cheat signals (A8).
 - Matchmaking that fills a party from a pool, and server bots for empty slots.

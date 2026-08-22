@@ -134,6 +134,20 @@
       "when": 1787399123599,
       "tag": "0018_dry_luckman",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1787412115605,
+      "tag": "0019_slippery_romulus",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1787420196020,
+      "tag": "0020_young_thunderball",
+      "breakpoints": true
     }
   ]
 }

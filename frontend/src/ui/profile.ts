@@ -156,6 +156,7 @@ export function openProfile(user: User, opts: OpenProfileOptions = {}) {
             <div class="pf-tags">
               <span class="pf-tag pf-tag-live pf-wait"><i></i>Online</span>
               <span class="pf-tag pf-wait pf-tag-friends">— Friends</span>
+              ${self ? "" : '<button class="pf-report" type="button">⚑ Report</button>'}
             </div>
             <div class="pf-xp">
               <div class="pf-xp-bar"><i></i></div>
@@ -185,6 +186,13 @@ export function openProfile(user: User, opts: OpenProfileOptions = {}) {
   setNameView(page.querySelector<HTMLElement>(".pf-name")!, user.name);
   page.querySelector<HTMLElement>(".pf-uid b")!.textContent = user.uid;
   setAvatar(page.querySelector<HTMLElement>(".pf-av")!, user.name, user.avatarUrl);
+
+  // Reporting from here rather than only from a results screen: an offensive
+  // name is not about a match, and neither is somebody you met a week ago.
+  // Loaded on demand — the sheet costs the lobby nothing until it is wanted.
+  page.querySelector<HTMLButtonElement>(".pf-report")?.addEventListener("click", () => {
+    void import("./report").then(({ openReport }) => openReport({ uid: user.uid, name: user.name }));
+  });
 
   const copyBtn = page.querySelector<HTMLButtonElement>(".pf-copy")!;
   copyBtn.onclick = () => {

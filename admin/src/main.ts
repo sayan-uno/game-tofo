@@ -21,6 +21,10 @@ import { mountPlayer } from "./screens/player";
 import { mountSanctions } from "./screens/sanctions";
 import { mountGames } from "./screens/games";
 import { mountNotices } from "./screens/notices";
+import { mountReports } from "./screens/reports";
+import { mountCase } from "./screens/case";
+import { mountAnalytics } from "./screens/analytics";
+import { mountSignals } from "./screens/signals";
 import { mountEvents } from "./screens/events";
 import { mountPlatform } from "./screens/platform";
 import { mountMatches } from "./screens/matches";
@@ -32,6 +36,7 @@ import { mountHistory } from "./screens/history";
 
 const root = document.getElementById("root")!;
 let stopScreen: (() => void) | null = null;
+let queueTimer = 0;
 let me: SignedIn | null = null;
 
 const go = (hash: string) => {
@@ -40,7 +45,7 @@ const go = (hash: string) => {
 };
 
 interface Route {
-  nav: "overview" | "history" | "players" | "matches" | "parties" | "sanctions" | "voice" | "games" | "notices" | "events" | "platform";
+  nav: "overview" | "history" | "players" | "matches" | "parties" | "sanctions" | "voice" | "games" | "notices" | "events" | "platform" | "reports" | "analytics" | "signals";
   title: string;
   crumb?: string;
   /** What the header box should be showing — a search you navigated to by URL
@@ -68,6 +73,24 @@ function parse(): Route {
   }
   if (parts[0] === "matches") {
     return { nav: "matches", title: "Matches", crumb: q || undefined, mount: (h) => mountMatches(h, q, go) };
+  }
+  if (parts[0] === "analytics") {
+    return { nav: "analytics", title: "Analytics", mount: (h) => mountAnalytics(h, me?.role ?? "") };
+  }
+  if (parts[0] === "signals") {
+    return { nav: "signals", title: "Signals", mount: (h) => mountSignals(h, me?.role ?? "") };
+  }
+  if (parts[0] === "reports") {
+    return { nav: "reports", title: "Reports", mount: (h) => mountReports(h, me?.role ?? "", go) };
+  }
+  if (parts[0] === "cases" && parts[1]) {
+    // By the short ref — "C-7K3QX" — because that is what gets written down,
+    // pasted into a message, and read back off somebody's screen.
+    const ref = decodeURIComponent(parts[1]);
+    return { nav: "reports", title: "Case", crumb: ref, mount: (h) => mountCase(h, ref, me?.role ?? "") };
+  }
+  if (parts[0] === "cases") {
+    return { nav: "reports", title: "Reports", mount: (h) => mountReports(h, me?.role ?? "", go) };
   }
   if (parts[0] === "sanctions") {
     return { nav: "sanctions", title: "Sanctions", mount: (h) => mountSanctions(h, go) };
@@ -113,7 +136,10 @@ function shell(who: SignedIn): void {
           <a href="#/" data-nav="overview">${icon("gauge")} Overview</a>
           <a href="#/players" data-nav="players">${icon("users")} Players</a>
           <a href="#/matches" data-nav="matches">${icon("play")} Matches</a>
+          <a href="#/analytics" data-nav="analytics">${icon("gauge")} Analytics</a>
           <div class="heading">Moderation</div>
+          <a href="#/reports" data-nav="reports">${icon("flag")} Reports<span class="badge hidden" id="qbadge"></span></a>
+          <a href="#/signals" data-nav="signals">${icon("search")} Signals</a>
           <a href="#/sanctions" data-nav="sanctions">${icon("shield")} Sanctions</a>
           <a href="#/history" data-nav="history">${icon("clock")} History</a>
           <a href="#/parties" data-nav="parties">${icon("users")} Parties</a>
@@ -149,6 +175,31 @@ function shell(who: SignedIn): void {
   };
   const slot = document.getElementById("searchslot")!;
   slot.replaceWith(searchBox("", (q) => go(q ? `#/players?q=${encodeURIComponent(q)}` : "#/players")));
+  watchQueue();
+}
+
+/** How many reports are waiting, on the rail.
+ *
+ *  A moderation console you have to remember to open is one nobody opens. This
+ *  is the cheapest possible version of that: one small count, refreshed on a
+ *  slow timer, that turns "check the queue" from a habit into something the
+ *  screen tells you. */
+function watchQueue(): void {
+  window.clearInterval(queueTimer);
+  const paint = async () => {
+    const badge = document.getElementById("qbadge");
+    if (!badge) return;
+    try {
+      const { pending } = await call<{ pending: number }>("/reports/pending");
+      badge.textContent = String(pending);
+      badge.classList.toggle("hidden", pending === 0);
+    } catch {
+      // A console that cannot count is not a console that should shout.
+      badge.classList.add("hidden");
+    }
+  };
+  void paint();
+  queueTimer = window.setInterval(paint, 60_000);
 }
 
 function route(): void {

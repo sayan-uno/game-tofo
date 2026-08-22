@@ -58,6 +58,9 @@ const ids = [];
   if (stale.length > 0) {
     await db.query("delete from sanctions where user_id = any($1)", [stale]);
     await db.query("delete from event_log where user_id = any($1)", [stale]);
+    // Reports point at users with ON DELETE SET NULL, so they would OUTLIVE
+    // the throwaway account and sit in the moderation queue looking real.
+    await db.query("delete from reports where reporter_user_id = any($1) or subject_user_id = any($1)", [stale]);
     await db.query("delete from users where id = any($1)", [stale]);
     console.log(`swept ${stale.length} account(s) from an interrupted run`);
   }
@@ -189,6 +192,23 @@ try {
   const err = await connect(a.token);
   ok(String(err).startsWith("BANNED:"), `the socket handshake refuses them too (${err})`);
   ok((await api(b.token)).status === 200, "an unrelated player is unaffected");
+
+  // A ban that also removes the way to say "this is wrong" is a decision with
+  // no way back. Everything else is refused; this one route is not — and it is
+  // reachable through the guard a real client hits, not by calling the service
+  // that implements it.
+  const appeal = await post(a.token, "/api/reports/appeal", { note: "I was not cheating — e2e" });
+  ok(appeal.status === 200, `a banned player can still appeal (got ${appeal.status})`);
+  const [queued] = (
+    await db.query("select note, kind, status from reports where reporter_user_id = $1 and kind = 'appeal'", [a.id])
+  ).rows;
+  ok(queued?.note === "I was not cheating — e2e", "and the appeal is in the queue, in their words");
+  ok(queued?.status === "new", "waiting to be read like any other report");
+  const twice = await post(a.token, "/api/reports/appeal", { note: "again" });
+  ok(twice.status === 429, `but only one a day (got ${twice.status})`);
+  // Everything else still refuses them: the hole is exactly one route wide.
+  ok((await post(a.token, "/api/reports", { uid: b.uid, category: "text" })).status === 403,
+     "and they still cannot report anybody else — the exception is one route wide");
 
   console.log("\nlifted");
   await db.query("update sanctions set revoked_at = now() where user_id = $1", [a.id]);
@@ -376,6 +396,7 @@ try {
 } finally {
   await db.query("delete from sanctions where user_id = any($1)", [ids]);
   await db.query("delete from event_log where user_id = any($1)", [ids]);
+  await db.query("delete from reports where reporter_user_id = any($1) or subject_user_id = any($1)", [ids]);
   await db.query("delete from users where id = any($1)", [ids]);
   await db.end();
 }
