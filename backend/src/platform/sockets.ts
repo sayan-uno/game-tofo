@@ -32,6 +32,7 @@ import {
   throttle,
 } from "./store.js";
 import { FILL_DEADLINE_MS, dequeue, enqueue, packNow } from "./matchmaking.js";
+import { countBotSeats } from "./botSeats.js";
 import { EV, PROGRESS_MAX_HZ, type MatchAddable, type MatchSync, type TimePong } from "../shared/core/protocol.js";
 import { noteLobbyPick, noteLobbyReady, noteLobbySearch } from "./partyLog.js";
 import { bannedAmong, gameHeld, hiddenGames } from "./gameLocks.js";
@@ -212,7 +213,12 @@ export function registerPlatformHandlers(io: Server, socket: AuthedSocket, deps:
           });
         }
       }
-      if (users.length > game.matchSizeFor(mode)) return reply?.({ error: "Your party is too big for this mode" });
+      // Bot teammates occupy seats in the match too, so they count towards
+      // what this party is worth to the pool — and against how big it may be.
+      // Left out, matchmaking would promise the same seats twice (W3).
+      const partyBots = await countBotSeats(lobbyId);
+      const partySize = users.length + partyBots;
+      if (partySize > game.matchSizeFor(mode)) return reply?.({ error: "Your party is too big for this mode" });
       if (await getSearching(lobbyId)) return reply?.({ error: "Already searching" });
       if (!(await throttle("start", userId, 3))) return reply?.({ error: "Hold on a moment" });
 
@@ -250,7 +256,7 @@ export function registerPlatformHandlers(io: Server, socket: AuthedSocket, deps:
       }
       // Otherwise wait to be topped up — by other parties, and then by bots
       // once the deadline passes. The client shows the search from this ack.
-      await enqueue(gameId, size, lobbyId, users.length);
+      await enqueue(gameId, size, lobbyId, partySize);
       io.to(`room:${lobbyId}`).emit(EV.searching, { found: users.length, size, elapsedMs: 0, deadlineMs: FILL_DEADLINE_MS });
       reply?.({ ok: true, searching: true, size });
       // Try immediately: someone may already be waiting.

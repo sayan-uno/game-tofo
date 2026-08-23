@@ -24,6 +24,11 @@ interface PartyMember {
   weapon: string | null;
   isLeader: boolean;
   avatarUrl: string | null;
+  /** A teammate from the server population (W3). Recorded for the console and
+   *  never sent to a player — a moderator watching this back has to know which
+   *  of the four is somebody they can act on. Absent on parties recorded
+   *  before W3, which reads correctly as "a person". */
+  bot?: boolean;
 }
 type JoinVia = "code" | "invite" | "friend" | "request" | "self";
 type PartyEvent =
@@ -359,7 +364,7 @@ export function mountParty(host: HTMLElement, key: string, go: (h: string) => vo
               (m) =>
                 `<div class="vrow"><div class="vwho"><i class="mic" data-mic="${esc(m.uid)}">🎙</i>${esc(m.name)}${
                   m.isLeader ? " ★" : ""
-                }</div><div class="muted mono" style="font-size:11px">${esc(m.uid)}</div></div>`
+                }${m.bot ? ' <span class="pill">server</span>' : ""}</div><div class="muted mono" style="font-size:11px">${esc(m.uid)}</div></div>`
             )
             .join("") || `<p class="empty">Nobody.</p>`;
       }

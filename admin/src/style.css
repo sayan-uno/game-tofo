@@ -625,3 +625,43 @@ table.rt .rt-cell { text-align: center; padding: 6px 10px; }
 table.rt .rt-cell b { display: block; font-size: 12.5px; color: #fff; }
 table.rt .rt-cell i { font-style: normal; font-size: 10.5px; color: rgba(255,255,255,.7); }
 table.rt .rt-cell.muted b, table.rt .rt-cell.muted { color: var(--faint); }
+
+/* ---------- Worlds (W2) ----------
+   The bar is the screen's one piece of real design work: two segments, people
+   first, so "is this room actually full of players" is answered before you
+   have read a single number. */
+.worldbar {
+  display: flex;
+  height: 8px;
+  border-radius: 5px;
+  overflow: hidden;
+  background: var(--line);
+  min-width: 120px;
+}
+.worldbar-h { background: var(--green); }
+.worldbar-b { background: var(--faint); opacity: 0.55; }
+
+.worldchat {
+  max-height: 420px;
+  overflow-y: auto;
+  padding: 10px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.worldline {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 13px;
+  line-height: 1.45;
+  padding: 2px 0;
+}
+.worldline-who { color: var(--text); font-weight: 600; flex: none; }
+/* Population lines are dimmed rather than badged: a badge per line would make
+   the log unreadable, and the point is only ever to see the shape of the room
+   at a glance. */
+.worldline.server .worldline-who { color: var(--dim); font-weight: 500; }
+.worldline.server .worldline-body { color: var(--dim); }
+.worldline-body { flex: 1; overflow-wrap: anywhere; }
+.worldline-at { color: var(--faint); font-family: var(--mono); font-size: 10.5px; flex: none; }

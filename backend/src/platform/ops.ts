@@ -19,6 +19,8 @@ import { liveMatchSnapshot } from "./match.js";
 import { poolDepth, poolKeyFor } from "./matchmaking.js";
 import { evidenceBackend } from "./evidence.js";
 import { replayStats } from "./replay.js";
+import { allWorldCounts } from "./world.js";
+import { worldChatStats } from "../services/worldChat.js";
 
 const SNAPSHOT_MS = 2000;
 /** Comfortably more than two ticks, so one slow write does not make a healthy
@@ -60,6 +62,13 @@ async function writeSnapshot(io: Server): Promise<void> {
     if (depth > 0) queue[`${p.gameId}:${p.size}`] = depth;
   }
 
+  // Worlds: three numbers, not the rosters. The console's Worlds screen reads
+  // the member lists straight out of Redis when somebody opens it; putting a
+  // thousand uids into a snapshot that is written every two seconds would be
+  // the most expensive thing this process does, in aid of a page nobody has
+  // open (W2).
+  const worlds = await allWorldCounts();
+
   const snapshot: Record<string, string> = {
     ts: String(Date.now()),
     instanceId: config.instanceId,
@@ -78,6 +87,10 @@ async function writeSnapshot(io: Server): Promise<void> {
     // temporary disk look fine until the day somebody needs one.
     evidence: evidenceBackend(),
     replay: JSON.stringify(replayStats()),
+    worlds: String(worlds.length),
+    worldHumans: String(worlds.reduce((n, w) => n + w.humans, 0)),
+    worldBots: String(worlds.reduce((n, w) => n + w.bots, 0)),
+    worldChat: JSON.stringify(worldChatStats()),
     rssMb: String(Math.round(process.memoryUsage().rss / 1048576)),
   };
 

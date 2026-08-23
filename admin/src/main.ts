@@ -33,6 +33,7 @@ import { mountVoice } from "./screens/voice";
 import { mountParty } from "./screens/party";
 import { mountParties } from "./screens/parties";
 import { mountHistory } from "./screens/history";
+import { mountWorld, mountWorlds } from "./screens/worlds";
 
 const root = document.getElementById("root")!;
 let stopScreen: (() => void) | null = null;
@@ -45,7 +46,7 @@ const go = (hash: string) => {
 };
 
 interface Route {
-  nav: "overview" | "history" | "players" | "matches" | "parties" | "sanctions" | "voice" | "games" | "notices" | "events" | "platform" | "reports" | "analytics" | "signals";
+  nav: "overview" | "history" | "players" | "matches" | "parties" | "worlds" | "sanctions" | "voice" | "games" | "notices" | "events" | "platform" | "reports" | "analytics" | "signals";
   title: string;
   crumb?: string;
   /** What the header box should be showing — a search you navigated to by URL
@@ -98,6 +99,13 @@ function parse(): Route {
   if (parts[0] === "history") {
     return { nav: "history", title: "History", mount: (h) => mountHistory(h, go) };
   }
+  if (parts[0] === "worlds" && parts[1]) {
+    const id = decodeURIComponent(parts[1]);
+    return { nav: "worlds", title: "World", crumb: id, mount: (h) => mountWorld(h, id, go) };
+  }
+  if (parts[0] === "worlds") {
+    return { nav: "worlds", title: "Worlds", mount: (h) => mountWorlds(h, go) };
+  }
   if (parts[0] === "parties" && !parts[1]) {
     return { nav: "parties", title: "Parties", mount: (h) => mountParties(h, go) };
   }
@@ -143,6 +151,7 @@ function shell(who: SignedIn): void {
           <a href="#/sanctions" data-nav="sanctions">${icon("shield")} Sanctions</a>
           <a href="#/history" data-nav="history">${icon("clock")} History</a>
           <a href="#/parties" data-nav="parties">${icon("users")} Parties</a>
+          <a href="#/worlds" data-nav="worlds">${icon("globe")} Worlds</a>
           <a href="#/voice" data-nav="voice">${icon("mic")} Voice</a>
           <a href="#/games" data-nav="games">${icon("play")} Games</a>
           <a href="#/notices" data-nav="notices">${icon("mail")} Notices</a>

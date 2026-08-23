@@ -42,6 +42,14 @@ export interface PartyMember {
   weapon: string | null;
   isLeader: boolean;
   avatarUrl: string | null;
+  /** A teammate from the server population (W3).
+   *
+   *  The CONSOLE is told and the players are not — the same line the Worlds
+   *  screen draws, and for the same reason: a moderator reading a party has to
+   *  know which of the four pedestals belongs to somebody they can act on.
+   *  Absent on every member of every party recorded before W3, which reads
+   *  correctly as "a person". */
+  bot?: boolean;
 }
 
 /** How somebody came to be in the party. Worth recording because it is the
@@ -151,7 +159,15 @@ export function noteLobbyState(
 ): Promise<void> {
   return inOrder(lobbyId, async () => {
     // A group, not a person sitting alone in their own lobby.
-    const isGroup = members.length >= 2;
+    //
+    // PEOPLE, not members. One player who asked the world for teammates and
+    // got three from the server population is standing in a full squad — but
+    // a party recording is a record of what people did with each other, and
+    // opening one for every solo player who pressed "team up" would bury the
+    // groups a moderator is actually looking for under thousands that have
+    // nobody in them to look at. The bots still appear in the roster of a
+    // party that IS a group; they simply cannot make one on their own.
+    const isGroup = members.filter((m) => !m.bot).length >= 2;
     const open = await currentSession(lobbyId);
 
     if (!isGroup) {

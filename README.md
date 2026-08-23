@@ -998,6 +998,191 @@ One axis per chart, a legend wherever there is more than one series, direct
 labels on the last point, and the same data as a plain table underneath for
 anybody who cannot use the colours at all.
 
+## World chat, and a population to fill it (W1–W3)
+
+A new platform is empty, and an empty platform stays empty: nobody stays in a
+lobby where nothing is happening long enough for the next person to arrive. The
+matchmaker already answered half of that — it fills empty match seats with
+bots — but the half that decides whether somebody comes back tomorrow is the
+half between matches, and there was nothing there at all.
+
+So: **World**, a fourth section in the inbox. A public room of up to a thousand
+people who can all hear each other, with a board of "we need one more" cards
+across the top. Ask the world for teammates and you have a group within ten
+seconds — real players if any are there, and a group anyway if not.
+
+Three things had to be true for that to be worth building, and each of them is
+a piece of this milestone.
+
+### A bot is an account now (W1)
+
+A bot used to be a name and nothing else: invented at match creation, used for
+one match, thrown away. That was enough while a bot's whole life was one match.
+It stopped being enough the moment one had to stand in a world chat all
+evening, ask to team up, be joined, and be looked at — because all four of
+those need an identity that is the same tomorrow.
+
+`bot_accounts` holds them. Deliberately **not** rows in `users`:
+
+* `users` requires a Google id and an email. Minting fake ones would put
+  credentials-shaped rows in the table the sign-in path trusts, and the first
+  mistake in that direction is an account somebody can log in to.
+* Every existing "is this a real person" question in the codebase is
+  `userId != null`. Keeping bots out of `users` means every one of those
+  answers stays right without being revisited.
+
+What they *do* share with players is the shape of an identity — a ten-digit
+uid, a fifteen-character name checked case-insensitively against real ones, a
+character and a weapon from the same catalogue — and a career that accumulates
+the same way. `bot_stats` is `player_stats` with a different owner column, and
+it is written **in the same transaction, by the same code, at the same
+moment**: `recordMatch` upserts both. A bot with forty matches played forty
+matches. Nothing is pre-filled, including the friend count on its profile,
+which is nought and stays nought because it has no friendships and a fabricated
+one would be the first number here that was not true.
+
+Tap one in your squad and you get an ordinary profile page: level, rank card,
+win rate, distance, achievements. That is not decoration — a party member you
+can tap and a party member you cannot are visibly different things, and the
+difference is exactly the tell the whole design exists to avoid. The same
+reasoning closes the other three leaks a name in a party opens: a friend
+request to one is quietly accepted and simply never answered (a stranger
+ignoring you is the commonest thing on any platform; "no player found with that
+UID" for somebody standing next to you is not), a report against one is
+answered with the same sentence as a report against anybody, and asking one to
+lead the group is refused with "they can't lead this group" rather than with a
+denial that it exists.
+
+The pool grows on demand. `ensureBotPool` mints in batches only when the number
+of accounts **not currently spoken for** cannot cover what is being asked for —
+measuring the pool against the ask rather than against how much of it is free
+is how you mint thousands of accounts on a busy evening and use none of them.
+
+### A world is a place, not a channel (W2)
+
+`WORLD_CAPACITY` is a thousand: small enough that the room reads as a place —
+you see the same names again — and large enough that it never feels empty. When
+one fills with **real players**, the next opens by itself. Nobody provisions a
+world and no configuration changes to run ten of them.
+
+Two rules, from which the rest falls out:
+
+1. **A real player always gets a seat.** Capacity counts people and population
+   together, so a full world is only ever full of *people*: if the thousand
+   includes bots, one of them stands down at the door. That is what "somebody
+   goes offline and either a bot or a real player takes the place" actually is,
+   seen from the other side.
+2. **Population is a property of the world, not of who happens to be online.**
+   Bots top it up towards a target that drifts slowly, so a world does not sit
+   at exactly 1000/1000 all evening — which would be the tell.
+
+**All of it is Redis.** A world's membership changes many times a second at
+scale and its chat changes faster; none of that may touch Postgres. What
+Postgres gets is the message archive, and even that is written by a buffered
+writer on a two-second timer, exactly like the activity log — saying something
+in a room of a thousand people never waits on a database. It expires on the
+same fifteen-day clock as direct and squad messages and is spared by the same
+open-case exemption, because a public room is where most of what gets reported
+is actually said.
+
+Membership belongs to **being online**, not to having the tab open: the
+population you see has to be the number of people who are actually here, and a
+world you drop out of every time you close a panel is not a place. The socket
+only joins the world's *broadcast room* while the tab is open, so a player who
+never opens World receives none of its traffic — and the tick generates no
+chatter, no cards and no archive rows for a world nobody is watching.
+
+Blocks are the one thing filtered on the client, and it is deliberate: a world
+broadcast is one serialisation to a thousand sockets, and filtering it per
+recipient would turn every line into a thousand block-list lookups. The block
+still does what a block is for — you never see them — and the private surfaces
+where it matters more are still enforced on the server.
+
+#### Making a room sound like a room
+
+Three rules, each of which was the obvious tell when it was missing. Nobody
+talks in paragraphs, so lines are four words and lower case. A room is not a
+rota, so lines are drawn against a per-world memory of what has already been
+said. And people answer each other — a greeting gets greeted back, "gg" gets a
+"gg" — but not always, because a room where every line is replied to is as
+wrong as one where none is. There is a typo now and then, for the same reason.
+
+### Ten seconds, and you have a group (W3)
+
+Pressing **Team up** puts a card on the board. Anybody in the world can take
+it, and ten seconds later — the same deadline matchmaking waits, for the same
+reason — whatever the group is still short of arrives anyway. The arrivals are
+teammates in every sense the client can see: pedestals in the lobby, name
+plates, characters from the catalogue, a line in squad chat a moment after they
+walk in, and the same seats in the match that follows, carrying the careers
+they have already earned.
+
+Bots put up their own cards too, so the board is not only ever the one person
+who pressed the button — and those are cards a real player can walk into. There
+is no lobby behind a bot's card (a bot has no party of its own), so the group
+is formed around the player who answered it, which is also the honest
+arrangement: the person who is actually there leads.
+
+**A real player outranks a bot, everywhere.** A bot in a party is a placeholder
+for somebody who has not arrived yet, so a group that "filled" is still a group
+a friend can be invited into: the newest bot stands down at the door. Shrinking
+a squad to a duo sends the surplus home rather than refusing the change. A
+leader can remove one exactly as they would remove anybody.
+
+Two failure modes worth naming, because both were real:
+
+* A party that pressed START before its card came due is already in
+  matchmaking, filling the same seats from the same pool. Adding teammates to
+  the lobby underneath it would deal the match one runner too many. The fill
+  step checks and stands down.
+* A party of one person plus three bots is a full squad — but it is not a
+  *group*, and opening a party recording for every solo player who pressed
+  Team up would bury the groups a moderator is looking for under thousands with
+  nobody in them. The party log counts people, not members. The bots still
+  appear in the roster of a party that *is* a group, tagged for the console.
+
+And a small one that costs real money: a player alone with three bots would
+otherwise hold an open LiveKit participant all evening to hear silence. The
+voice token endpoint answers with no room when there is nobody to talk to —
+decided on the server, because telling the client which of its teammates are
+people, even as a count, is the leak the whole design avoids.
+
+### What the console sees
+
+**Worlds** is the one screen that draws the line the players never see. Every
+world with its occupancy split two ways — a bar that answers "is this room
+actually full of people" before you have read a number — the cards on its
+board, and how many lines it has carried in a day. Open one and you get its
+members labelled *player* or *server*, its live chat with the population dimmed
+so the shape of the room is readable at a glance, and the fifteen-day archive
+behind a button, because reading a public room is still reading what named
+accounts said and **who has read whom has to stay answerable**. It is audited
+by name, exactly like a private conversation.
+
+Underneath: the population itself, with the matches, wins and XP its busiest
+accounts have actually earned. That table is the only honest way to tune the
+thing — a population whose top accounts have four hundred matches each is a
+population too small for the platform it is standing in.
+
+### Checking it
+
+`npm run e2e:world` against a running backend. It proves a world exists and
+talks, that a card puts a group together within ten seconds either way, that a
+bot's card is one a person can actually walk into, that a real player takes a
+seat from a bot when the thousand is full, and that the teammates who come out
+of all that own the careers they earn — read back out of `bot_stats` after a
+real match. Set `TRACKLINE_MATCH_SECONDS=30` on the backend to keep the last
+leg short.
+
+It also found the bug worth repeating: a client that sent a payload to a
+handler which only expected an acknowledgement made that handler call an object
+as a function — from inside its own `catch`, while reporting the first error —
+and the unhandled rejection **took the whole server down**. One player's
+malformed emit disconnected everybody. Handlers now read the callback out of
+whichever argument actually holds one (`sockets/ack.ts`), and the process
+survives an unhandled rejection while printing the whole stack, because a net
+that stays quiet is worse than no net.
+
 ## What's next (planned)
 
 - Trackline gameplay: obstacles, jump/roll, crashes, coins, scoring.

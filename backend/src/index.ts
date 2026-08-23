@@ -16,10 +16,15 @@ import { reportsRouter } from "./routes/reports.js";
 import { playerEventsRouter } from "./routes/events.js";
 // Registers every game with the platform (one import per game folder).
 import "./games/index.js";
-import { registerSockets } from "./sockets/index.js";
+import { registerSockets, broadcastLobby } from "./sockets/index.js";
 import { startMatchmaker } from "./platform/matchmaking.js";
 import { clearStaleMatchState } from "./platform/store.js";
 import { startChatRetention } from "./services/chat.js";
+import { flushWorldChat, startWorldChatArchive, stopWorldChatArchive } from "./services/worldChat.js";
+import { ensureBotPool, loadBotPool } from "./platform/botAccounts.js";
+import { clearStaleBotSeats } from "./platform/botSeats.js";
+import { clearStaleWorldState, WORLD_CAPACITY } from "./platform/world.js";
+import { startWorldLife, stopWorldLife } from "./platform/worldLife.js";
 import { botTelemetry } from "./platform/bots.js";
 import { clearOnlineSet, clearStalePresence } from "./redis.js";
 import { gateReason, gateShut, getFlags, setGate, startMaintenanceWatch } from "./platform/flags.js";
@@ -178,6 +183,32 @@ async function start() {
     const warmed = await warmSanctionCache();
     if (warmed > 0) console.log(`✔ Restored ${warmed} sanctioned player(s) into the enforcement cache`);
     startChatRetention();
+    // World chat's archive: buffered, flushed on a timer, never on a send.
+    startWorldChatArchive();
+
+    // ---- worlds and the population that fills them (W1–W3) ----
+    //
+    // Order matters. The pool has to be in memory before any world is
+    // balanced, and the stale state has to be gone before the pool is handed
+    // out — a seat key left by a previous run points at a bot this process's
+    // hold table has never heard of, which is how one account ends up in two
+    // places at once.
+    const seatsLeft = await clearStaleBotSeats();
+    if (seatsLeft > 0) console.log(`✔ Cleared ${seatsLeft} bot seat key(s) left by a previous run`);
+    const worldGhosts = await clearStaleWorldState();
+    if (worldGhosts > 0) console.log(`✔ Cleared ${worldGhosts} world membership(s) left by a previous run`);
+    const pool = await loadBotPool();
+    // Enough to stand up one world plus the seats matches and parties take.
+    // Growth beyond this is on demand: worlds mint what they need as real
+    // players arrive, so a quiet server never carries a population it is not
+    // using. Never fatal — a platform that will not start because it could not
+    // make believe is worse than one with a thin room.
+    const wanted = Math.round(WORLD_CAPACITY * 1.2);
+    const minted = await ensureBotPool(wanted).catch((err: unknown) => {
+      console.error("[bots] could not grow the pool at boot:", err);
+      return 0;
+    });
+    console.log(`✔ Bot pool ready (${pool} loaded, ${minted} minted)`);
     // Same reasoning as the ban cache: a flushed Redis must not silently
     // downgrade a flagged player's replay retention back to thirty days.
     const flagged = await warmReplayTargets();
@@ -208,6 +239,9 @@ async function start() {
     if (config.voiceRecording.enabled && !voiceState.ready) {
       console.warn(`⚠ Voice recording is switched ON but cannot run: ${voiceState.why}`);
     }
+    // The worlds tick: fills the groups people asked for, keeps the population
+    // honest, and gives the rooms something to say.
+    startWorldLife(io, { broadcastLobby });
     startOpsSnapshot(io);
     startOpsCommands(io);
     // When a scheduled window falls due: tell everybody, and end every match
@@ -264,7 +298,9 @@ async function shutdown(signal: string): Promise<void> {
   shuttingDown = true;
   console.log(`\n… ${signal} — flushing before exit`);
   stopOpsSnapshot();
+  stopWorldLife();
   stopEventLog();
+  stopWorldChatArchive();
   stopReplaySweeper();
   stopReplayWorker();
   await stopOpsCommands();
@@ -274,10 +310,31 @@ async function shutdown(signal: string): Promise<void> {
   await drainReplays().catch(() => undefined);
   const flushed = await flushEvents();
   if (flushed > 0) console.log(`✔ Wrote ${flushed} pending event(s)`);
+  const chatter = await flushWorldChat().catch(() => 0);
+  if (chatter > 0) console.log(`✔ Wrote ${chatter} pending world message(s)`);
   server.close(() => process.exit(0));
   // Never hang a deploy on a socket that will not close.
   setTimeout(() => process.exit(0), 5000).unref();
 }
+/** ONE PLAYER'S BAD MESSAGE MUST NOT DISCONNECT EVERY OTHER PLAYER.
+ *
+ *  Node's default for an unhandled rejection is to exit. On a game server that
+ *  means a single malformed emit — an argument in the wrong slot, a payload
+ *  where a callback was expected — takes down every session on the process.
+ *  That happened: a handler threw while REPORTING an earlier throw, from
+ *  inside its own catch, and the whole server went with it.
+ *
+ *  So the process survives, and says so as loudly as it can. This is a net,
+ *  not a licence: every line it prints is a bug that has already caused
+ *  somebody an error, and it prints the whole stack so it cannot be ignored.
+ *  Handlers still validate their own arguments (see sockets/ack.ts). */
+process.on("unhandledRejection", (reason) => {
+  console.error("✖ UNHANDLED REJECTION — the process stayed up; this is a bug:", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("✖ UNCAUGHT EXCEPTION — the process stayed up; this is a bug:", err);
+});
+
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 process.on("SIGINT", () => void shutdown("SIGINT"));
 

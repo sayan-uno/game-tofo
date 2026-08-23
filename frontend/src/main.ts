@@ -1,4 +1,5 @@
-import { EV } from "./shared/core/protocol";
+import { EV, WORLD_EV } from "./shared/core/protocol";
+import type { WorldChatMessage, WorldLfg, WorldPopulation } from "./shared/core/protocol";
 import "./style.css";
 import { api, ApiError, getToken, clearSession } from "./api/http";
 import { connectSocket, emitAck } from "./api/socket";
@@ -17,7 +18,7 @@ import {
   toggleNotices,
   type MaintenanceState,
 } from "./ui/platformNotice";
-import { joinVoice, leaveVoice, onMicChange } from "./voice/livekit";
+import { joinVoice, leaveVoice, onMicChange, revalidateVoice } from "./voice/livekit";
 import type { LobbyGameController } from "./platform/lobbyGame";
 import type { MatchClient } from "./platform/matchClient";
 import type { LobbyState, User } from "./types";
@@ -262,6 +263,15 @@ async function enterLobby(user: User) {
   });
   const chatPanel = new ChatPanel(uiRoot, user, {
     onUnread: (hasUnread) => hud.setChatUnread(hasUnread),
+    // A name in world chat belongs to somebody you have never met, which makes
+    // "who is this" the commonest question in the room — so it opens the same
+    // profile a squadmate's pedestal does.
+    onOpenPlayer: (uid, name) => {
+      if (uid === user.uid) return;
+      void loadProfileUi()
+        .then(({ profile }) => profile.openProfile({ id: "", uid, name, avatarUrl: null }, profileHooks))
+        .catch(() => toast("Couldn't open that player's card", true));
+    },
   });
   // Restore red dots for messages that arrived while offline (non-critical —
   // on failure the dots simply start empty).
@@ -294,12 +304,26 @@ async function enterLobby(user: User) {
   // Party voice: the lobby's room while squadded up, nothing while solo — and
   // hands off entirely while a match runs (the match client owns voice then:
   // one room for the whole roster, party room again the moment it ends).
+  //
+  // WHO is in the party decides this, and the client is deliberately not told
+  // which of its teammates are people — so it asks. The server answers with no
+  // room when there is nobody left to talk to, and joinVoice then does nothing
+  // (see voice/livekit.ts). Re-asked only when the membership actually
+  // CHANGES, because this broadcast also carries download progress and firing
+  // a request at every percentage point would be a request a second.
+  let voiceRoster = "";
   const applyPartyVoice = () => {
     if (matchClient?.active) return;
     const state = lobbyState;
     if (state && state.members.length > 1) {
-      void joinVoice(state.lobbyId, (msg, isError) => toast(msg, isError), "party");
+      const roster = `${state.lobbyId}|${state.members.map((m) => m.uid).sort().join(",")}`;
+      if (roster === voiceRoster) return;
+      voiceRoster = roster;
+      // A teammate leaving can turn a conversation into a room of one; the
+      // server is the only side that can tell, so re-ask rather than assume.
+      void revalidateVoice(state.lobbyId, () => joinVoice(state.lobbyId, (m, e) => toast(m, e), "party"));
     } else {
+      voiceRoster = "";
       void leaveVoice();
     }
   };
@@ -528,6 +552,19 @@ async function enterLobby(user: User) {
     // server echoes team chat to the whole room, so own messages show too).
     lobby.showChatBubble(msg.from.uid, msg.body);
   });
+
+  // ---- world chat (W2) ----
+  //
+  // Routed straight through: the panel decides whether it is showing, and does
+  // nothing at all when it is not. These only arrive while the World tab is
+  // open — the socket joins the world's broadcast room on `world:hello` and
+  // leaves it the moment the tab does.
+  socket.on(WORLD_EV.msg, (msg: WorldChatMessage) => chatPanel.onWorldMessage(msg));
+  socket.on(WORLD_EV.request, (req: WorldLfg) => chatPanel.onWorldRequest(req));
+  socket.on(WORLD_EV.requestGone, ({ id }: { id: string }) => chatPanel.onWorldRequestGone(id));
+  socket.on(WORLD_EV.population, (p: WorldPopulation) =>
+    chatPanel.onWorldPopulation(p.online, p.capacity)
+  );
 
   socket.on("friend:online", ({ uid, name }: { uid: string; name: string }) => {
     toast(`${name} is online`);

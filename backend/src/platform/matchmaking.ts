@@ -25,6 +25,7 @@ import { getUsersByIds, type UserRow } from "../services/users.js";
 import { getGame, listGames, type GameServerDefinition } from "./games.js";
 import { createMatch, type PartyInput } from "./match.js";
 import { buildBots } from "./bots.js";
+import { botSeatIdentities } from "./botSeats.js";
 import { setSearching } from "./store.js";
 import { EV } from "../shared/core/protocol.js";
 
@@ -189,7 +190,12 @@ async function tryPack(io: Server, game: GameServerDefinition, size: number): Pr
   const parties: PartyInput[] = [];
   for (const c of chosen) {
     const state = await alive(c);
-    if (state.users.length > 0) parties.push({ lobbyId: c.lobbyId, users: state.users });
+    // The bots a party ALREADY has walk in with it, keeping their names and
+    // their careers — they are teammates, not filler, and the group has been
+    // standing in the lobby with them (W3).
+    if (state.users.length > 0) {
+      parties.push({ lobbyId: c.lobbyId, users: state.users, bots: await botSeatIdentities(c.lobbyId) });
+    }
   }
   if (parties.length === 0) {
     // Everyone chosen vanished between the claim and here. Rare, but it must
@@ -199,11 +205,19 @@ async function tryPack(io: Server, game: GameServerDefinition, size: number): Pr
     return false;
   }
 
-  const seatsUsed = parties.reduce((n, p) => n + p.users.length, 0);
-  const bots = seatsUsed < size ? await buildBots(game, size - seatsUsed) : [];
+  const humansSeated = parties.reduce((n, p) => n + p.users.length, 0);
+  const partyBots = parties.flatMap((p) => p.bots ?? []);
+  const seatsUsed = humansSeated + partyBots.length;
+  // Never the same account twice at one table: a party's own bots are already
+  // seated, so the filler has to be drawn from everybody else.
+  const bots =
+    seatsUsed < size
+      ? await buildBots(game, size - seatsUsed, new Set(partyBots.map((b) => b.botId)))
+      : [];
   console.info(
     `[mm] ${game.id}/${size}: ${parties.length} part${parties.length === 1 ? "y" : "ies"} ` +
-      `(${seatsUsed} human${seatsUsed === 1 ? "" : "s"}) + ${bots.length} bot(s) after ${(waited / 1000).toFixed(1)}s`
+      `(${humansSeated} human${humansSeated === 1 ? "" : "s"}${partyBots.length ? ` + ${partyBots.length} teammate bot(s)` : ""}) ` +
+      `+ ${bots.length} filler bot(s) after ${(waited / 1000).toFixed(1)}s`
   );
   await createMatch(io, game, parties, bots);
   return true;

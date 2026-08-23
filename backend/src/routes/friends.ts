@@ -17,6 +17,7 @@ import {
   listIncomingRequests,
 } from "../services/friends.js";
 import { getBlockState } from "../services/chat.js";
+import { getBotByUid } from "../platform/botAccounts.js";
 
 export function friendsRouter(io: Server) {
   const router = Router();
@@ -78,6 +79,19 @@ export function friendsRouter(io: Server) {
     }
     const target = await getUserByUid(uid.trim());
     if (!target) {
+      // A request aimed at a member of the server population is ACCEPTED and
+      // goes nowhere (W1).
+      //
+      // The alternative — "no player found with that UID" for somebody whose
+      // name is on the pedestal next to yours — is the loudest tell the
+      // platform could give, and it would be given at the exact moment a
+      // player is being friendly. Quietly unanswered is what a real request to
+      // a stranger usually is; there is no fake pending row and no fake
+      // acceptance, so nothing here can ever become a friendship.
+      if (getBotByUid(uid.trim())) {
+        res.json({ ok: true, status: "pending" });
+        return;
+      }
       res.status(404).json({ error: "No player found with that UID" });
       return;
     }

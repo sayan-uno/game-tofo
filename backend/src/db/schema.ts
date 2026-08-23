@@ -214,6 +214,12 @@ export const matchPlayers = pgTable(
       .notNull()
       .references(() => matches.id, { onDelete: "cascade" }),
     userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
+    /** Which BOT account played this seat, for the same reason user_id exists
+     *  for a person: a bot now has a career, and a career is the sum of the
+     *  matches that point at it. NULL for a human, and NULL for the ephemeral
+     *  bots that played before bot accounts existed — those rows keep their
+     *  snapshotted name and simply belong to nobody. */
+    botId: uuid("bot_id").references(() => botAccounts.id, { onDelete: "set null" }),
     isBot: boolean("is_bot").notNull().default(false),
     name: text("name").notNull(),
     /** 1 = first. Equal results share a placement, so several rows can be 1. */
@@ -241,6 +247,7 @@ export const matchPlayers = pgTable(
   (t) => [
     index("idx_match_players_match").on(t.matchId),
     index("idx_match_players_user").on(t.userId),
+    index("idx_match_players_bot").on(t.botId),
     unique("match_players_match_user_key").on(t.matchId, t.userId),
   ]
 );
@@ -933,3 +940,124 @@ export const cohorts = pgTable("cohorts", {
   d30: integer("d30").notNull().default(0),
   computedAt: timestamp("computed_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// ===========================================================================
+// Bot accounts (W1) — the population that makes a young platform feel alive
+//
+// Until now a bot was a NAME AND NOTHING ELSE: generated at match creation,
+// used for one match, thrown away. That was enough while bots only filled
+// empty seats, and it stopped being enough the moment they had to stand in a
+// world chat, ask to team up and be looked at.
+//
+// So a bot now has an account. Deliberately NOT a row in `users`:
+//
+//   * `users` requires a Google id and an email. Minting fake ones would put
+//     credentials-shaped rows in the table the sign-in path trusts, and the
+//     first mistake in that direction is an account somebody can log in to.
+//   * Every existing "is this a real person" question is `userId != null`.
+//     Keeping bots out of `users` means every one of those answers stays
+//     right without being revisited.
+//
+// What they DO share with players is the shape of an identity — a ten-digit
+// uid, a fifteen-character name, a character and a weapon from the same
+// catalog — and a career that accumulates the same way, from matches they
+// actually played. Nothing about a bot is pre-filled: a bot with 40 matches
+// played 40 matches.
+// ===========================================================================
+export const botAccounts = pgTable(
+  "bot_accounts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** Same shape and same space as a player uid, and checked against the
+     *  players' table before it is used — a bot must never shadow a real
+     *  account, in either direction. */
+    uid: varchar("uid", { length: 12 }).notNull().unique("bot_accounts_uid_key"),
+    username: varchar("username", { length: 15 }).notNull(),
+    /** Catalog ids, resolved on read exactly like a player's, so a retired
+     *  item leaves a bot with the default rather than a broken model. */
+    character: varchar("character", { length: 40 }),
+    weapon: varchar("weapon", { length: 40 }),
+    /** 0–100. How well they play, and — with `persona` — how they talk. Fixed
+     *  per account rather than rolled per match, because a player who is
+     *  brilliant on Monday and hopeless on Tuesday is the tell this whole
+     *  table exists to remove. */
+    skill: integer("skill").notNull().default(50),
+    /** How this one writes: quiet | casual | chatty | hype. Drives the line
+     *  pool and how often they say anything at all. */
+    persona: varchar("persona", { length: 12 }).notNull().default("casual"),
+    /** active | retired. Retired accounts keep their history (they appear in
+     *  old matches) but are never handed out again. */
+    status: varchar("status", { length: 12 }).notNull().default("active"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // Same case-insensitive rule the players' table uses: "Nova" must block
+    // "NOVA", or two bots in one world chat read as one person with a
+    // capital-letter habit.
+    uniqueIndex("bot_accounts_username_lower_key").on(sql`lower(${t.username})`),
+    index("idx_bot_accounts_status").on(t.status, t.lastSeenAt),
+  ]
+);
+
+/** A bot's career, in exactly the shape a player's is (player_stats), and
+ *  written by the same code path at the same moment. Two tables rather than a
+ *  nullable-owner column on one, so nothing that reads a PLAYER's career can
+ *  accidentally read a bot's — the profile endpoint, the leaderboards to
+ *  come, and the analytics job all stay honest by construction. */
+export const botStats = pgTable("bot_stats", {
+  botId: uuid("bot_id")
+    .primaryKey()
+    .references(() => botAccounts.id, { onDelete: "cascade" }),
+  matches: integer("matches").notNull().default(0),
+  wins: integer("wins").notNull().default(0),
+  losses: integer("losses").notNull().default(0),
+  draws: integer("draws").notNull().default(0),
+  bestPlacement: integer("best_placement"),
+  totalScore: bigint("total_score", { mode: "number" }).notNull().default(0),
+  coins: bigint("coins", { mode: "number" }).notNull().default(0),
+  distanceMetres: bigint("distance_metres", { mode: "number" }).notNull().default(0),
+  playtimeSeconds: integer("playtime_seconds").notNull().default(0),
+  xp: bigint("xp", { mode: "number" }).notNull().default(0),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// ===========================================================================
+// World chat (W2)
+//
+// A world is a public room of up to a thousand people. That makes it the
+// loudest surface on the platform and the one most likely to need answering
+// for — so it is written down, on the same fifteen-day clock as every other
+// conversation, and spared by the same open-case exemption.
+//
+// The sender is SNAPSHOTTED (uid + name) rather than joined on read. Two
+// reasons, and the second is the one that matters: a thousand-row page would
+// otherwise need a join against `users` every time an admin opened it, and —
+// more importantly — what a room saw is the name that was on the message when
+// it was sent, not whatever it says today.
+//
+// Hot path note: nothing here is written inline. services/worldChat.ts
+// buffers in memory and flushes one multi-row INSERT every couple of seconds,
+// exactly like the activity log, so saying something in a world of a thousand
+// people never waits on Postgres.
+// ===========================================================================
+export const worldMessages = pgTable(
+  "world_messages",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    worldId: varchar("world_id", { length: 16 }).notNull(),
+    /** Exactly one of these is set. A message with neither would be a message
+     *  from nobody, which is the one thing a moderation record cannot be. */
+    senderId: uuid("sender_id").references(() => users.id, { onDelete: "cascade" }),
+    botId: uuid("bot_id").references(() => botAccounts.id, { onDelete: "cascade" }),
+    uid: varchar("uid", { length: 12 }).notNull(),
+    name: text("name").notNull(),
+    body: varchar("body", { length: 300 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("idx_world_msgs_world").on(t.worldId, t.createdAt),
+    index("idx_world_msgs_sender").on(t.senderId, t.createdAt),
+    index("idx_world_msgs_created").on(t.createdAt),
+  ]
+);

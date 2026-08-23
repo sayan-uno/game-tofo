@@ -2,8 +2,8 @@ import { Router } from "express";
 import { AccessToken } from "livekit-server-sdk";
 import { config } from "../config.js";
 import { requireAuth } from "../middleware/auth.js";
-import { getUserLobby } from "../redis.js";
-import { activeMatchIdForUser } from "../platform/match.js";
+import { getLobbyMembers, getUserLobby } from "../redis.js";
+import { activeMatchIdForUser, humansIn } from "../platform/match.js";
 import { matchVoiceRoom } from "../platform/voice.js";
 import { getSanctions } from "../services/sanctions.js";
 
@@ -31,12 +31,41 @@ voiceRouter.post("/token", async (req, res) => {
       res.status(400).json({ error: "You are not in a match" });
       return;
     }
+    // Nobody to talk to → no room. See the party branch below; the reasoning
+    // is the same and a match of one person and three bots is the commonest
+    // case of it.
+    if (humansIn(matchId).size < 2) {
+      res.json({ room: null, reason: "alone" });
+      return;
+    }
     room = matchVoiceRoom(matchId);
     ttl = "20m"; // a match is minutes; a leaked token must not outlive it by much
   } else {
     const lobbyId = await getUserLobby(req.auth!.userId);
     if (!lobbyId) {
       res.status(400).json({ error: "You are not in a lobby" });
+      return;
+    }
+    // NOBODY TO TALK TO → NO ROOM, and no token.
+    //
+    // The client asks for one whenever its party has more than one member, and
+    // since W3 a party's members can include teammates from the server
+    // population — who have no microphone and never will. Left alone, a player
+    // who pressed "team up" and got three of them would hold an open LiveKit
+    // participant for the rest of the evening, at real cost, to hear silence.
+    //
+    // Decided HERE rather than on the client on purpose: the client is not
+    // told which of its teammates are people, and telling it — even as a
+    // count — is exactly the leak the whole design avoids. `getLobbyMembers`
+    // returns people, so this is one read and no new state.
+    //
+    // Answered as an ordinary success with no room, not an error: the client
+    // already declines silently when the room it is offered is not the one it
+    // asked for, and a red toast saying "voice failed" would be both wrong and
+    // a tell of its own.
+    const people = await getLobbyMembers(lobbyId);
+    if (people.length < 2) {
+      res.json({ room: null, reason: "alone" });
       return;
     }
     room = lobbyId;

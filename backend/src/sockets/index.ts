@@ -40,6 +40,18 @@ import {
 } from "../redis.js";
 import { areFriends, displayName, getFriendIds, getUserById, getUserByUid, getUsersByIds } from "../services/users.js";
 import { registerChatHandlers, syncTeamChatSession } from "./chat.js";
+import { registerWorldHandlers } from "./world.js";
+import { ackOf } from "./ack.js";
+import { joinWorld, leaveWorld, touchWorld } from "../platform/world.js";
+import {
+  clearBotSeats,
+  countBotSeats,
+  dropBotSeat,
+  dropOneBotSeat,
+  getBotSeats,
+  moveBotSeats,
+} from "../platform/botSeats.js";
+import { getBotByUid } from "../platform/botAccounts.js";
 import { deviceHashFrom, socketOrigin, type ClientOrigin } from "../services/clientIp.js";
 import { logEvent } from "../services/eventLog.js";
 import { noteDevice } from "../services/devices.js";
@@ -132,16 +144,25 @@ export const trace = (socket: AuthedSocket) => ({
 
 export async function broadcastLobby(io: Server, lobbyId: string) {
   const memberIds = await getLobbyMembers(lobbyId);
-  const [users, mode, game, loadingAll, sayReady, leaderId] = await Promise.all([
+  const [users, mode, game, loadingAll, sayReady, leaderId, botMembers] = await Promise.all([
     getUsersByIds(memberIds),
     getLobbyMode(lobbyId),
     getLobbyGame(lobbyId),
     getLoading(lobbyId),
     getSayReady(lobbyId),
     isPartyLobby(lobbyId) ? getLobbyLeader(lobbyId) : Promise.resolve(null),
+    // Teammates who came from a world card, or who filled the seats nobody
+    // real took. They are members of this party in every sense that matters
+    // to the client, so they are members in the payload too (W3).
+    getBotSeats(lobbyId),
   ]);
-  // The party is gone — its game pick and download progress go with it.
-  if (memberIds.length === 0 && game) await clearLobbyGameState(lobbyId);
+  // The party is gone — its game pick and download progress go with it, and so
+  // do its bot teammates: a group of nobody plus three bots is not a group.
+  if (memberIds.length === 0) {
+    if (game) await clearLobbyGameState(lobbyId);
+    await clearBotSeats(lobbyId);
+    botMembers.length = 0;
+  }
   // Codes are created on demand (lobby:teamCode below), never here — this
   // broadcast only carries the current one so joiners and re-renders stay in
   // sync, and releases it when the party dissolves (solo / emptied out).
@@ -151,7 +172,15 @@ export async function broadcastLobby(io: Server, lobbyId: string) {
   let teamCode: string | null = null;
   if (mode !== "solo" && memberIds.length > 0) teamCode = await getTeamCode(lobbyId);
   else await releaseTeamCode(lobbyId);
-  const members = users.map((u) => ({
+  const members: {
+    id: string;
+    uid: string;
+    name: string;
+    avatarUrl: string | null;
+    isLeader: boolean;
+    character: string;
+    weapon: string | null;
+  }[] = users.map((u) => ({
     id: u.id,
     uid: u.uid,
     name: displayName(u),
@@ -166,10 +195,36 @@ export async function broadcastLobby(io: Server, lobbyId: string) {
     // retired weapon leaves an empty hand rather than a broken model URL.
     weapon: resolveWeapon(u.equippedWeapon),
   }));
+  // Appended AFTER the people, so a bot is never the first pedestal in a
+  // party — the eye reads order, and the leader belongs at the front.
+  // Nothing in this shape says which entries these are: that is the whole
+  // point, and it is why they are built here rather than sent as a second
+  // list the client would have to be trusted not to render differently.
+  for (const bot of botMembers) {
+    members.push({
+      id: bot.id,
+      uid: bot.uid,
+      name: bot.name,
+      avatarUrl: null,
+      isLeader: false,
+      character: bot.character,
+      weapon: bot.weapon,
+    });
+  }
   // Download progress only for people still in the party (a member who left
   // may have a stale row until the pick changes).
   const loading: Record<string, number> = {};
   for (const m of members) if (loadingAll[m.uid] !== undefined) loading[m.uid] = loadingAll[m.uid];
+  // A bot teammate has nothing to download and nothing to decide, so it
+  // reports done and willing — which is exactly what a player who already had
+  // the pack cached looks like.
+  //
+  // NOT cosmetic. The client lights START only when every member is at 100%
+  // and every non-leader has said they want to play; leave these out and a
+  // party that filled from a world card can never start a game, stuck on
+  // "Downloading… 1/4 ready" for ever. The SERVER's own start check reads the
+  // real members and the real Redis keys, so nothing here weakens it (W3).
+  for (const bot of botMembers) loading[bot.uid] = 100;
   // Who in this party may not play what is picked, and why. Asked only when a
   // game IS picked, and answered for the whole party in one command — the
   // alternative is a round trip per member on every broadcast.
@@ -188,7 +243,7 @@ export async function broadcastLobby(io: Server, lobbyId: string) {
     // Who has said they want to play what is picked. Only members who are
     // still here count: a ready-up from somebody who has since left would
     // otherwise let the leader start a game nobody present agreed to.
-    ready: sayReady.filter((u) => members.some((m) => m.uid === u)),
+    ready: [...sayReady.filter((u) => members.some((m) => m.uid === u)), ...botMembers.map((b) => b.uid)],
     // Named, not merely counted: a party told "somebody here cannot play this"
     // spends the next minute working out who.
     barred: users
@@ -199,7 +254,11 @@ export async function broadcastLobby(io: Server, lobbyId: string) {
   // Never awaited, and it returns immediately when nothing has changed — which
   // is what most broadcasts are.
   if (partyEnabled()) {
-    void noteLobbyState(lobbyId, mode, members, memberIds.length > 0 ? game : null)
+    // The console's copy carries the one field the players' does not. Built as
+    // a separate array on purpose: the flag must never be able to leak into
+    // the payload above by somebody adding a spread in the wrong place.
+    const forRecord = members.map((m) => ({ ...m, bot: botMembers.some((b) => b.uid === m.uid) }));
+    void noteLobbyState(lobbyId, mode, forRecord, memberIds.length > 0 ? game : null)
       .then(() => syncLobbyRecording(lobbyId))
       .catch((e: unknown) => console.error("[party] log:", e));
   }
@@ -238,9 +297,12 @@ async function repriceSearch(lobbyId: string): Promise<void> {
   if (!pool) return;
   const [gameId, sizeText] = pool.split(":");
   const size = Number(sizeText);
-  const members = await getLobbyMembers(lobbyId);
+  const [members, seats] = await Promise.all([getLobbyMembers(lobbyId), countBotSeats(lobbyId)]);
+  // Bot teammates take seats in the match, so they count towards what this
+  // party is worth to the pool. Left out, matchmaking would promise the seats
+  // twice and a four-runner match would be dealt five runners.
   if (members.length === 0) await dequeue(gameId, size, lobbyId);
-  else await updateSize(gameId, size, lobbyId, members.length);
+  else await updateSize(gameId, size, lobbyId, members.length + seats);
 }
 
 /** Why `userId` may not move into `targetLobbyId` right now, or null if they
@@ -287,6 +349,15 @@ async function moveToLobby(io: Server, socket: AuthedSocket, lobbyId: string): P
     // One player left behind is not a party — send them home so it ends
     // cleanly rather than leaving somebody in a group of one.
     await dissolveIfAlone(io, previous);
+  }
+  // A REAL PLAYER OUTRANKS A BOT. If this group is only full because bots
+  // filled it, the newest one stands down at the door — a placeholder that
+  // kept a person out would be the opposite of what it is there for (W3).
+  const seatsHeld = await countBotSeats(lobbyId);
+  if (seatsHeld > 0) {
+    const [here, targetMode] = await Promise.all([getLobbyMembers(lobbyId), getLobbyMode(lobbyId)]);
+    const cap = lobbyCapacity(targetMode === "solo" ? "squad" : targetMode);
+    if (here.length + seatsHeld >= cap && !here.includes(userId)) await dropOneBotSeat(lobbyId);
   }
   const ok = await joinLobby(userId, lobbyId);
   if (!ok) {
@@ -366,6 +437,10 @@ async function dissolveIfAlone(io: Server, lobbyId: string): Promise<void> {
   if (!isPartyLobby(lobbyId)) return;
   const members = await getLobbyMembers(lobbyId);
   if (members.length !== 1) return;
+  // …unless the group they are standing in still has teammates in it. One
+  // person plus three players from a world card is a party, and sending its
+  // last human home would delete the group they had just been given (W3).
+  if ((await countBotSeats(lobbyId)) > 0) return;
   const [lastId] = members;
   const [last] = await getUsersByIds([lastId]);
   if (!last) return;
@@ -398,6 +473,10 @@ async function promoteToParty(io: Server, ownerLobby: string, ownerId: string): 
   await moveTeamSession(ownerLobby, partyId);
   await moveLobbyGameState(ownerLobby, partyId);
   await moveTeamCode(ownerLobby, partyId);
+  // The bots move with the group, like the pick and the code do — a teammate
+  // that vanished the moment the lobby got its proper name would be a strange
+  // way to start a party.
+  await moveBotSeats(ownerLobby, partyId);
   await setLobbyLeader(partyId, ownerId);
   const socketId = await getSocketId(ownerId);
   const ownerSocket = socketId ? io.sockets.sockets.get(socketId) : null;
@@ -593,6 +672,12 @@ export function registerSockets(io: Server) {
     // fast client emits right after connecting would otherwise be dropped.
     registerChatHandlers(io, socket);
     registerPlatformHandlers(io, socket, { broadcastLobby });
+    registerWorldHandlers(io, socket, {
+      broadcastLobby,
+      asParty,
+      moveToLobby: (server, s, target) => moveToLobby(server, s as AuthedSocket, target),
+      joinBlockedReason,
+    });
 
     // Invite a friend to my CURRENT lobby.
     socket.on("lobby:invite", async (payload: { friendUid?: string } | null, ack?: (r: object) => void) => {
@@ -616,6 +701,11 @@ export function registerSockets(io: Server) {
         const [members, mode] = await Promise.all([getLobbyMembers(lobbyId), getLobbyMode(lobbyId)]);
         // Inviting from solo opens a party right away (Free Fire style): the
         // group exists as soon as the invite goes out, accepted or not.
+        //
+        // Bot seats are deliberately NOT counted here. A friend always
+        // outranks a bot, so a group that looks full because bots filled it is
+        // still one you can be invited into — the bot stands down at the door
+        // (moveToLobby).
         const effectiveMode = mode === "solo" ? "squad" : mode;
         if (members.length >= lobbyCapacity(effectiveMode)) {
           return ack?.({ error: effectiveMode === "duo" ? "Duo is full — switch to Squad for more players" : "Your squad is full" });
@@ -905,6 +995,11 @@ export function registerSockets(io: Server) {
                 : `Duo supports 2 players — your party has ${members.length}`,
           });
         }
+        // Shrinking the group sends the surplus bot teammates home rather than
+        // refusing the change: a person is never blocked by a placeholder, and
+        // a squad of one plus three bots must be able to become a duo (W3).
+        let over = members.length + (await countBotSeats(lobbyId)) - lobbyCapacity(mode);
+        while (over > 0 && (await dropOneBotSeat(lobbyId))) over--;
         await setLobbyMode(lobbyId, mode);
         logEvent({ ...trace(socket), type: "lobby.mode", userId, uid, lobbyId, data: { mode } });
         await broadcastLobby(io, lobbyId);
@@ -922,6 +1017,14 @@ export function registerSockets(io: Server) {
     socket.on("lobby:transferLead", async (payload: { targetUid?: string } | null, ack?: (r: object) => void) => {
       try {
         const { targetUid } = payload ?? {};
+        // A bot teammate cannot lead: everything a leader does — picking a
+        // game, pressing start, changing the mode — is a person's act, and
+        // there is nobody behind that pedestal to do any of it. Answered
+        // plainly rather than with "player not found", which for somebody
+        // standing in the same party would say more than it hides.
+        if (getBotByUid(String(targetUid || ""))) {
+          return ack?.({ error: "They can't lead this group" });
+        }
         const target = await getUserByUid(String(targetUid || ""));
         if (!target) return ack?.({ error: "Player not found" });
         if (target.id === userId) return ack?.({ error: "You're already the leader" });
@@ -959,10 +1062,31 @@ export function registerSockets(io: Server) {
     socket.on("lobby:kick", async (payload: { targetUid?: string } | null, ack?: (r: object) => void) => {
       try {
         const { targetUid } = payload ?? {};
-        const target = await getUserByUid(String(targetUid || ""));
+        const wantedUid = String(targetUid || "");
+        const myLobbyEarly = (await getUserLobby(userId)) ?? soloLobby;
+        // A bot teammate is a member like any other, so it can be removed like
+        // any other. Checked FIRST because a bot has no users row and would
+        // otherwise fall out of this handler as "Player not found" — which is
+        // both wrong and, to a leader looking at a full group, baffling.
+        const botMember = getBotByUid(wantedUid);
+        if (botMember) {
+          if (!(await isLobbyLeader(myLobbyEarly, userId, uid))) {
+            return ack?.({ error: "Only the group leader can kick players" });
+          }
+          if (await playerInMatch(userId)) return ack?.({ error: "Finish the match first" });
+          if (!(await dropBotSeat(myLobbyEarly, botMember.id))) {
+            return ack?.({ error: "That player isn't in your group" });
+          }
+          await broadcastLobby(io, myLobbyEarly);
+          void noteLobbyLeave(myLobbyEarly, botMember.uid, botMember.name, "kicked").catch((e: unknown) =>
+            console.error("[party] leave:", e)
+          );
+          return ack?.({ ok: true });
+        }
+        const target = await getUserByUid(wantedUid);
         if (!target) return ack?.({ error: "Player not found" });
         if (target.id === userId) return ack?.({ error: "You can't kick yourself — use Leave" });
-        const myLobby = (await getUserLobby(userId)) ?? soloLobby;
+        const myLobby = myLobbyEarly;
         if (!(await isLobbyLeader(myLobby, userId, uid))) {
           return ack?.({ error: "Only the group leader can kick players" });
         }
@@ -1005,7 +1129,10 @@ export function registerSockets(io: Server) {
     // Leave the group. Members go back to their own lobby in solo mode; a
     // LEADER leaving hands the group to the longest-present member instead.
     // Works even when alone in a duo/squad party — it drops you back to solo.
-    socket.on("lobby:leave", async (ack?: (r: object) => void) => {
+    // Takes only an acknowledgement — which is exactly the shape that used to
+    // take the process down when a client sent a payload as well. See ack.ts.
+    socket.on("lobby:leave", async (...args: unknown[]) => {
+      const ack = ackOf(args);
       try {
         const from = (await getUserLobby(userId)) ?? soloLobby;
         if (await playerInMatch(userId)) return ack?.({ error: "Leave the match first" });
@@ -1051,6 +1178,11 @@ export function registerSockets(io: Server) {
           data: { seconds: Math.round((Date.now() - (socket.data.connectedAt ?? Date.now())) / 1000) },
         });
         await setOffline(userId);
+        // Out of the world too — and the seat is left EMPTY on purpose. The
+        // world tick decides whether a bot takes it or it waits for the next
+        // person, which is what keeps a population moving rather than snapping
+        // back to the same number the instant somebody goes.
+        await leaveWorld(userId).catch((err: unknown) => console.error("[world] leave:", err));
         // A leader dropping hands the party on before they go, so the group
         // is never left standing under somebody who is not there. It costs one
         // Redis write and the party does not notice: same id, same recording,
@@ -1126,6 +1258,11 @@ export function registerSockets(io: Server) {
           } else {
             await touchHere(userId);
           }
+          // The same beat keeps their world membership alive — one more ZADD
+          // on a message that was already being sent, rather than a timer of
+          // its own. A phone that dies mid-sentence has no disconnect to fire,
+          // and this is what eventually notices (W2).
+          await touchWorld(userId);
         } catch (err) {
           console.error("presence:beat error:", err);
         }
@@ -1197,6 +1334,13 @@ export function registerSockets(io: Server) {
       // Fire) — unless their squad is still alive and waiting for them.
       await ensureLobbyModeOnConnect(soloLobby);
       await moveToLobby(io, socket, soloLobby);
+      // …and into a world. Membership belongs to BEING ONLINE, not to having
+      // the World tab open: the population a player sees has to be the number
+      // of people who are actually here, and a world you drop out of every
+      // time you close a panel is not a place. The socket only joins the
+      // world's broadcast room when the tab is opened (sockets/world.ts), so
+      // this costs one Redis write and no traffic at all (W2).
+      void joinWorld(userId).catch((err: unknown) => console.error("[world] join:", err));
       // Back into a match that is still running for them (page reload, drop).
       platformOnConnect(socket);
 

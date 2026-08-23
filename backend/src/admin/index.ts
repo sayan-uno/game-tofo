@@ -26,6 +26,7 @@ import { replaysRouter } from "./routes/replays.js";
 import { chatsRouter } from "./routes/chats.js";
 import { historyRouter } from "./routes/history.js";
 import { partiesRouter } from "./routes/parties.js";
+import { worldsRouter } from "./routes/worlds.js";
 import { voiceRouter } from "./routes/voice.js";
 import { reportsRouter } from "./routes/reports.js";
 import { analyticsRouter } from "./routes/analytics.js";
@@ -59,6 +60,7 @@ export function mountAdmin(app: Express): void {
   router.use("/replays", replaysRouter);
   router.use(voiceRouter);
   router.use(partiesRouter);
+  router.use(worldsRouter);
   router.use(reportsRouter);
   router.use(analyticsRouter);
   router.use(historyRouter);

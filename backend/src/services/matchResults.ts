@@ -19,13 +19,22 @@
 // time, rather than recomputed from match_players on every open.
 import { eq, sql } from "drizzle-orm";
 import { db } from "../db/client.js";
-import { matchPlayers, matches, playerStats } from "../db/schema.js";
+import { botStats, matchPlayers, matches, playerStats } from "../db/schema.js";
 import type { MatchEndReason, Standing } from "../shared/core/protocol.js";
 
 export interface RecordedRunner {
   uid: string;
-  /** null for a server bot — bots are stored, but they own no career. */
+  /** null for a server bot. */
   userId: string | null;
+  /** The bot account that played this seat, null for a person (W1).
+   *
+   *  Bots used to own no career, because a bot was invented for one match and
+   *  thrown away at the end of it. They have accounts now, so the sum of their
+   *  matches is a real record — written HERE, in the same transaction and by
+   *  the same rules as a player's, because a bot whose profile was filled in
+   *  by a separate job is a bot whose profile can disagree with its own match
+   *  history. */
+  botId: string | null;
   isBot: boolean;
   /** ─ Anti-cheat signals (A8), measured by the server while it played along.
    *  Optional so that anything else building this input — a test, a replay
@@ -109,6 +118,7 @@ export async function recordMatch(input: RecordMatchInput): Promise<RecordedResu
           return {
             matchId,
             userId: runner?.userId ?? null,
+            botId: runner?.botId ?? null,
             isBot: runner?.isBot ?? false,
             name: s.name,
             placement: s.placement,
@@ -124,9 +134,53 @@ export async function recordMatch(input: RecordMatchInput): Promise<RecordedResu
       );
 
       const seconds = Math.round(input.ticks / input.tickRate);
+
+      // The bots' side of the same ledger. Identical arithmetic to the player
+      // loop below — deliberately, because the whole point of a bot having a
+      // record is that the record means the same thing. Bots earn XP too: it
+      // is what gives them a level, and a level is the first thing anybody
+      // looks at on a profile.
       for (const s of standings) {
         const runner = byUid.get(s.uid);
-        if (!runner?.userId) continue; // bots own no career
+        if (!runner?.botId) continue;
+        const won = isFirst(s) && firsts === 1;
+        const drew = isFirst(s) && firsts > 1;
+        await tx
+          .insert(botStats)
+          .values({
+            botId: runner.botId,
+            matches: 1,
+            wins: won ? 1 : 0,
+            losses: won || drew ? 0 : 1,
+            draws: drew ? 1 : 0,
+            bestPlacement: s.placement,
+            totalScore: s.score,
+            coins: Number(s.detail.coins ?? 0),
+            distanceMetres: Number(s.detail.distance ?? 0),
+            playtimeSeconds: seconds,
+            xp: xp[s.uid],
+          })
+          .onConflictDoUpdate({
+            target: botStats.botId,
+            set: {
+              matches: sql`${botStats.matches} + 1`,
+              wins: sql`${botStats.wins} + ${won ? 1 : 0}`,
+              losses: sql`${botStats.losses} + ${won || drew ? 0 : 1}`,
+              draws: sql`${botStats.draws} + ${drew ? 1 : 0}`,
+              bestPlacement: sql`LEAST(COALESCE(${botStats.bestPlacement}, ${s.placement}), ${s.placement})`,
+              totalScore: sql`${botStats.totalScore} + ${s.score}`,
+              coins: sql`${botStats.coins} + ${Number(s.detail.coins ?? 0)}`,
+              distanceMetres: sql`${botStats.distanceMetres} + ${Number(s.detail.distance ?? 0)}`,
+              playtimeSeconds: sql`${botStats.playtimeSeconds} + ${seconds}`,
+              xp: sql`${botStats.xp} + ${xp[s.uid]}`,
+              updatedAt: sql`now()`,
+            },
+          });
+      }
+
+      for (const s of standings) {
+        const runner = byUid.get(s.uid);
+        if (!runner?.userId) continue; // a person's career; bots did theirs above
         const won = isFirst(s) && firsts === 1;
         const drew = isFirst(s) && firsts > 1;
         // One upsert per player: insert the first time, accumulate after.

@@ -2,13 +2,17 @@ import { api } from "../api/http";
 import { emitAck, getSocket } from "../api/socket";
 import { setNameView } from "./nameview";
 import { actionToast, toast } from "./toast";
+import { WorldSection } from "./worldChat";
+import type { WorldChatMessage, WorldLfg } from "../shared/core/protocol";
 import type { ChatMessage, ChatThread, DmHistory, Friend, TeamHistory, User } from "../types";
 
-type Tab = "team" | "friends" | "recent";
+type Tab = "team" | "world" | "friends" | "recent";
 
 export interface ChatCallbacks {
   /** Show/clear the unread dot on the HUD chat button. */
   onUnread: (hasUnread: boolean) => void;
+  /** Open a player's card from a world-chat line. */
+  onOpenPlayer: (uid: string, name: string) => void;
 }
 
 interface DmEvent {
@@ -35,7 +39,13 @@ export class ChatPanel {
   private activeDm: { user: User; isFriend: boolean; blockedByMe: boolean } | null = null;
   private msgsEl: HTMLElement | null = null;
   private renderSeq = 0;
-  private unread: Record<Tab, boolean> = { team: false, friends: false, recent: false };
+  /** World deliberately has no unread dot. A public room says something every
+   *  few seconds; a marker that is always lit tells you nothing and trains
+   *  people to ignore the ones that mean something. */
+  private unread: Record<Tab, boolean> = { team: false, world: false, friends: false, recent: false };
+  /** Built once and re-mounted, so switching tabs does not re-fetch the room
+   *  and lose the backlog you were reading. */
+  private world: WorldSection;
   /** Senders whose conversation has messages I haven't opened yet — each of
    *  their rows shows a red dot until I open that thread. */
   private unreadFrom = new Set<string>();
@@ -50,6 +60,7 @@ export class ChatPanel {
     this.panel.innerHTML = `
       <div class="chat-tabs">
         <button data-tab="team" class="tab hidden">Team<span class="tab-dot hidden"></span></button>
+        <button data-tab="world" class="tab">World<span class="tab-dot hidden"></span></button>
         <button data-tab="friends" class="tab active">Friends<span class="tab-dot hidden"></span></button>
         <button data-tab="recent" class="tab">Recent<span class="tab-dot hidden"></span></button>
         <button class="tab tab-close" title="Close">✕</button>
@@ -59,6 +70,7 @@ export class ChatPanel {
     container.appendChild(this.panel);
     this.body = this.panel.querySelector(".chat-body")!;
     this.teamTabBtn = this.panel.querySelector<HTMLButtonElement>('[data-tab="team"]')!;
+    this.world = new WorldSection(me, { onOpenPlayer: cb.onOpenPlayer });
 
     this.panel.querySelectorAll<HTMLButtonElement>(".tab[data-tab]").forEach((btn) => {
       btn.onclick = () => this.switchTab(btn.dataset.tab as Tab);
@@ -74,6 +86,9 @@ export class ChatPanel {
       this.switchTab(this.inTeam ? "team" : this.tab);
       this.attachKeyboardWatch();
     } else {
+      // Closing the panel gives the world's traffic up as well — a chat window
+      // nobody can see must not keep a thousand-person room on the wire.
+      this.world.unmount();
       this.detachKeyboardWatch();
     }
   }
@@ -197,9 +212,30 @@ export class ChatPanel {
     const seq = ++this.renderSeq;
     this.activeDm = null;
     this.msgsEl = null;
+    // Leaving World releases its broadcast room; entering it asks for one.
+    if (this.tab !== "world") this.world.unmount();
     if (this.tab === "team") void this.renderTeam(seq);
+    else if (this.tab === "world") this.world.mount(this.body);
     else if (this.tab === "friends") void this.renderFriends(seq);
     else void this.renderRecent(seq);
+  }
+
+  // ---- world chat (routed in from main.ts) ----
+
+  onWorldMessage(msg: WorldChatMessage) {
+    if (this.open && this.tab === "world") this.world.onMessage(msg);
+  }
+
+  onWorldRequest(req: WorldLfg) {
+    if (this.open && this.tab === "world") this.world.onRequest(req);
+  }
+
+  onWorldRequestGone(id: string) {
+    if (this.open && this.tab === "world") this.world.onRequestGone(id);
+  }
+
+  onWorldPopulation(online: number, capacity: number) {
+    if (this.open && this.tab === "world") this.world.onPopulation(online, capacity);
   }
 
   private async renderFriends(seq: number) {

@@ -1,6 +1,6 @@
-import { and, arrayContains, arrayOverlaps, desc, eq, gt, inArray, lt, not, notInArray, or, sql } from "drizzle-orm";
+import { and, arrayContains, arrayOverlaps, desc, eq, gt, inArray, isNull, lt, not, notInArray, or, sql } from "drizzle-orm";
 import { db } from "../db/client.js";
-import { blocks, dmClears, dmMessages, teamMessages, users } from "../db/schema.js";
+import { blocks, dmClears, dmMessages, teamMessages, users, worldMessages } from "../db/schema.js";
 import { subjectsWithOpenCases } from "./reports.js";
 
 export const RETENTION_DAYS = 15;
@@ -208,8 +208,24 @@ export function startChatRetention(): void {
             not(arrayOverlaps(teamMessages.visibleTo, keep))
           )
         : lt(teamMessages.createdAt, cutoff);
+      // World chat lives on the same clock. A public room is where most of
+      // what gets reported is actually said, so exempting the subject of an
+      // open case matters here at least as much as it does for a DM — and a
+      // BOT's lines are swept unconditionally, because nobody opens a case
+      // against one and its half of the transcript is only worth keeping for
+      // as long as the human half is.
+      // isNull FIRST, and not as a tidy-up: `sender_id NOT IN (…)` is NULL for
+      // a bot's row rather than true, so without it every bot line in the
+      // platform would stop being swept the moment any case was open.
+      const safeWorld = keep.length
+        ? and(
+            lt(worldMessages.createdAt, cutoff),
+            or(isNull(worldMessages.senderId), notInArray(worldMessages.senderId, keep))
+          )
+        : lt(worldMessages.createdAt, cutoff);
       await db.delete(dmMessages).where(safeDm);
       await db.delete(teamMessages).where(safeTeam);
+      await db.delete(worldMessages).where(safeWorld);
     } catch (err) {
       console.error("Chat retention sweep failed:", err);
     }

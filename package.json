@@ -24,6 +24,7 @@
     "e2e:enforcement": "backend/node_modules/.bin/tsx tools/e2e/enforcement.mts",
     "e2e:admin": "backend/node_modules/.bin/tsx tools/e2e/admin-signin.mts",
     "e2e:party": "backend/node_modules/.bin/tsx tools/e2e/party-lifecycle.mts",
+    "e2e:world": "backend/node_modules/.bin/tsx tools/e2e/world-chat.mts",
     "e2e:console": "python3 tools/e2e/test_admin_console.py",
     "pack:build": "node tools/packs/build.mjs",
     "pack:upload": "node tools/packs/upload.mjs",

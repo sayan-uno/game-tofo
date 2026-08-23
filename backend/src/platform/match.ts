@@ -31,6 +31,7 @@ import type {
   ServerRunnerView,
 } from "./games.js";
 import { recordBotOutcome, type BotIdentity } from "./bots.js";
+import { releaseBots } from "./botAccounts.js";
 import { bindMatch, unbindMatch } from "./store.js";
 import { noteLobbyMatch } from "./partyLog.js";
 import { isPartyLobby } from "../redis.js";
@@ -113,6 +114,10 @@ export interface Runner {
   uid: string;
   /** null for bots (M3). */
   userId: string | null;
+  /** The bot account behind this seat, or null for a person (W1). The mirror
+   *  of userId: exactly one of the two is set, and which one is set is the
+   *  only place in the runtime that knows whether a runner is a person. */
+  botId: string | null;
   name: string;
   character: string;
   weapon: string | null;
@@ -209,6 +214,11 @@ export const isActive = (m: Match): boolean => m.phase !== "ended";
 export interface PartyInput {
   lobbyId: string;
   users: UserRow[];
+  /** Bot seats the PARTY already holds — teammates who joined it from a world
+   *  chat, or who filled it when nobody real turned up (W3). They are seated
+   *  under this party's lobby id, so quick chat, forfeits and the party log
+   *  treat them exactly as they treat the humans standing next to them. */
+  bots?: BotIdentity[];
 }
 
 function rosterEntry(r: Runner): RosterEntry {
@@ -254,7 +264,7 @@ export async function createMatch(
   // the first time it is asked.
   const ctx: MatchContext = {
     id,
-    players: parties.reduce((n, p) => n + p.users.length, 0) + bots.length,
+    players: parties.reduce((n, p) => n + p.users.length + (p.bots?.length ?? 0), 0) + bots.length,
   };
   const m: Match = {
     id,
@@ -277,6 +287,7 @@ export async function createMatch(
       m.runners.set(u.uid, {
         uid: u.uid,
         userId: u.id,
+        botId: null,
         name: displayName(u),
         character: resolveCharacter(u.equippedCharacter),
         weapon: resolveWeapon(u.equippedWeapon),
@@ -301,7 +312,16 @@ export async function createMatch(
   }
   // Bots take the remaining seats. From here on they are runners like any
   // other: same roster shape, same input stream, same rows in the results.
-  for (const bot of bots) {
+  //
+  // Two kinds arrive here and they differ in ONE field: a bot that came in
+  // with a party carries that party's lobby id, because it is standing in that
+  // group and everything party-scoped (the log, a forfeit, who is left) has to
+  // agree; a bot matchmaking added belongs to no party and carries "".
+  const seated: { bot: BotIdentity; lobbyId: string }[] = [
+    ...parties.flatMap((p) => (p.bots ?? []).map((bot) => ({ bot, lobbyId: p.lobbyId }))),
+    ...bots.map((bot) => ({ bot, lobbyId: "" })),
+  ];
+  for (const { bot, lobbyId: botParty } of seated) {
     const seat2 = seat++;
     let plan: MatchInput[] = [];
     try {
@@ -314,10 +334,11 @@ export async function createMatch(
     m.runners.set(bot.uid, {
       uid: bot.uid,
       userId: null,
+      botId: bot.botId,
       name: bot.name,
       character: bot.character,
       weapon: bot.weapon,
-      partyLobbyId: "",
+      partyLobbyId: botParty,
       isBot: true,
       skill: bot.skill,
       seat: seat2,
@@ -649,6 +670,7 @@ export async function end(io: Server, m: Match, reason: MatchEndReason): Promise
     runners: [...m.runners.values()].map((r) => ({
       uid: r.uid,
       userId: r.userId,
+      botId: r.botId,
       isBot: r.isBot,
       inputs: r.inputs.length,
       rejects: r.rejects,
@@ -681,6 +703,11 @@ export async function end(io: Server, m: Match, reason: MatchEndReason): Promise
   void archive(m, reason, endTick, standings, recorded.xp).catch((err) =>
     console.error(`[match ${m.id}] could not queue the replay:`, err)
   );
+
+  // Give the filler bots back to the pool. Only the ones matchmaking added:
+  // a bot that walked in WITH a party is that party's teammate and stays held
+  // until it leaves the group, exactly as a person would.
+  releaseBots([...m.runners.values()].filter((r) => r.isBot && !r.partyLobbyId).map((r) => r.botId!).filter(Boolean));
 
   // Release everyone: bindings, sockets, voice.
   const userIds = humans(m).map((r) => r.userId!);

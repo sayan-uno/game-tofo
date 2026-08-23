@@ -202,3 +202,96 @@ export const EV = {
 /** How often a client may report download progress. The server ignores
  *  anything faster; the client throttles itself to the same rate. */
 export const PROGRESS_MAX_HZ = 4;
+
+/** ---------------------------------------------------------------------------
+ *  World chat (W2)
+ *
+ *  A world is a public room of up to a thousand people, and the one place on
+ *  the platform where a player meets somebody they have never met. Everything
+ *  here is deliberately thin: a line of text, a population number, and a card
+ *  saying "we need one more". Anything richer belongs in the party the card
+ *  leads to.
+ *
+ *  NOTHING IN THESE SHAPES CAN SEPARATE A BOT FROM A PERSON. That is not a
+ *  courtesy — it is the property the whole feature rests on, and it has to
+ *  hold at the type level or the first client to log a payload breaks it.
+ * ------------------------------------------------------------------------- */
+
+/** One line in a world. */
+export interface WorldChatMessage {
+  id: string;
+  uid: string;
+  name: string;
+  body: string;
+  /** Server clock, milliseconds. */
+  at: number;
+}
+
+/** A group advertised in the world: "we need one more".
+ *
+ *  Deliberately carries NO "this one is mine" flag. A card is broadcast to the
+ *  whole room in one serialisation, so a per-viewer field on it would be
+ *  whatever the sender happened to be — which is exactly the bug it looks
+ *  like. The client already knows its own uid and compares. */
+export interface WorldLfg {
+  id: string;
+  uid: string;
+  name: string;
+  mode: "duo" | "squad";
+  /** Seats still open. */
+  need: number;
+  gameId: string | null;
+  at: number;
+}
+
+/** Everything the World tab needs on open. */
+export interface WorldHello {
+  worldId: string;
+  /** Everybody in the room, players and server population alike. */
+  online: number;
+  capacity: number;
+  messages: WorldChatMessage[];
+  requests: WorldLfg[];
+  /** uids this player has blocked.
+   *
+   *  Sent to the CLIENT and filtered there, which is the opposite of how a DM
+   *  block works and is deliberate. A world broadcast is one serialisation to
+   *  a thousand sockets; filtering it per recipient would turn every line into
+   *  a thousand block-list lookups, and a public room is not worth that. The
+   *  block still does what a block is for — you never see them — and the
+   *  private surfaces where it matters more (DMs, invites) are still enforced
+   *  on the server. */
+  blocked: string[];
+  /** How long an unanswered post waits before the group is filled. Shared so
+   *  the client can count it down honestly instead of guessing. */
+  fillMs: number;
+}
+
+/** Population, pushed on a slow timer rather than computed by the client from
+ *  arrivals it may have missed. */
+export interface WorldPopulation {
+  worldId: string;
+  online: number;
+  capacity: number;
+}
+
+/** How long a world post waits for a real player before the empty seats are
+ *  filled. The same ten seconds matchmaking waits, and for the same reason. */
+export const WORLD_FILL_MS = 10_000;
+
+/** Public rooms reward brevity, and a wall of text from one person is what
+ *  spam looks like here. Enforced on both sides. */
+export const WORLD_MESSAGE_MAX = 200;
+
+export const WORLD_EV = {
+  hello: "world:hello", // client→server (ack: WorldHello)
+  leave: "world:leave", // client→server — the tab was closed
+  say: "world:say", // client→server {body}
+  msg: "world:msg", // server→room  WorldChatMessage
+  seek: "world:seek", // client→server {mode} — advertise my group
+  unseek: "world:unseek", // client→server — take my card down
+  request: "world:request", // server→room  WorldLfg
+  requestGone: "world:requestGone", // server→room {id}
+  accept: "world:accept", // client→server {id} (ack {ok, lobbyId})
+  population: "world:population", // server→room  WorldPopulation
+} as const;

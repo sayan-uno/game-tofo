@@ -61,6 +61,17 @@ export class LobbyGameController {
     this.isLeader = state.members.find((m) => m.uid === this.deps.localUid)?.isLeader === true;
     this.leaderName = state.members.find((m) => m.isLeader)?.name ?? "the leader";
     const game = state.game ?? null;
+    // The pick FIRST, because switching games throws away everybody's progress
+    // — it is a different pack, and nobody has any of it yet.
+    //
+    // The snapshot then goes on top. Order matters and used to be the other
+    // way round, which was invisible for as long as every member was a person:
+    // the server clears its progress record on a pick too, so what was thrown
+    // away was empty. It stopped being empty when a teammate could be one who
+    // reports 100 % in every broadcast and never sends another update — their
+    // progress was wiped by the pick and nothing ever re-sent it, so the party
+    // sat on "Downloading… 1/4 ready" with a full pack and no way to start.
+    if (game !== this.selected) this.switchGame(game);
     // Server-side snapshot of everyone's progress. Ours is authoritative here
     // (we know exactly how far we are), theirs comes from the server.
     const seen = new Set<string>();
@@ -71,7 +82,6 @@ export class LobbyGameController {
     for (const uid of [...this.pcts.keys()]) {
       if (!state.members.some((m) => m.uid === uid)) this.pcts.delete(uid);
     }
-    if (game !== this.selected) this.switchGame(game);
     // A member who joined after we hit 100 % has no idea we're done — the
     // server's snapshot has us, but only if the report landed; re-send cheaply.
     if (game && this.myPct === 100 && !seen.has(this.deps.localUid)) this.sendProgress(100, true);

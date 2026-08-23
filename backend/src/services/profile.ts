@@ -2,6 +2,7 @@ import { getSocketId } from "../redis.js";
 import { countAcceptedFriends } from "./friends.js";
 import { getPlayerStats } from "./matchResults.js";
 import { toPublicUser, type UserRow } from "./users.js";
+import { getBotStats, isBotBusy, type BotAccount } from "../platform/botAccounts.js";
 
 /** ---------------------------------------------------------------------------
  *  Player profile: the career card behind the top-left chip.
@@ -166,7 +167,7 @@ export interface Achievement {
   progress?: { have: number; need: number };
 }
 
-function achievementsFor(user: UserRow, friends: number, stats: CareerStats): Achievement[] {
+function achievementsFor(hasUsername: boolean, friends: number, stats: CareerStats): Achievement[] {
   const goal = (have: number, need: number) => ({
     unlocked: have >= need,
     progress: { have: Math.min(have, need), need },
@@ -184,7 +185,7 @@ function achievementsFor(user: UserRow, friends: number, stats: CareerStats): Ac
       name: "Identity",
       desc: "Claimed a one-of-a-kind gamer tag",
       icon: "userCheck",
-      unlocked: user.username !== null,
+      unlocked: hasUsername,
     },
     { id: "wingman", name: "Wingman", desc: "Add your first friend", icon: "userPlus", ...goal(friends, 1) },
     { id: "squad", name: "Squad Goals", desc: "Grow your friend list to 5", icon: "users", ...goal(friends, 5) },
@@ -250,10 +251,61 @@ export async function buildProfile(user: UserRow, viewerId: string) {
     totalXp: xp.totalXp,
     rank: rankFor(stats),
     stats,
-    achievements: achievementsFor(user, friends, stats),
+    achievements: achievementsFor(user.username !== null, friends, stats),
     friends,
     memberSince: user.createdAt.toISOString(),
     // Account detail, not a public stat — nobody else gets to see it.
     lastLoginAt: isSelf ? user.lastLoginAt.toISOString() : null,
+  };
+}
+
+/** The same card, for a member of the server population (W1).
+ *
+ *  Every number on it is REAL: it is the sum of matches that bot actually
+ *  played, written by recordMatch in the same transaction and by the same
+ *  rules as a player's. Nothing here is invented to pad the page out —
+ *  including the friend count, which is zero and stays zero, because a bot has
+ *  no friendships and a fabricated one would be the first number on this
+ *  platform that was not true.
+ *
+ *  It exists because a party member you can tap and a party member you cannot
+ *  are visibly different things, and the difference is exactly the tell the
+ *  whole design is built to avoid.
+ */
+export async function buildBotProfile(bot: BotAccount) {
+  const row = await getBotStats(bot.id);
+  const stats: CareerStats = !row || row.matches === 0
+    ? NO_MATCHES_YET
+    : {
+        matches: row.matches,
+        wins: row.wins,
+        losses: row.losses,
+        winRate: Math.round((row.wins / row.matches) * 100),
+        kills: 0,
+        deaths: 0,
+        kd: null,
+        distanceMetres: Number(row.distanceMetres),
+        coins: Number(row.coins),
+        totalScore: Number(row.totalScore),
+        playtimeMinutes: Math.round(row.playtimeSeconds / 60),
+        bestPlacement: row.bestPlacement,
+      };
+  const xp = progression(row ? Number(row.xp) : 0);
+  return {
+    user: { id: bot.id, uid: bot.uid, name: bot.name, avatarUrl: null },
+    isSelf: false,
+    // "Online" here means what it means for anybody: they are somewhere on the
+    // platform right now — in a world, in a party, or in a match.
+    online: isBotBusy(bot.id),
+    level: xp.level,
+    xpInLevel: xp.xpInLevel,
+    xpForLevel: xp.xpForLevel,
+    totalXp: xp.totalXp,
+    rank: rankFor(stats),
+    stats,
+    achievements: achievementsFor(true, 0, stats),
+    friends: 0,
+    memberSince: bot.createdAt.toISOString(),
+    lastLoginAt: null,
   };
 }

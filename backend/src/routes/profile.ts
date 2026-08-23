@@ -2,7 +2,8 @@ import { Router } from "express";
 import { logEvent } from "../services/eventLog.js";
 import { requestOrigin } from "../services/clientIp.js";
 import { requireAuth } from "../middleware/auth.js";
-import { buildProfile } from "../services/profile.js";
+import { buildBotProfile, buildProfile } from "../services/profile.js";
+import { getBotByUid } from "../platform/botAccounts.js";
 import { getUserById, getUserByUid } from "../services/users.js";
 
 export const profileRouter = Router();
@@ -42,8 +43,19 @@ profileRouter.get("/:uid", async (req, res) => {
       });
     }
   try {
-    const target = await getUserByUid(req.params.uid.trim());
+    const wanted = req.params.uid.trim();
+    const target = await getUserByUid(wanted);
     if (!target) {
+      // Not a player. It may still be somebody standing in a world chat or in
+      // this party — a member of the server population, whose card is built
+      // from its own real match history (W1). Checked here rather than in
+      // getUserByUid so nothing that authenticates, friends or messages an
+      // account can ever resolve one by accident.
+      const bot = getBotByUid(wanted);
+      if (bot) {
+        res.json(await buildBotProfile(bot));
+        return;
+      }
       res.status(404).json({ error: "No player found with that UID" });
       return;
     }

@@ -50,6 +50,7 @@ lobby, means mint again.
 | `test_clock.py` | The match length is the server's to change: run it with `EXPECT_MATCH_SECONDS` matching the backend's `TRACKLINE_MATCH_SECONDS`. |
 | `admin-signin.mts` | The console's sign-in over HTTP: enrolment, the authenticator, recovery codes, sudo, refresh rotation and reuse detection, and that a player's token is refused. `npm run e2e:admin`. |
 | `test_admin_console.py` | The console in a real browser: the sign-in screen, an httpOnly cookie resuming a session across origins, the overview painting real numbers, and signing out actually ending it. `npm run e2e:console`. |
+| `world-chat.mts` | A world exists and talks; a team-up card puts a group together within ten seconds whether or not anybody real answers; a bot's card is one a person can walk into; a real player takes a seat from a bot when the thousand is full; and the teammates who come out of it own the careers they earn, read back out of `bot_stats` after a real match. No browser — `PORT=4100 npm run e2e:world`, with `TRACKLINE_MATCH_SECONDS=30` on the backend to keep the last leg short. Pass `E2E_REDIS_URL` when the backend is on its own Redis database. |
 | `enforcement.mts` | A banned player is refused at the API *and* at the socket handshake, lifting the ban lets them back in at once, an ordinary session leaves the trail the admin console reads, two accounts on one device are linked, and nobody is left marked online afterwards. No browser — run it with `npm run e2e:enforcement`. |
 
 ## Two facts that shape every test here

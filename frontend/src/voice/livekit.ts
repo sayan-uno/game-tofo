@@ -101,13 +101,18 @@ export async function joinVoice(
 
   let token: string, url: string;
   try {
-    const data = await api.post<{ token: string; url: string; room: string }>("/api/voice/token", { scope });
-    if (data.room !== roomName) {
-      // The server disagrees about where we belong (a match ended a moment
-      // ago, say) — don't join somewhere we didn't ask for; the next lobby or
-      // match event re-issues the right join.
-      return;
-    }
+    const data = await api.post<{ token?: string; url?: string; room: string | null }>("/api/voice/token", {
+      scope,
+    });
+    // No room, or not the room we asked for. Two different situations, one
+    // correct answer — say nothing and wait.
+    //
+    // `room: null` means the server sees nobody to talk to (a party or match
+    // whose only other members have no microphone), and a red toast there
+    // would be a complaint about something working as intended. A DIFFERENT
+    // room means the server has moved on — a match that ended a moment ago —
+    // and the next lobby or match event re-issues the right join.
+    if (!data.token || !data.url || data.room !== roomName) return;
     token = data.token;
     url = data.url;
   } catch (err) {
@@ -167,6 +172,32 @@ export async function joinVoice(
     // got noisy. Failures below still surface.
   } catch (err) {
     onStatus(err instanceof Error ? err.message : "Could not connect voice", true);
+  }
+}
+
+/** Ask again whether this room is still worth being in, and act on the answer.
+ *
+ *  Called when a party's membership changes. Already connected and the server
+ *  still offers the room → nothing happens, which is the common case and costs
+ *  one small request. Already connected and the server now offers NO room —
+ *  the last other person left, and whoever is still standing there has no
+ *  microphone — → we leave, rather than holding an open connection to silence
+ *  for the rest of the evening.
+ *
+ *  Not connected → `join` runs, which asks the same question again. One extra
+ *  request on the path where somebody is joining anyway; worth it to keep this
+ *  decision in one place rather than duplicating the "is there a room" rule in
+ *  the caller, where it would need to know things the client is not told. */
+export async function revalidateVoice(roomName: string, join: () => Promise<void>): Promise<void> {
+  if (currentRoomName !== roomName || !room) {
+    await join();
+    return;
+  }
+  try {
+    const data = await api.post<{ room: string | null }>("/api/voice/token", { scope: "party" });
+    if (data.room !== roomName) await leaveVoice();
+  } catch {
+    // A failed check is not a reason to hang up on a conversation.
   }
 }
 
