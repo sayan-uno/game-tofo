@@ -954,7 +954,7 @@ export function registerSockets(io: Server) {
         const id = String(emoteId || "");
         // The client's sheet is a menu, not a guarantee — a modified client
         // can ask for "fall", or for an emote it hasn't bought.
-        if (!canPerform(id)) return ack?.({ error: "You can't perform that" });
+        if (!(await canPerform(userId, id))) return ack?.({ error: "You can't perform that" });
         // Held per connection, in memory: emote spam costs every squadmate a
         // clip download and a re-pose, so the SERVER owns the floor on it
         // rather than trusting the sheet to stay closed.

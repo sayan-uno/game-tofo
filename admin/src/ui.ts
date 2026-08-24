@@ -88,6 +88,7 @@ const ICONS: Record<string, string> = {
   gem: '<path d="M6 3h12l4 6-10 12L2 9Z"/><path d="M2 9h20"/><path d="m12 21-4-12 2-6"/><path d="m12 21 4-12-2-6"/>',
   receipt: '<path d="M5 3v18l2.5-2 2.5 2 2-2 2 2 2.5-2L19 21V3Z"/><path d="M9 8h6"/><path d="M9 12h6"/>',
   wallet: '<path d="M3 7a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M16 12h4"/>',
+  tag: '<path d="M3 3h8l10 10-8 8L3 11Z"/><circle cx="7.5" cy="7.5" r="1.4"/>',
 };
 export const icon = (name: keyof typeof ICONS | string): string =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] ?? ""}</svg>`;

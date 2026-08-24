@@ -8,6 +8,9 @@
 // button in the console and is gated like one — sudo, admin-or-owner, and an
 // audit row naming who did it.
 import { randomBytes } from "node:crypto";
+import { eq, sql as drizzleSql } from "drizzle-orm";
+import { db } from "../../db/client.js";
+import { gemPacks } from "../../db/schema.js";
 import { safeRouter } from "../asyncRouter.js";
 import { requireAdmin, requireSudo } from "../guard.js";
 import { audit } from "../audit.js";
@@ -26,9 +29,10 @@ import {
   liveSessions,
   looksLikeVpa,
   nearMisses,
-  PACKS,
   paymentTotals,
+  forgetPacks,
   getHookRow,
+  getPacks,
   getSettings,
   sessionsForUser,
   setSettings,
@@ -71,6 +75,7 @@ function paiseOf(v: unknown): number | null {
 
 paymentsRouter.get("/payments/settings", requireAdmin("admin"), async (req, res) => {
   const s = await getSettings(true);
+  const packs = await getPacks(true);
   // The key is a CREDENTIAL. It is shown only to somebody who has just proved
   // they are holding the phone, and reading it is audited like any other
   // exercise of power — because whoever has it can tell this platform a
@@ -80,7 +85,7 @@ paymentsRouter.get("/payments/settings", requireAdmin("admin"), async (req, res)
     payeeName: s.payeeName,
     hasKey: s.hookKey.length > 0,
     keyLength: s.hookKey.length,
-    packs: PACKS.map((p) => ({ id: p.id, gems: p.gems, pricePaise: p.pricePaise, tag: p.tag })),
+    packs,
     windowMs: WINDOW_MS,
     graceMs: GRACE_MS,
     ready: looksLikeVpa(s.upiId) && s.hookKey.length > 0,
@@ -145,6 +150,77 @@ paymentsRouter.post("/payments/settings", requireAdmin("admin"), requireSudo, as
     newKey: patch.hookKey ?? null,
     ready: looksLikeVpa(after.upiId) && after.hookKey.length > 0,
   });
+});
+
+/** Change what a pack costs, how many gems it gives, or whether it is on the
+ *  shelf at all.
+ *
+ *  Sudo and admin, like everything else here that touches money. Bounded on
+ *  both sides: a pack priced at nothing is a pack that gives gems away, and a
+ *  pack priced absurdly high is a fat-finger nobody notices until somebody
+ *  pays it.
+ *
+ *  Note what this does NOT do — it never touches a payment already in flight.
+ *  A session snapshots the gems and the price when it opens, so a player
+ *  halfway through paying keeps the deal they were quoted. */
+paymentsRouter.post("/payments/packs/:id", requireAdmin("admin"), requireSudo, async (req, res) => {
+  const id = String(req.params.id);
+  const before = (await getPacks(true)).find((p) => p.id === id);
+  if (!before) {
+    res.status(404).json({ error: "No such pack" });
+    return;
+  }
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const patch: Record<string, unknown> = {};
+
+  if (body.pricePaise !== undefined) {
+    const paise = paiseOf(body.pricePaise) ?? Math.trunc(Number(body.pricePaise));
+    if (!Number.isFinite(paise) || paise < 100 || paise > 100_000_000) {
+      res.status(400).json({ error: "A pack must cost between ₹1 and ₹10,00,000" });
+      return;
+    }
+    patch.pricePaise = paise;
+  }
+  if (body.gems !== undefined) {
+    const gems = Math.trunc(Number(body.gems));
+    if (!Number.isInteger(gems) || gems < 1 || gems > 10_000_000) {
+      res.status(400).json({ error: "A pack must give between 1 and 1,00,00,000 gems" });
+      return;
+    }
+    patch.gems = gems;
+  }
+  if (body.tag !== undefined) {
+    const tag = String(body.tag).trim().slice(0, 24);
+    if (tag && !/^[A-Za-z0-9 %+!-]{1,24}$/.test(tag)) {
+      res.status(400).json({ error: "A ribbon is letters, numbers and simple punctuation" });
+      return;
+    }
+    patch.tag = tag || null;
+  }
+  if (body.active !== undefined) patch.active = body.active === true;
+  if (body.sort !== undefined) patch.sort = Math.max(0, Math.min(99, Math.trunc(Number(body.sort)) || 0));
+
+  if (Object.keys(patch).length === 0) {
+    res.status(400).json({ error: "Nothing to change" });
+    return;
+  }
+
+  await db
+    .update(gemPacks)
+    .set({ ...patch, updatedBy: req.admin!.email, updatedAt: drizzleSql`now()` })
+    .where(eq(gemPacks.id, id));
+  forgetPacks();
+
+  await audit(req.admin!, {
+    action: "payments.pack",
+    targetType: "platform",
+    targetId: id,
+    before: { gems: before.gems, pricePaise: before.pricePaise, tag: before.tag, active: before.active },
+    after: patch,
+    ip: requestOrigin(req).ip,
+  });
+  logEvent({ type: "payments.settings", data: { by: req.admin!.email, pack: id, ...patch } });
+  res.json({ packs: await getPacks(true) });
 });
 
 // ---------------------------------------------------------------------------

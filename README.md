@@ -1287,6 +1287,72 @@ that **a debit is not a credit**, and that **a masked account number is not an
 amount** — `A/C XXXX9203 credited` must never be read as ₹92.03. A number is
 only believed when it carries a currency marker or a decimal part.
 
+### Prices are data, not code
+
+Both shelves are editable from the console, and both were constants before —
+which was the right call while there was one price and no way to change it, and
+the wrong one the moment a festival offer or a pack pulled for a week meant a
+redeploy.
+
+- **Payment management → the shelf** — what each gem pack gives, what it costs,
+  its ribbon, and whether it is on sale at all. A change affects the **next**
+  payment somebody opens: a session writes down its gems and its price when it
+  opens, so neither a re-price nor hiding a pack can strand money already in
+  the air, and a hidden pack still *resolves* for exactly that reason.
+- **Price management** — every character, weapon and emote, and what each one
+  costs. Free, so many **coins** (earned by playing), or so many **gems**
+  (bought with real money).
+
+That second screen lists the **catalog**, not the price table, and that is the
+whole design: **no row means free**, so a table of prices would show only what
+somebody has already thought about and silently omit everything they have not.
+"What have I not priced yet" is the question it exists to answer. Three states,
+deliberately three — *never priced*, *free* (an admin said so out loud), and
+*priced*. Two things refuse to be priced at all: the **starter character**,
+which every account must be able to wear, and the **movement clips**, which the
+game plays *for* a player and which no amount of paying would let them choose.
+
+### Claim it, then wear it
+
+Nothing is equipped straight from the shelf. Every item — free or paid — is
+**claimed** first, and only what a player has claimed can be worn, carried or
+performed. Claiming something free is one tap and costs nothing.
+
+That is not ceremony; it is what makes pricing safe. Owning a thing becomes **a
+row somebody asked for**, and a row does not care what the thing costs today —
+so an admin can price a free item and everyone who already claimed it keeps it,
+while only somebody claiming it *from now on* pays.
+
+The alternative — "free means everybody owns it" — has no memory, so the day an
+item stops being free it comes off everybody at once. An earlier build patched
+that by handing the item to whoever was *wearing* it at that moment, which
+still lost it for anybody who happened to have something else on that day.
+Claiming removes the need for the patch rather than improving it.
+
+`user_items` therefore holds every claim, and this is the lookup the catalog's
+three ownership seams (`canEquip`, `canEquipWeapon`, `canPerform`) had been
+promising in comments since the first character shipped — filling them in
+touched four call sites. Migration `0024` gives every existing account a
+`legacy` claim for whatever it currently has on, because switching the rule
+must not strip anybody.
+
+Claiming is one statement per risk, in one transaction: **claim the item first**
+(the primary key refuses a second tap), **then take the money** with
+`where balance >= price` (a spend that matches no row is a spend that did not
+happen, and it rolls the claim back with it). Check-then-deduct-then-grant
+would be three chances to lose the same race.
+
+### Orders
+
+Every claim, newest first, with a from/to window that means the same thing it
+does on the payment screens — so gems *bought* on one can be lined up against
+gems *spent* on the other. Free claims are in the same list rather than a
+different table: "who has this" and "who paid for this" are one question with a
+filter on it, and knowing which free items people actually take is how you find
+out what is worth pricing. Beneath it, **what people take** — ordered by how
+often, because a free item near the top is one worth pricing and a priced one
+near the bottom is one priced too high.
+
 ### What the console does with it
 
 Three screens under **Money**, all with a from/to window that means the same
@@ -1307,11 +1373,15 @@ thing on each, so one can be lined up against the other.
   offers **"Who could this be?"**: sessions open near that amount and moment.
   A shortlist, never a verdict — deciding for somebody is how the wrong player
   gets the gems.
-- **Payment management** — the UPI id, the payee name, and the webhook key.
-  The key is **generated, never typed**, shown once when made and thereafter
-  only to somebody holding their authenticator, with the read itself audited.
-  Prices are not here: they live in the server's code, because a price somebody
-  can change from a browser is a price that can be changed to ₹1.
+- **Payment management** — the UPI id, the payee name, the webhook key, and the
+  gem shelf. The key is **generated, never typed**, shown once when made and
+  thereafter only to somebody holding their authenticator, with the read itself
+  audited; the screen prints the webhook URL beside it, because forwarding bank
+  messages to the console's host instead of the game's is the commonest way to
+  set this up wrongly and produces no error anywhere.
+- **Price management** — what every collection item costs, and how many players
+  have claimed each one.
+- **Orders** — who took what, what it cost them, and what sells.
 
 A **Wallet** block on every player's page answers the support call directly —
 balances, every payment they opened, and every movement with its reason.

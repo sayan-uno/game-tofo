@@ -32,7 +32,7 @@ import { randomUUID } from "node:crypto";
 import { and, desc, eq, gt, lt, or, sql } from "drizzle-orm";
 import QRCode from "qrcode";
 import { db } from "../db/client.js";
-import { paymentHookLog, paymentSessions, paymentSettings } from "../db/schema.js";
+import { gemPacks, paymentHookLog, paymentSessions, paymentSettings } from "../db/schema.js";
 import { redis } from "../redis.js";
 import { credit } from "./wallet.js";
 import { rupees } from "./money.js";
@@ -44,25 +44,77 @@ import { rupees } from "./money.js";
 export interface GemPack {
   id: string;
   gems: number;
-  /** 1 gem = ₹1, so this is gems × 100. Written out rather than computed so
-   *  that changing a price later is a change to a number, not to a rule. */
+  /** 1 gem = ₹1 by default, so this starts at gems × 100 — but it is a stored
+   *  number rather than a computed one precisely so an admin can discount it
+   *  without the rate becoming a lie. */
   pricePaise: number;
   /** The artwork in frontend/public/store/. */
   art: string;
   /** A ribbon on the tile; null for none. */
   tag: string | null;
+  /** Left to right on the shelf. */
+  sort: number;
+  /** Off the shelf, without being forgotten by sessions already paying. */
+  active: boolean;
 }
 
-export const PACKS: readonly GemPack[] = [
-  { id: "gems-100", gems: 100, pricePaise: 10_000, art: "pack-100", tag: null },
-  { id: "gems-300", gems: 300, pricePaise: 30_000, art: "pack-300", tag: null },
-  { id: "gems-500", gems: 500, pricePaise: 50_000, art: "pack-500", tag: "POPULAR" },
-  { id: "gems-1000", gems: 1000, pricePaise: 100_000, art: "pack-1000", tag: null },
-  { id: "gems-1500", gems: 1500, pricePaise: 150_000, art: "pack-1500", tag: null },
-  { id: "gems-2000", gems: 2000, pricePaise: 200_000, art: "pack-2000", tag: "BEST VALUE" },
+/** The shelf as it ships. Seeds `gem_packs` the first time this process starts
+ *  against an empty table, and is never read again — after that the database
+ *  is the shelf, because a festival price or a pack pulled for a week is an
+ *  operational decision and the console exists so those are not a redeploy. */
+export const DEFAULT_PACKS: readonly GemPack[] = [
+  { id: "gems-100", gems: 100, pricePaise: 10_000, art: "pack-100", tag: null, sort: 0, active: true },
+  { id: "gems-300", gems: 300, pricePaise: 30_000, art: "pack-300", tag: null, sort: 1, active: true },
+  { id: "gems-500", gems: 500, pricePaise: 50_000, art: "pack-500", tag: "POPULAR", sort: 2, active: true },
+  { id: "gems-1000", gems: 1000, pricePaise: 100_000, art: "pack-1000", tag: null, sort: 3, active: true },
+  { id: "gems-1500", gems: 1500, pricePaise: 150_000, art: "pack-1500", tag: null, sort: 4, active: true },
+  { id: "gems-2000", gems: 2000, pricePaise: 200_000, art: "pack-2000", tag: "BEST VALUE", sort: 5, active: true },
 ] as const;
 
-export const findPack = (id: string): GemPack | null => PACKS.find((p) => p.id === id) ?? null;
+/** Put the defaults in if there is nothing there. `do nothing` on conflict, so
+ *  a price an admin has changed is never quietly reset by a deploy. */
+export async function seedPacks(): Promise<void> {
+  await db.insert(gemPacks).values(DEFAULT_PACKS.map((p) => ({ ...p, updatedBy: "default" }))).onConflictDoNothing();
+}
+
+// Read on every store open and every Buy, both deliberate taps — but a few
+// seconds of cache keeps a burst of them off Postgres, and is short enough
+// that an admin changing a price sees it while still looking at the screen.
+let packCache: { at: number; packs: GemPack[] } | null = null;
+const PACK_CACHE_MS = 5_000;
+
+export function forgetPacks(): void {
+  packCache = null;
+}
+
+export async function getPacks(includeHidden = false): Promise<GemPack[]> {
+  if (!includeHidden && packCache && Date.now() - packCache.at < PACK_CACHE_MS) return packCache.packs;
+  const rows = await db.select().from(gemPacks).orderBy(gemPacks.sort, gemPacks.pricePaise);
+  const all: GemPack[] = rows.map((r) => ({
+    id: r.id,
+    gems: r.gems,
+    pricePaise: r.pricePaise,
+    art: r.art,
+    tag: r.tag,
+    sort: r.sort,
+    active: r.active,
+  }));
+  if (includeHidden) return all;
+  const shelf = all.filter((p) => p.active);
+  packCache = { at: Date.now(), packs: shelf };
+  return shelf;
+}
+
+/** A pack by id, INCLUDING a hidden one.
+ *
+ *  Hidden on purpose: a player who opened a QR a minute before an admin pulled
+ *  the pack is still paying for it, and their session already snapshotted the
+ *  gems and the price. Refusing to resolve the id here would strand money that
+ *  is already in the air. Hiding takes a pack off the shelf; it does not
+ *  cancel what is being paid for. */
+export async function findPack(id: string): Promise<GemPack | null> {
+  return (await getPacks(true)).find((p) => p.id === id) ?? null;
+}
 
 // ---------------------------------------------------------------------------
 // The clock
@@ -264,7 +316,7 @@ const MAX_OPEN_PER_PLAYER = 10;
  *     they expire on their own in two and a half minutes.
  */
 export async function openSession(input: OpenSessionInput): Promise<OpenResult> {
-  const pack = findPack(input.packId);
+  const pack = await findPack(input.packId);
   if (!pack) return { ok: false, code: "NO_PACK", error: "That pack is not for sale" };
 
   const settings = await getSettings();

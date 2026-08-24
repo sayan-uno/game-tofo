@@ -6,7 +6,16 @@ import { eq } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { users } from "../db/schema.js";
 import { requireAuth } from "../middleware/auth.js";
-import { canEquip, canEquipWeapon, publicCatalog, resolveCharacter, resolveWeapon } from "../services/catalog.js";
+import {
+  canEquip,
+  canEquipWeapon,
+  catalogFor,
+  publicCatalog,
+  resolveCharacter,
+  resolveWeapon,
+} from "../services/catalog.js";
+import { claimItem, priceBook, priceOf } from "../services/pricing.js";
+import { getBalance } from "../services/wallet.js";
 import { getUserById } from "../services/users.js";
 import { withdrawnItems } from "../platform/gameLocks.js";
 import { getUserLobby } from "../redis.js";
@@ -30,9 +39,12 @@ export function collectionRouter(io: Server) {
       // thing still resolves for anybody already wearing it, it is simply no
       // longer offered.
       const gone = new Set(await withdrawnItems());
-      const cat = publicCatalog();
+      // The player's OWN view: what each thing costs them and whether they
+      // already have it, resolved in two reads for the whole page.
+      const cat = await catalogFor(req.auth!.userId);
       res.json({
         ...cat,
+        balance: await getBalance(req.auth!.userId),
         characters: cat.characters.filter((c) => !gone.has(c.id)),
         weapons: cat.weapons.filter((w) => !gone.has(w.id)),
         emotes: cat.emotes.filter((e) => !gone.has(e.id)),
@@ -61,13 +73,13 @@ export function collectionRouter(io: Server) {
 
       const characterId = String(body.characterId ?? "");
       // Server decides what's equippable — the client only names a candidate.
-      if (wantsCharacter && !canEquip(characterId)) {
-        res.status(400).json({ error: "You don't own that character" });
+      if (wantsCharacter && !(await canEquip(req.auth!.userId, characterId))) {
+        res.status(400).json({ error: "Claim that character first" });
         return;
       }
       const weaponId = body.weaponId === null || body.weaponId === "" ? null : String(body.weaponId);
-      if (wantsWeapon && !canEquipWeapon(weaponId)) {
-        res.status(400).json({ error: "You don't own that weapon" });
+      if (wantsWeapon && !(await canEquipWeapon(req.auth!.userId, weaponId))) {
+        res.status(400).json({ error: "Claim that weapon first" });
         return;
       }
       // AND it must not be withdrawn. Leaving it out of the list is not a
@@ -120,6 +132,57 @@ export function collectionRouter(io: Server) {
     } catch (err) {
       console.error("Equip failed:", err);
       res.status(500).json({ error: "Could not equip that" });
+    }
+  });
+
+  /** CLAIM an item — the one door into owning anything.
+   *
+   *  Free or paid goes through here, and that is deliberate: what something
+   *  costs is a property of today, but having claimed it is a fact. Price a
+   *  free item afterwards and everyone who claimed it keeps it; only somebody
+   *  claiming it from now on pays.
+   *
+   *  The price comes from the SERVER. The client sends an id and is told what
+   *  it cost — a client that names its own price is a client that names zero. */
+  router.post("/claim", async (req, res) => {
+    try {
+      const itemId = String((req.body ?? {}).itemId ?? "");
+      const cat = publicCatalog();
+      const known = [...cat.characters, ...cat.weapons, ...cat.emotes].some((i) => i.id === itemId);
+      if (!known) {
+        res.status(404).json({ error: "No such item" });
+        return;
+      }
+      if ((await withdrawnItems()).includes(itemId)) {
+        res.status(400).json({ error: "That is not available any more" });
+        return;
+      }
+      const price = priceOf(await priceBook(), itemId);
+      const result = await claimItem(req.auth!.userId, itemId, price);
+      if (!result.ok) {
+        // 402 for "not enough" so the client can say WHICH currency is short
+        // rather than reporting a generic refusal over somebody's balance.
+        res.status(result.code === "POOR" ? 402 : 409).json({ error: result.error, code: result.code });
+        return;
+      }
+      logEvent({
+        type: "collection.claim",
+        userId: req.auth!.userId,
+        uid: req.auth!.uid,
+        ip: requestOrigin(req).ip,
+        data: { itemId, currency: result.currency, spent: result.spent },
+      });
+      res.json({
+        ok: true,
+        itemId,
+        free: result.free,
+        spent: result.spent,
+        currency: result.currency,
+        balance: result.balance,
+      });
+    } catch (err) {
+      console.error("Item claim failed:", err);
+      res.status(500).json({ error: "Could not claim that" });
     }
   });
 

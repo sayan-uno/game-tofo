@@ -4652,6 +4652,55 @@ body.in-match .chat-panel {
 .st-screen [hidden],
 .st-pay [hidden] { display: none; }
 
+/* ---- collection prices (P1) ----
+   A tag only on what somebody does not own yet. Pricing is the exception in
+   this catalog, not the rule, so a price on every card would train people to
+   stop reading them. */
+.cl-price {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px 3px 5px;
+  border-radius: 999px;
+  background: rgba(11, 5, 7, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  font-size: 11.5px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: #fff;
+  pointer-events: none;
+}
+.cl-price img { display: block; }
+.cl-price.gem { border-color: rgba(229, 24, 46, 0.55); }
+.cl-price.coin { border-color: rgba(226, 178, 74, 0.55); }
+/* Free is a STATE you act on, not the absence of a price — under a claim
+   system a blank card reads as something you already have. */
+.cl-price.free {
+  padding: 3px 8px;
+  border-color: rgba(255, 255, 255, 0.28);
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+}
+
+/* Locked, not hidden. Somebody has to be able to look at the thing they are
+   deciding whether to buy, so this dims the tile rather than covering it. */
+.cl-card.locked .cl-thumb,
+.cl-card.locked .cl-card-name { opacity: 0.62; }
+.cl-card.locked.sel .cl-thumb,
+.cl-card.locked.sel .cl-card-name { opacity: 1; }
+
+.cl-claim {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.cl-claim img { display: block; }
+
 /* =========================================================================
    THE STORE (P1)
    Same language as the locker: a red-on-black header with a slashed kicker,

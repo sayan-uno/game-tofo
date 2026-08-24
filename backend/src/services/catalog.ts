@@ -17,6 +17,8 @@ import { isWithdrawn } from "../platform/gameLocks.js";
  *  Cost: cold path. Built once at module load, served from memory, no I/O.
  * ------------------------------------------------------------------------- */
 
+import { ownedItems, priceBook } from "./pricing.js";
+
 export type ItemKind = "character" | "weapon" | "emote";
 
 /** What the clip actually is. Only `emote` clips are meant to be performed on
@@ -199,11 +201,28 @@ export function resolveWeapon(id: string | null | undefined): string | null {
   return id && WEAPONS.some((w) => w.id === id) ? id : null;
 }
 
-/** Can this player equip this character? Every starter is free today; once
- *  paid characters exist this is where the user_items lookup goes. */
-export function canEquip(id: string): boolean {
+/** THE OWNERSHIP SEAM, promised since the first character shipped and now
+ *  filled in. Three questions, one rule, one place.
+ *
+ *  An item is owned when it has been CLAIMED — free or paid, the row is the
+ *  same. Free does not mean owned; it means claimable for nothing. That is
+ *  what makes a later price change harmless: a claim is a row somebody asked
+ *  for, and a row does not care what the thing costs today.
+ *
+ *  Enforced server-side in all three cases because the client's list is only a
+ *  menu: a modified client can name any id it likes. */
+async function ownsCatalogItem(userId: string, id: string): Promise<boolean> {
+  // The starter is always owned. It has to be: a brand-new account is wearing
+  // it before it has claimed anything, and an account that cannot equip the
+  // character it is already wearing cannot play.
+  if (id === DEFAULT_CHARACTER) return true;
+  return (await ownedItems(userId)).has(id);
+}
+
+/** Can this player equip this character? */
+export async function canEquip(userId: string, id: string): Promise<boolean> {
   const item = CHARACTERS.find((c) => c.id === id);
-  return item !== undefined && item.free;
+  return item !== undefined && ownsCatalogItem(userId, id);
 }
 
 /** Can this player perform this clip on purpose?
@@ -215,20 +234,26 @@ export function canEquip(id: string): boolean {
  *
  *  Enforced server-side because the client's list is only a menu: a modified
  *  client can emit any id it likes. */
-export function canPerform(id: string): boolean {
+export async function canPerform(userId: string, id: string): Promise<boolean> {
   const clip = EMOTES.find((e) => e.id === id);
-  return clip !== undefined && clip.category === "emote" && clip.free;
+  if (clip === undefined || clip.category !== "emote") return false;
+  return ownsCatalogItem(userId, id);
 }
 
 /** Same question for a weapon. Null is always allowed — that's unequipping. */
-export function canEquipWeapon(id: string | null): boolean {
+export async function canEquipWeapon(userId: string, id: string | null): Promise<boolean> {
   if (id === null) return true;
   const item = WEAPONS.find((w) => w.id === id);
-  return item !== undefined && item.free;
+  return item !== undefined && ownsCatalogItem(userId, id);
 }
 
-/** The client-facing catalog: same items, with paths resolved to URLs and
- *  ownership flattened into a boolean the UI can render directly. */
+/** The catalog as everything else reads it: same items, paths resolved to
+ *  URLs, and `owned` meaning "free to everybody".
+ *
+ *  Deliberately still player-agnostic and still synchronous. The console reads
+ *  it to list what exists, replays read it to dress a scene, and neither of
+ *  those has a player to ask about. What ONE player owns is a different
+ *  question, answered by `catalogFor` below. */
 export function publicCatalog() {
   return {
     characters: CHARACTERS.map(({ key, free, ...rest }) => ({ ...rest, url: assetUrl(key), owned: free })),
@@ -237,4 +262,68 @@ export function publicCatalog() {
     defaultCharacter: DEFAULT_CHARACTER,
     lobbyIdleClip: LOBBY_IDLE_CLIP,
   };
+}
+
+/** The catalog as ONE player sees it: what each thing costs them, and whether
+ *  they already have it. Two reads for the whole page — the price book (cached
+ *  for seconds) and this player's acquisitions — rather than one per item. */
+export async function catalogFor(userId: string) {
+  const [book, owned] = await Promise.all([priceBook(), ownedItems(userId)]);
+  const cat = publicCatalog();
+  const dress = <T extends { id: string; owned: boolean }>(item: T) => {
+    const price = book.get(item.id);
+    return {
+      ...item,
+      // CLAIMED, not free. The starter is the one exception — see
+      // ownsCatalogItem.
+      owned: item.id === DEFAULT_CHARACTER || owned.has(item.id),
+      /** What claiming it costs. null means nothing. */
+      price: price ? { currency: price.currency, amount: price.amount } : null,
+    };
+  };
+  return {
+    ...cat,
+    characters: cat.characters.map(dress),
+    weapons: cat.weapons.map(dress),
+    emotes: cat.emotes.map(dress),
+  };
+}
+
+/** Every id in the catalog, with what kind of thing it is — what the console's
+ *  pricing screen lists. */
+export function catalogIndex(): {
+  id: string;
+  kind: ItemKind;
+  name: string;
+  rarity?: string;
+  /** False for things nobody can own: the starter character, which every
+   *  account must be able to wear, and the movement clips, which the game
+   *  plays FOR a player and which no amount of paying would let them choose. */
+  priceable: boolean;
+  why?: string;
+}[] {
+  return [
+    ...CHARACTERS.map((c) => ({
+      id: c.id,
+      kind: "character" as const,
+      name: c.name,
+      rarity: c.rarity,
+      priceable: c.id !== DEFAULT_CHARACTER,
+      why: c.id === DEFAULT_CHARACTER ? "the starter — every account has to be able to wear it" : undefined,
+    })),
+    ...WEAPONS.map((w) => ({
+      id: w.id,
+      kind: "weapon" as const,
+      name: w.name,
+      rarity: w.rarity,
+      priceable: true,
+    })),
+    ...EMOTES.map((e) => ({
+      id: e.id,
+      kind: "emote" as const,
+      name: e.name,
+      priceable: e.category === "emote",
+      why: e.category === "emote" ? undefined : "movement the game plays for you, not something to perform",
+    })),
+  ];
 }

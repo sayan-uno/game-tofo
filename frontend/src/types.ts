@@ -39,6 +39,13 @@ export interface LobbyMember extends User {
  *  rarity; absent means "ember". */
 export type AuraKind = "ember" | "crystal";
 
+/** What a collection item costs, when it costs anything. `null` on an item
+ *  means free — which is what everything is until an admin prices it. */
+export interface ItemPrice {
+  currency: "coin" | "gem";
+  amount: number;
+}
+
 export interface CatalogCharacter {
   id: string;
   kind: "character";
@@ -48,6 +55,8 @@ export interface CatalogCharacter {
   aura?: AuraKind;
   url: string | null;
   owned: boolean;
+  /** null = free. */
+  price?: ItemPrice | null;
 }
 
 /** A held prop. How it is held is baked into the model (pivot at the grip,
@@ -62,6 +71,8 @@ export interface CatalogWeapon {
   stance?: string;
   url: string | null;
   owned: boolean;
+  /** null = free. */
+  price?: ItemPrice | null;
 }
 
 export interface CatalogEmote {
@@ -77,6 +88,8 @@ export interface CatalogEmote {
   rootMotion: boolean;
   url: string | null;
   owned: boolean;
+  /** null = free. */
+  price?: ItemPrice | null;
 }
 
 export interface Catalog {
@@ -91,6 +104,9 @@ export interface CollectionData extends Catalog {
   equippedCharacter: string;
   /** null = empty-handed, the default. */
   equippedWeapon: string | null;
+  /** What the player can spend. Sent with the collection so a price and the
+   *  means to pay it are never one request apart. */
+  balance?: { coins: number; gems: number };
 }
 
 export interface ChatMessage {

@@ -16,6 +16,7 @@ import { config } from "../config.js";
 import { adminCors, cloudflareGate } from "./guard.js";
 import { cfAccessConfigured } from "./cfAccess.js";
 import { bootstrapFirstAdmin } from "./accounts.js";
+import { seedPacks } from "../services/payments.js";
 import { authRouter } from "./routes/auth.js";
 import { overviewRouter } from "./routes/overview.js";
 import { adminsRouter } from "./routes/admins.js";
@@ -31,6 +32,7 @@ import { voiceRouter } from "./routes/voice.js";
 import { reportsRouter } from "./routes/reports.js";
 import { analyticsRouter } from "./routes/analytics.js";
 import { paymentsRouter } from "./routes/payments.js";
+import { pricingRouter } from "./routes/pricing.js";
 
 /** JSON only, so the headers that matter are the ones that stop a browser
  *  guessing at content and stop anything being cached on the way. */
@@ -67,6 +69,7 @@ export function mountAdmin(app: Express): void {
   // Mounted at the root: it owns /payments/*, and /players/:uid/wallet, which
   // belongs on the player page rather than under a "payments" noun.
   router.use(paymentsRouter);
+  router.use(pricingRouter);
   router.use(historyRouter);
   router.use(chatsRouter);
   router.use(eventsRouter);
@@ -90,4 +93,8 @@ export function mountAdmin(app: Express): void {
 /** Called once at boot, before the server listens. */
 export async function prepareAdmin(): Promise<void> {
   await bootstrapFirstAdmin();
+  // The console must never open on an empty shelf: on a fresh database the
+  // admin process may well start before any game process has, and "there are
+  // no gem packs" reads as a bug rather than as a first boot.
+  await seedPacks();
 }

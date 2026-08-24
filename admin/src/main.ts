@@ -37,6 +37,8 @@ import { mountWorld, mountWorlds } from "./screens/worlds";
 import { mountPayments } from "./screens/payments";
 import { mountPaySessions } from "./screens/paySessions";
 import { mountPayLog } from "./screens/payLog";
+import { mountPricing } from "./screens/pricing";
+import { mountOrders } from "./screens/orders";
 
 const root = document.getElementById("root")!;
 let stopScreen: (() => void) | null = null;
@@ -52,7 +54,7 @@ interface Route {
   nav:
     | "overview" | "history" | "players" | "matches" | "parties" | "worlds" | "sanctions" | "voice"
     | "games" | "notices" | "events" | "platform" | "reports" | "analytics" | "signals"
-    | "payments" | "paysessions" | "paylog";
+    | "payments" | "paysessions" | "paylog" | "pricing" | "orders";
   title: string;
   crumb?: string;
   /** What the header box should be showing — a search you navigated to by URL
@@ -134,6 +136,12 @@ function parse(): Route {
   if (parts[0] === "games") {
     return { nav: "games", title: "Games", mount: (h) => mountGames(h, me?.role ?? "") };
   }
+  if (parts[0] === "orders") {
+    return { nav: "orders", title: "Orders", mount: (h) => mountOrders(h, go) };
+  }
+  if (parts[0] === "pricing") {
+    return { nav: "pricing", title: "Price management", mount: (h) => mountPricing(h, me?.role ?? "") };
+  }
   if (parts[0] === "payments") {
     return { nav: "payments", title: "Payment management", mount: (h) => mountPayments(h, me?.role ?? "") };
   }
@@ -175,6 +183,8 @@ function shell(who: SignedIn): void {
           <div class="heading">Money</div>
           <a href="#/paysessions" data-nav="paysessions">${icon("gem")} Payment sessions</a>
           <a href="#/paylog" data-nav="paylog">${icon("receipt")} Payment log</a>
+          <a href="#/orders" data-nav="orders">${icon("box")} Orders</a>
+          <a href="#/pricing" data-nav="pricing">${icon("tag")} Price management</a>
           <a href="#/payments" data-nav="payments">${icon("wallet")} Payment management</a>
         </nav>
         <div class="who">

@@ -59,11 +59,11 @@ const { rupees, rupeesPretty } = await import("../../backend/src/services/money.
 const { parseSms, toPaise } = await import("../../backend/src/services/smsParse.js");
 const { credit, getBalance, ledger } = await import("../../backend/src/services/wallet.js");
 const {
-  PACKS,
   approveByHand,
   buildUpiUri,
   cancelSession,
   expireDue,
+  findPack,
   getOwnSession,
   getSession,
   listHookLog,
@@ -75,6 +75,10 @@ const {
   paymentTotals,
   releaseAmount,
   reserveAmount,
+  seedPacks,
+  DEFAULT_PACKS,
+  forgetPacks,
+  getPacks,
   setSettings,
   settleFromSms,
   whoHolds,
@@ -82,6 +86,22 @@ const {
   WINDOW_MS,
 } = await import("../../backend/src/services/payments.js");
 const { coinsFor, recordMatch } = await import("../../backend/src/services/matchResults.js");
+const {
+  claimItem,
+  forgetPrices,
+  itemsOwnedBy,
+  listOrders,
+  listPrices,
+  orderTotals,
+  ownedItems,
+  ownerCounts,
+  priceBook,
+  setItemPrice,
+  topItems,
+} = await import("../../backend/src/services/pricing.js");
+const { canEquip, canEquipWeapon, canPerform, catalogFor, catalogIndex } = await import(
+  "../../backend/src/services/catalog.js"
+);
 const { randomUUID } = await import("node:crypto");
 
 let fails = 0;
@@ -102,6 +122,18 @@ const TAG = `paycheck-${process.pid}`;
  *  fails for ever. */
 const RUN = Math.random().toString(36).slice(2, 6);
 const made: string[] = []; // user ids to remove
+/** Item prices this run overwrote, and what was there before.
+ *
+ *  There is ONE weapon and ONE performable emote in the catalog, so a check
+ *  that prices "a weapon" is necessarily pricing the same row an admin has
+ *  priced for real. Deleting it afterwards therefore deletes THEIR pricing —
+ *  which is the singleton-settings trap wearing a different hat, and it did
+ *  exactly that before this map existed.
+ *
+ *  So: borrow and give back, like `payment_settings` and like `gem_packs`.
+ *  A value of null means there was no row, and cleanup removes the one this
+ *  run added. */
+const borrowedPrices = new Map<string, { kind: string; currency: string | null; price: number } | null>();
 const hooks: number[] = []; // webhook log rows this run wrote
 
 async function makePlayer(display: string): Promise<{ id: string; uid: string; username: string }> {
@@ -126,6 +158,11 @@ await pool.query("delete from users where google_id like 'paycheck-%'");
 // write its own alongside the real one. It has to borrow the row and give it
 // back. Getting this wrong deletes the UPI id the platform actually takes
 // money at, which is a considerably worse outcome than a failing test.
+// The shelf lives in the database now, so a check that never seeded it would
+// find nothing for sale and fail for a reason that has nothing to do with what
+// it is testing.
+await seedPacks();
+
 const { rows: settingsBefore } = await pool.query("select * from payment_settings where id = 1");
 const restoreSettings = settingsBefore[0] ?? null;
 
@@ -235,18 +272,31 @@ try {
     const alice = await makePlayer("Alice");
     const bob = await makePlayer("Bob");
 
+    // RELATIVE to what the pack actually costs. The shelf is editable now, so a
+    // check that assumes ₹100 fails the moment somebody runs a festival price —
+    // and, far worse, tempts the cleanup into "restoring" a number it invented.
+    const hundred = (await findPack("gems-100"))!;
     const first = await openSession({ ...alice, userId: alice.id, packId: "gems-100" });
     ok(first.ok, "Alice can open a payment");
     if (!first.ok) throw new Error("cannot continue");
-    ok(first.session.amountPaise === 10_000, "she is quoted the list price");
-    ok(first.session.gems === 100, "for the gems the pack says");
+    ok(first.session.amountPaise === hundred.pricePaise, `she is quoted the shelf price (₹${rupees(hundred.pricePaise)})`);
+    ok(first.session.gems === hundred.gems, "for the gems the pack says");
     ok(first.qrDataUrl.startsWith("data:image/png;base64,"), "and gets a QR image back, built by the server");
     ok(first.upiUri.includes("pa=tofocheck%40ybl"), "the QR pays the configured UPI id");
-    ok(first.upiUri.includes("am=100.00"), `and asks for exactly that amount (${first.upiUri.match(/am=[\d.]+/)?.[0]})`);
+    ok(
+      first.upiUri.includes(`am=${rupees(hundred.pricePaise)}`),
+      `and asks for exactly that amount (${first.upiUri.match(/am=[\d.]+/)?.[0]})`
+    );
 
     const second = await openSession({ ...bob, userId: bob.id, packId: "gems-100" });
-    ok(second.ok && second.session.amountPaise === 10_001, "Bob, buying the same pack, is quoted ₹100.01");
-    ok(second.ok && second.upiUri.includes("am=100.01"), "and HIS QR asks for the odd amount, not the list price");
+    ok(
+      second.ok && second.session.amountPaise === hundred.pricePaise + 1,
+      `Bob, buying the same pack, is quoted one paisa more (₹${rupees(hundred.pricePaise + 1)})`
+    );
+    ok(
+      second.ok && second.upiUri.includes(`am=${rupees(hundred.pricePaise + 1)}`),
+      "and HIS QR asks for the odd amount, not the list price"
+    );
 
     ok(
       (await openSession({ ...alice, userId: alice.id, packId: "nope" })).ok === false,
@@ -254,11 +304,9 @@ try {
     );
 
     // The price is the SERVER's. Nothing a client sends can change it.
-    const pack = PACKS.find((p) => p.id === "gems-2000")!;
-    ok(pack.pricePaise === pack.gems * 100, "every pack is priced at exactly 1 gem = ₹1");
     ok(
-      PACKS.every((p) => p.pricePaise === p.gems * 100),
-      "…and that holds for the whole shelf, so nobody has to check by hand"
+      DEFAULT_PACKS.every((p) => p.pricePaise === p.gems * 100),
+      "the shelf ships at exactly 1 gem = ₹1, so nobody has to check by hand"
     );
 
     const uri = buildUpiUri({ upiId: "a@b", payeeName: "TOFO", hookKey: "" }, 10_001, first.session.id);
@@ -529,6 +577,192 @@ try {
     await q("delete from matches where match_key = $1", [matchKey]);
   }
 
+  // ---- claiming ------------------------------------------------------------
+  console.log("\nclaiming — owning something is a row somebody asked for");
+  {
+    /** setItemPrice, snapshotting whatever was there the first time. */
+    const priceIt = async (id: string, kind: string, currency: "coin" | "gem" | null, amount: number) => {
+      if (!borrowedPrices.has(id)) {
+        const was = (await listPrices()).find((p) => p.itemId === id);
+        borrowedPrices.set(id, was ? { kind: was.kind, currency: was.currency, price: was.price } : null);
+      }
+      await setItemPrice(id, kind, currency, amount, "check@tofo");
+      forgetPrices();
+    };
+    const catalog = catalogIndex();
+    const starter = catalog.find((i) => !i.priceable && i.kind === "character")!;
+    const character = catalog.find((i) => i.kind === "character" && i.priceable)!;
+    const weapon = catalog.find((i) => i.kind === "weapon" && i.priceable)!;
+    const emote = catalog.find((i) => i.kind === "emote" && i.priceable)!;
+    const movement = catalog.find((i) => i.kind === "emote" && !i.priceable)!;
+    ok(catalog.length > 0, `the catalog has ${catalog.length} item(s)`);
+    ok(!!starter, `the starter (${starter?.id}) is deliberately not priceable`);
+    ok(!!movement, `and neither is movement (${movement?.id})`);
+
+    const rob = await makePlayer("Rob");
+
+    // A new account owns NOTHING but the starter — which it must, because it
+    // is already wearing it.
+    ok((await ownedItems(rob.id)).size === 0, "a new account has claimed nothing");
+    ok(await canEquip(rob.id, starter.id), "…but can wear the starter, which it is already in");
+    ok(!(await canEquip(rob.id, character.id)), "and cannot wear a character it has not claimed");
+    ok(!(await canEquipWeapon(rob.id, weapon.id)), "nor carry a weapon it has not claimed");
+    ok(!(await canPerform(rob.id, emote.id)), "nor perform an emote it has not claimed");
+    ok(await canEquipWeapon(rob.id, null), "empty-handed is always allowed");
+
+    // FREE IS CLAIMABLE, NOT OWNED. One tap, no money.
+    let cat = await catalogFor(rob.id);
+    const free = cat.characters.find((c) => c.id === character.id)!;
+    ok(free.price === null, "nothing is priced yet, so it is free to claim");
+    ok(free.owned === false, "…which is not the same as already owning it");
+
+    const claimed = await claimItem(rob.id, character.id, null);
+    ok(claimed.ok && claimed.free && claimed.spent === 0, "claiming a free item costs nothing");
+    ok(await canEquip(rob.id, character.id), "and now he can wear it");
+    ok((await ledger(rob.id)).length === 0, "with no ledger line, because no money moved");
+
+    const twice = await claimItem(rob.id, character.id, null);
+    ok(!twice.ok && twice.code === "OWNED", "claiming the same thing twice is refused");
+
+    // …and it stays his when the price goes up afterwards. THIS is the whole
+    // reason claiming exists.
+    await priceIt(character.id, "character", "gem", 500);
+    ok(await canEquip(rob.id, character.id), "pricing it afterwards does NOT take it off him");
+    cat = await catalogFor(rob.id);
+    ok(cat.characters.find((c) => c.id === character.id)!.owned, "his collection still says it is his");
+
+    // Somebody who never claimed it now has to pay.
+    const sara = await makePlayer("Sara");
+    ok(!(await canEquip(sara.id, character.id)), "somebody who never claimed it cannot wear it");
+    const broke = await claimItem(sara.id, character.id, { currency: "gem", amount: 500 });
+    ok(!broke.ok && broke.code === "POOR", `and cannot claim it with nothing (${!broke.ok ? broke.code : "claimed"})`);
+    ok((await ownedItems(sara.id)).size === 0, "nothing was granted on a failed claim");
+
+    await credit({ userId: sara.id, currency: "gem", delta: 600, reason: "admin.grant", ref: "check" });
+    const bought = await claimItem(sara.id, character.id, { currency: "gem", amount: 500 });
+    ok(bought.ok, "with gems she can");
+    ok(bought.ok && bought.balance.gems === 100, `and the gems are gone (${bought.ok ? bought.balance.gems : "?"} left)`);
+    ok(await canEquip(sara.id, character.id), "…and now she can wear it too");
+    const lines = await ledger(sara.id);
+    ok(lines[0].reason === "item" && lines[0].delta === -500, "the spend wrote its own ledger line");
+    ok(lines[0].ref === character.id, "naming what it bought");
+
+    // WEAPONS and EMOTES go through exactly the same door. Both were reported
+    // as unbuyable — the emote tab had no button at all.
+    await priceIt(weapon.id, "weapon", "coin", 300);
+    await priceIt(emote.id, "emote", "gem", 50);
+    await credit({ userId: sara.id, currency: "coin", delta: 400, reason: "admin.grant", ref: "check" });
+    const gotWeapon = await claimItem(sara.id, weapon.id, { currency: "coin", amount: 300 });
+    ok(gotWeapon.ok, "a WEAPON can be claimed for coins");
+    ok(await canEquipWeapon(sara.id, weapon.id), "…and then carried");
+    const gotEmote = await claimItem(sara.id, emote.id, { currency: "gem", amount: 50 });
+    ok(gotEmote.ok, "an EMOTE can be claimed for gems");
+    ok(await canPerform(sara.id, emote.id), "…and then performed");
+    ok((await getBalance(sara.id)).coins === 100 && (await getBalance(sara.id)).gems === 50, "both balances moved");
+
+    // Movement is never performable however much anybody pays.
+    await claimItem(sara.id, movement.id, null);
+    ok(!(await canPerform(sara.id, movement.id)), "movement stays unperformable even when claimed");
+
+    // Ten taps at once. The primary key is the referee.
+    const spam = await makePlayer("Sam");
+    await credit({ userId: spam.id, currency: "coin", delta: 10_000, reason: "admin.grant", ref: "check" });
+    const results = await Promise.all(
+      Array.from({ length: 10 }, () => claimItem(spam.id, weapon.id, { currency: "coin", amount: 300 }))
+    );
+    ok(results.filter((r) => r.ok).length === 1, `ten simultaneous taps claim it once (${results.filter((r) => r.ok).length})`);
+    ok((await getBalance(spam.id)).coins === 9_700, `and take payment once (${(await getBalance(spam.id)).coins})`);
+    ok((await itemsOwnedBy(spam.id)).length === 1, "leaving exactly one row");
+
+    // Back to free — and the people who paid keep it, obviously.
+    await priceIt(character.id, "character", null, 0);
+    ok(await canEquip(sara.id, character.id), "setting it back to free leaves the people who paid alone");
+    const newcomer = await makePlayer("Tess");
+    ok(!(await canEquip(newcomer.id, character.id)), "…and a newcomer still has to claim it");
+    ok((await claimItem(newcomer.id, character.id, null)).ok, "which now costs nothing again");
+
+    ok((await listPrices()).length >= 2, "the console can list what has been priced");
+    ok((await ownerCounts([character.id])).get(character.id)! >= 2, "and count who owns each one");
+  }
+
+  // ---- orders --------------------------------------------------------------
+  console.log("\norders — who took what, and what it cost them");
+  {
+    const from = new Date(Date.now() - 3600_000);
+    const to = new Date(Date.now() + 60_000);
+    const { orders } = await listOrders({ from, to, limit: 200 });
+    ok(orders.length >= 5, `every claim this run made is listed (${orders.length})`);
+    ok(
+      orders.every((o, i) => i === 0 || o.at <= orders[i - 1].at),
+      "newest first, so the screen opens on what just happened"
+    );
+    ok(
+      orders.some((o) => o.currency === "gem") && orders.some((o) => o.currency === null),
+      "free claims and paid ones are in the same list"
+    );
+
+    const paidOnly = await listOrders({ from, to, currency: "gem", limit: 200 });
+    ok(paidOnly.orders.every((o) => o.currency === "gem"), "filtering by currency really filters");
+    const freeOnly = await listOrders({ from, to, currency: "free", limit: 200 });
+    ok(freeOnly.orders.every((o) => o.currency === null), "…and 'free' means no currency, not zero");
+
+    const narrow = await listOrders({ from: new Date(Date.now() + 30_000), to, limit: 200 });
+    ok(narrow.orders.length === 0, "a window with nothing in it returns nothing rather than everything");
+
+    const totals = await orderTotals(from, to);
+    ok(totals.claims >= 5, `the strip counts the claims (${totals.claims})`);
+    ok(totals.gems >= 550, `and the gems that changed hands (${totals.gems})`);
+    ok(totals.coins >= 300, `and the coins (${totals.coins})`);
+    ok(totals.paid < totals.claims, "with the free ones counted apart from the paid ones");
+    ok(totals.players >= 3, `across ${totals.players} player(s)`);
+
+    const top = await topItems(from, to);
+    ok(top.length > 0 && top[0].claims >= top[top.length - 1].claims, "and what sells is ordered by how often");
+  }
+
+  // ---- packs ---------------------------------------------------------------
+  console.log("\npacks — the shelf is data now, not code");
+  {
+    await seedPacks();
+    const shelf = await getPacks(true);
+    ok(shelf.length >= DEFAULT_PACKS.length, `the defaults are in the database (${shelf.length})`);
+    ok(
+      DEFAULT_PACKS.every((d) => shelf.some((p) => p.id === d.id && p.gems === d.gems)),
+      "matching what ships in the code"
+    );
+
+    // BORROW the row and give it back. The shelf is somebody's real pricing
+    // now, and a cleanup that writes back a number this file invented is the
+    // singleton-settings trap again in a different table — it silently undid a
+    // festival price the first time it ran.
+    const before = shelf.find((p) => p.id === "gems-100")!;
+
+    // Seeding again must never undo an edit — that is what a deploy would do.
+    await q("update gem_packs set price_paise = 4242 where id = 'gems-100'");
+    forgetPacks();
+    await seedPacks();
+    forgetPacks();
+    const after = (await getPacks(true)).find((p) => p.id === "gems-100")!;
+    ok(after.pricePaise === 4242, "and seeding again leaves an edited price alone");
+
+    // A hidden pack is off the shelf but still resolvable, so a payment
+    // already in the air can still settle.
+    await q("update gem_packs set active = false where id = 'gems-100'");
+    forgetPacks();
+    ok(!(await getPacks()).some((p) => p.id === "gems-100"), "hiding a pack takes it off the shelf");
+    ok((await findPack("gems-100")) !== null, "…but it still resolves, so money in the air still lands");
+
+    await q("update gem_packs set gems = $1, price_paise = $2, tag = $3, active = $4 where id = 'gems-100'", [
+      before.gems,
+      before.pricePaise,
+      before.tag,
+      before.active,
+    ]);
+    forgetPacks();
+    const restored = (await getPacks(true)).find((p) => p.id === "gems-100")!;
+    ok(restored.pricePaise === before.pricePaise, "and the shelf is left exactly as it was found");
+  }
+
   // ---- console -------------------------------------------------------------
   console.log("\nconsole — what an admin can see");
   {
@@ -578,6 +812,24 @@ try {
     // payment log must never lose.
     for (const id of made) await q("delete from users where id = $1", [id]);
     for (const id of hooks) await q("delete from payment_hook_log where id = $1", [id]);
+    // Every price this run borrowed, given back exactly as it was found.
+    //
+    // `user_items` needs nothing: claiming only ever writes a row for the
+    // player doing it, and every player this run made is deleted above and
+    // cascades. Sweeping it by ITEM would reach real accounts.
+    for (const [itemId, was] of borrowedPrices) {
+      if (was) {
+        await q(
+          `insert into item_prices (item_id, kind, currency, price, updated_by)
+           values ($1, $2, $3, $4, 'restored-by-check')
+           on conflict (item_id) do update set kind = $2, currency = $3, price = $4`,
+          [itemId, was.kind, was.currency, was.price]
+        );
+      } else {
+        await q("delete from item_prices where item_id = $1", [itemId]);
+      }
+    }
+    forgetPrices();
     // The borrowed singleton, back exactly as it was — or gone, if there was
     // nothing there to begin with.
     if (restoreSettings) {

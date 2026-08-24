@@ -33,6 +33,7 @@ import { gateReason, gateShut, getFlags, setGate, startMaintenanceWatch } from "
 import { refreshWithdrawn, startWithdrawnWatch } from "./platform/gameLocks.js";
 import { flushEvents, startEventLog, stopEventLog } from "./services/eventLog.js";
 import { startPaymentSweeper, stopPaymentSweeper } from "./platform/paymentSweeper.js";
+import { seedPacks } from "./services/payments.js";
 import { warmSanctionCache } from "./services/sanctions.js";
 import { startOpsSnapshot, stopOpsSnapshot } from "./platform/ops.js";
 import { startOpsCommands, stopOpsCommands } from "./platform/opsCommands.js";
@@ -203,6 +204,9 @@ async function start() {
     // only — the Redis reservation carries its own TTL and has already let go,
     // so a sweeper that never runs cannot strand an amount.
     startPaymentSweeper();
+    // The shelf, if nothing has put one there yet. `do nothing` on conflict,
+    // so a price an admin has changed is never reset by a deploy.
+    await seedPacks();
 
     // ---- worlds and the population that fills them (W1–W3) ----
     //

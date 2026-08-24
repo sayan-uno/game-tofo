@@ -153,16 +153,26 @@ try {
   const alice = await makeUser("Alice");
   const bob = await makeUser("Bob");
 
+  /** The gems-100 pack AS THE SHELF HAS IT — its price is an admin's decision,
+   *  not a constant this file may assume. */
+  let listed: { id: string; gems: number; pricePaise: number } | undefined;
+
   // ---- the shelf -----------------------------------------------------------
   console.log("\nthe shelf");
   {
     const shelf = await call("/api/store", alice.token);
     ok(shelf.status === 200, "the store answers a signed-in player");
     ok(shelf.body.packs?.length === 6, `six packs are for sale (${shelf.body.packs?.length})`);
+    // NOT "1 gem = ₹1". That is the shipped default, and this shelf is
+    // editable — asserting it here fails the moment somebody runs a real
+    // discount, which is the feature working. `check:payments` asserts the
+    // rate against DEFAULT_PACKS, where it is actually a rule.
     ok(
-      shelf.body.packs?.every((p: any) => p.pricePaise === p.gems * 100),
-      "every one priced at 1 gem = ₹1"
+      shelf.body.packs?.every((p: any) => p.pricePaise > 0 && p.gems > 0),
+      "every one has a price and gives gems"
     );
+    listed = shelf.body.packs?.find((p: any) => p.id === "gems-100");
+    ok(!!listed, "the ₹100 pack is on the shelf");
     ok(shelf.body.balance?.gems === 0, "a new player holds nothing");
     ok(shelf.body.live === undefined, "and the shelf carries no session list — a QR lives in its window only");
 
@@ -182,19 +192,31 @@ try {
     // the same pack — and a test that assumes ₹100.00 fails for the one
     // reason the design exists to cause.
     ok(
-      session?.amountPaise >= 10_000 && session?.amountPaise <= 10_000 + 99,
-      `she is quoted the ₹100 pack's price or a few paise above it (₹${rupees(session?.amountPaise)})`
+      session?.amountPaise >= listed!.pricePaise && session?.amountPaise <= listed!.pricePaise + 99,
+      `she is quoted the shelf price or a few paise above it (₹${rupees(session?.amountPaise)} of ₹${rupees(
+        listed!.pricePaise
+      )})`
     );
     ok(String(bought.body.qrDataUrl ?? "").startsWith("data:image/png"), "and the server built the QR");
     ok(String(bought.body.upiUri ?? "").includes("pa=tofoe2e%40ybl"), "which pays the configured id");
 
-    // Pressing Buy again is a NEW payment, a paisa higher, with a fresh clock —
-    // never the old one with whatever was left of its timer.
+    // Pressing Buy again is a NEW payment at its own amount, with a fresh
+    // clock — never the old one with whatever was left of its timer.
+    //
+    // UNIQUENESS, not adjacency. Which paise each session lands on depends on
+    // what else is live on this server — a run 150 seconds ago still holds
+    // amounts — and "no two live sessions share one" is the property the
+    // design actually promises. check:payments proves the +1 walk against a
+    // flushed Redis, where adjacency is a fact rather than a coincidence.
     const encore = await call("/api/store/buy", alice.token, { packId: "gems-100" });
     ok(encore.body.session?.id !== session.id, "pressing Buy again opens a new payment, not the old one");
     ok(
-      encore.body.session?.amountPaise === session.amountPaise + 1,
-      `at one paisa more (₹${rupees(encore.body.session?.amountPaise)})`
+      encore.body.session?.amountPaise !== session.amountPaise,
+      `at its own amount (₹${rupees(session.amountPaise)} → ₹${rupees(encore.body.session?.amountPaise)})`
+    );
+    ok(
+      new Date(encore.body.session?.expiresAt).getTime() - Date.now() > 110_000,
+      "with a fresh two minutes, not the first one's remainder"
     );
     // …and the FIRST amount is still held, so a code screenshotted before is
     // still payable. That is the whole point of not releasing on close.
@@ -202,11 +224,14 @@ try {
     ok(firstStillLive.body.session?.status === "pending", "and the first one is still live, not cancelled");
 
     const second = await call("/api/store/buy", bob.token, { packId: "gems-100" });
+    const amounts = [session.amountPaise, encore.body.session?.amountPaise, second.body.session?.amountPaise];
     ok(
-      second.body.session?.amountPaise === session.amountPaise + 2,
-      `Bob, buying the same pack, gets the next amount after both of Alice's (₹${rupees(
-        second.body.session?.amountPaise
-      )})`
+      new Set(amounts).size === 3,
+      `Bob gets an amount neither of Alice's has (${amounts.map((a) => `₹${rupees(a)}`).join(", ")})`
+    );
+    ok(
+      amounts.every((a) => a >= listed!.pricePaise && a <= listed!.pricePaise + 99),
+      "and all three sit within the pack's own range of amounts"
     );
 
     const peek = await call(`/api/store/session/${session.id}`, bob.token);

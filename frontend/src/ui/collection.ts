@@ -206,6 +206,9 @@ export async function openCollection(opts: OpenCollectionOptions): Promise<void>
    *  field simply isn't in the response. */
   let selectedWeapon: string | null = data.equippedWeapon ?? null;
   let previewCharacter = "";
+  /** The emote tab needs a selection too, now that it has a footer — claiming
+   *  is about one clip, not about whichever one last played. */
+  let selectedEmote: string | null = null;
 
   async function showCharacter(id: string) {
     status.textContent = "Loading…";
@@ -217,12 +220,82 @@ export async function openCollection(opts: OpenCollectionOptions): Promise<void>
     if (!ok) status.textContent = "Model unavailable";
   }
 
+  /** The tag on a card nobody has claimed yet.
+   *
+   *  Free things say FREE rather than showing nothing, because under a claim
+   *  system "free" is a state you act on — one tap — and a blank card looks
+   *  like something you already have. */
+  const priceTag = (item: { owned: boolean; price?: { currency: string; amount: number } | null }): string => {
+    if (item.owned) return "";
+    if (!item.price) return `<span class="cl-price free">FREE</span>`;
+    const coin = item.price.currency === "coin";
+    return `<span class="cl-price ${coin ? "coin" : "gem"}">
+      <img src="/store/${coin ? "coin" : "gem"}.webp" alt="" width="14" height="14" />
+      ${item.price.amount.toLocaleString("en-IN")}
+    </span>`;
+  };
+
+  /** Can they afford the thing they are looking at? */
+  const affords = (price: { currency: string; amount: number }): boolean => {
+    const wallet = data.balance ?? { coins: 0, gems: 0 };
+    return (price.currency === "coin" ? wallet.coins : wallet.gems) >= price.amount;
+  };
+
+  /** Whatever the open tab has selected — the one thing the footer is about. */
+  const selected = ():
+    | (CatalogCharacter | CatalogWeapon | CatalogEmote)
+    | undefined => {
+    if (tab === "characters") return data.characters.find((c) => c.id === selectedCharacter);
+    if (tab === "weapons") {
+      return selectedWeapon === null ? undefined : (data.weapons ?? []).find((w) => w.id === selectedWeapon);
+    }
+    return data.emotes.find((e) => e.id === selectedEmote);
+  };
+
   function renderFoot() {
-    if (tab === "emotes") {
-      foot.innerHTML = `<p class="cl-hint">Tap any clip to see it on your character.</p>`;
+    const item = selected();
+
+    // NOT CLAIMED YET is the first question, before equipping is even a
+    // thought. Free or paid, it is the same button in the same place — the
+    // price is what changes, not the shape of the page.
+    if (item && !item.owned) {
+      const price = item.price ?? null;
+      const enough = price === null || affords(price);
+      const coin = price?.currency === "coin";
+      foot.innerHTML = `
+        <button class="btn btn-primary cl-claim" ${enough ? "" : "disabled"}>
+          ${price ? `<img src="/store/${coin ? "coin" : "gem"}.webp" alt="" width="18" height="18" />` : ""}
+          ${
+            price === null
+              ? "Claim — free"
+              : enough
+                ? `Claim for ${price.amount.toLocaleString("en-IN")}`
+                : `Need ${price.amount.toLocaleString("en-IN")}`
+          }
+        </button>
+        ${
+          enough
+            ? ""
+            : `<p class="cl-hint">${
+                coin ? "Coins are earned by playing." : "Tap the gem chip in the lobby to get more."
+              }</p>`
+        }`;
+      const claimBtn = foot.querySelector<HTMLButtonElement>(".cl-claim")!;
+      claimBtn.onclick = () => void claim(claimBtn, item.id);
       return;
     }
-    const worn = tab === "characters" ? selectedCharacter === data.equippedCharacter : selectedWeapon === data.equippedWeapon;
+
+    // Claimed. An emote has nothing to equip — performing it is the lobby's
+    // job — so it says so rather than offering a button that does nothing.
+    if (tab === "emotes") {
+      foot.innerHTML = `<p class="cl-hint">${
+        item ? "Yours — use it from the lobby by tapping your own character." : "Tap any clip to see it on your character."
+      }</p>`;
+      return;
+    }
+
+    const worn =
+      tab === "characters" ? selectedCharacter === data.equippedCharacter : selectedWeapon === data.equippedWeapon;
     const label = worn
       ? `${icon("check", "cl-equip-ic")} Equipped`
       : tab === "weapons" && selectedWeapon === null
@@ -231,6 +304,47 @@ export async function openCollection(opts: OpenCollectionOptions): Promise<void>
     foot.innerHTML = `<button class="btn btn-primary cl-equip" ${worn ? "disabled" : ""}>${label}</button>`;
     const btn = foot.querySelector<HTMLButtonElement>(".cl-equip")!;
     btn.onclick = () => void equip(btn);
+  }
+
+  /** Claim an item — the one door into owning anything, free or paid.
+   *
+   *  The server decides what it costs; this only names the thing. On success
+   *  the item is marked owned locally and the footer turns into an Equip, so
+   *  claiming and wearing is two taps in the same place. */
+  async function claim(btn: HTMLButtonElement, itemId: string) {
+    btn.disabled = true;
+    try {
+      const res = await api.post<{
+        free: boolean;
+        spent: number;
+        currency: string | null;
+        balance: { coins: number; gems: number };
+      }>("/api/collection/claim", { itemId });
+      data.balance = res.balance;
+      const mark = (list: { id: string; owned: boolean }[] | undefined) => {
+        const hit = list?.find((i) => i.id === itemId);
+        if (hit) hit.owned = true;
+      };
+      mark(data.characters);
+      mark(data.weapons);
+      mark(data.emotes);
+      if (cached) {
+        cached.balance = res.balance;
+        for (const list of [cached.characters, cached.weapons, cached.emotes]) {
+          const hit = (list as { id: string; owned: boolean }[] | undefined)?.find((i) => i.id === itemId);
+          if (hit) hit.owned = true;
+        }
+      }
+      // The lobby chips read the store module's balance, so tell it — spending
+      // changes the same number a purchase changes.
+      void import("./store").then((m) => m.setBalance({ ...res.balance, spentPaise: 0 })).catch(() => undefined);
+      renderGrid();
+      renderFoot();
+      toast(res.free ? "Claimed — it's yours" : "Unlocked — put it on");
+    } catch (err) {
+      btn.disabled = false;
+      toast(err instanceof Error ? err.message : "Couldn't claim that", true);
+    }
   }
 
   /** Equips whichever slot the open tab owns. The response carries BOTH slots,
@@ -267,10 +381,11 @@ export async function openCollection(opts: OpenCollectionOptions): Promise<void>
         .map((c: CatalogCharacter) => {
           const on = c.id === selectedCharacter;
           const worn = c.id === data.equippedCharacter;
-          return `<button class="cl-card ${on ? "sel" : ""}" role="listitem" data-id="${esc(c.id)}">
+          return `<button class="cl-card ${on ? "sel" : ""} ${c.owned ? "" : "locked"}" role="listitem" data-id="${esc(c.id)}">
               ${placeholderTile(c.id, c.name, "character")}
               <span class="cl-card-name">${esc(c.name)}</span>
               <span class="cl-card-meta">${esc(c.rarity)}</span>
+              ${priceTag(c)}
               ${worn ? `<span class="cl-badge">${icon("check")}</span>` : ""}
             </button>`;
         })
@@ -301,10 +416,11 @@ export async function openCollection(opts: OpenCollectionOptions): Promise<void>
           .map((w: CatalogWeapon) => {
             const on = w.id === selectedWeapon;
             const worn = w.id === data.equippedWeapon;
-            return `<button class="cl-card ${on ? "sel" : ""}" role="listitem" data-id="${esc(w.id)}">
+            return `<button class="cl-card ${on ? "sel" : ""} ${w.owned ? "" : "locked"}" role="listitem" data-id="${esc(w.id)}">
               ${placeholderTile(w.id, w.name, "weapon")}
               <span class="cl-card-name">${esc(w.name)}</span>
               <span class="cl-card-meta">${esc(w.rarity)}</span>
+              ${priceTag(w)}
               ${worn ? `<span class="cl-badge">${icon("check")}</span>` : ""}
             </button>`;
           })
@@ -323,10 +439,13 @@ export async function openCollection(opts: OpenCollectionOptions): Promise<void>
       grid.className = "cl-grid cl-grid-emote";
       grid.innerHTML = data.emotes
         .map(
-          (e: CatalogEmote) => `<button class="cl-card cl-card-emote" role="listitem" data-id="${esc(e.id)}">
+          (e: CatalogEmote) => `<button class="cl-card cl-card-emote ${e.owned ? "" : "locked"} ${
+            e.id === selectedEmote ? "sel" : ""
+          }" role="listitem" data-id="${esc(e.id)}">
               ${placeholderTile(e.id, e.name, "emote")}
               <span class="cl-card-name">${esc(e.name)}</span>
               <span class="cl-card-meta">${CATEGORY_LABEL[e.category]} · ${e.duration.toFixed(1)}s</span>
+              ${priceTag(e)}
               <span class="cl-play">${icon("play")}</span>
             </button>`
         )
@@ -334,7 +453,9 @@ export async function openCollection(opts: OpenCollectionOptions): Promise<void>
       grid.querySelectorAll<HTMLButtonElement>(".cl-card").forEach((card) => {
         card.onclick = () => {
           const id = card.dataset.id!;
+          selectedEmote = id;
           grid.querySelectorAll(".cl-card").forEach((c) => c.classList.toggle("sel", c === card));
+          renderFoot();
           void preview.playClip(id).then((ok) => {
             if (!ok && screen) toast("That clip couldn't be loaded", true);
           });

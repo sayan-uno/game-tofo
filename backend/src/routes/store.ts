@@ -14,7 +14,7 @@ import { requireAuth } from "../middleware/auth.js";
 import { getUserById } from "../services/users.js";
 import { logEvent } from "../services/eventLog.js";
 import { getBalance, ledger } from "../services/wallet.js";
-import { cancelSession, getOwnSession, openSession, PACKS, WINDOW_MS, GRACE_MS } from "../services/payments.js";
+import { cancelSession, getOwnSession, getPacks, openSession, WINDOW_MS, GRACE_MS } from "../services/payments.js";
 
 export function storeRouter(_io: Server) {
   const router = Router();
@@ -25,10 +25,10 @@ export function storeRouter(_io: Server) {
    *  to render half of it. */
   router.get("/", async (req, res) => {
     try {
-      const balance = await getBalance(req.auth!.userId);
+      const [balance, packs] = await Promise.all([getBalance(req.auth!.userId), getPacks()]);
       res.json({
         balance,
-        packs: PACKS.map((p) => ({ id: p.id, gems: p.gems, pricePaise: p.pricePaise, art: p.art, tag: p.tag })),
+        packs: packs.map((p) => ({ id: p.id, gems: p.gems, pricePaise: p.pricePaise, art: p.art, tag: p.tag })),
         windowMs: WINDOW_MS,
         graceMs: GRACE_MS,
       });

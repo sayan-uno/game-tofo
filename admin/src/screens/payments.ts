@@ -12,7 +12,17 @@
 import { ApiFailure, call } from "../api";
 import { ask } from "../modal";
 import { withSudo } from "../sudo";
-import { esc, rupees, toast } from "../ui";
+import { esc, pill, rupees, toast } from "../ui";
+
+interface Pack {
+  id: string;
+  gems: number;
+  pricePaise: number;
+  art: string;
+  tag: string | null;
+  sort: number;
+  active: boolean;
+}
 
 interface Settings {
   upiId: string;
@@ -22,7 +32,7 @@ interface Settings {
   ready: boolean;
   windowMs: number;
   graceMs: number;
-  packs: { id: string; gems: number; pricePaise: number; tag: string | null }[];
+  packs: Pack[];
 }
 
 /** The one place in the console that shows a secret. Deliberately awkward to
@@ -143,25 +153,120 @@ export function mountPayments(host: HTMLElement, role: string): () => void {
       </div>
 
       <div class="card">
-        <header><h2>The shelf</h2><span class="spacer"></span><span class="count">${s.packs.length}</span></header>
+        <header><h2>The shelf</h2><span class="spacer"></span>
+          <span class="count">${s.packs.filter((p) => p.active).length} of ${s.packs.length} on sale</span></header>
         <div class="wrap"><table class="tbl">
-          <thead><tr><th>Pack</th><th>Gems</th><th class="num">Price</th><th></th></tr></thead>
+          <thead><tr>
+            <th>Pack</th><th class="num">Gems</th><th class="num">Price</th>
+            <th class="num">Per gem</th><th>Ribbon</th><th>On the shelf</th><th></th>
+          </tr></thead>
           <tbody>${s.packs
             .map(
-              (p) => `<tr>
+              (p) => `<tr class="${p.active ? "" : "forfeit"}">
                 <td class="mono">${esc(p.id)}</td>
-                <td>${p.gems.toLocaleString()}</td>
-                <td class="num">₹${rupees(p.pricePaise)}</td>
-                <td>${p.tag ? `<span class="pill warn">${esc(p.tag)}</span>` : ""}</td>
+                <td class="num">${p.gems.toLocaleString()}</td>
+                <td class="num"><strong>₹${rupees(p.pricePaise)}</strong></td>
+                <td class="num muted" title="What one gem works out at — the base rate is ₹1.00">
+                  ₹${rupees(Math.round(p.pricePaise / Math.max(1, p.gems)))}
+                </td>
+                <td>${p.tag ? `<span class="pill warn">${esc(p.tag)}</span>` : `<span class="muted">—</span>`}</td>
+                <td>${p.active ? pill("on sale", "on") : pill("hidden", "off")}</td>
+                <td>
+                  <button class="btn ghost btn-tiny" data-pack="${esc(p.id)}">Edit</button>
+                  <button class="btn ghost btn-tiny" data-toggle="${esc(p.id)}" data-on="${p.active ? "0" : "1"}">${
+                    p.active ? "Hide" : "Show"
+                  }</button>
+                </td>
               </tr>`
             )
             .join("")}</tbody>
         </table></div>
         <div class="pad muted" style="font-size:12.5px">
-          Prices live in the server's code (<code>services/payments.ts</code>), not in this database —
-          a price somebody can change from a browser is a price that can be changed to ₹1.
+          A change here affects the NEXT payment somebody opens. Anyone already looking at a QR keeps
+          the deal they were quoted — a session writes down its gems and its price when it opens, so
+          neither a price change nor hiding a pack can strand money already in the air.
         </div>
       </div>`;
+
+    host.querySelectorAll<HTMLButtonElement>("[data-pack]").forEach((btn) => {
+      btn.onclick = async () => {
+        const pack = s.packs.find((p) => p.id === btn.dataset.pack)!;
+        const answer = await ask({
+          title: `Edit ${pack.id}`,
+          intro:
+            "What this pack gives and what it costs. The base rate is 1 gem = ₹1 — price it under that " +
+            "and you are running a discount, over it and you are not.",
+          confirm: "Save it",
+          fields: [
+            { name: "gems", label: "Gems it gives", value: String(pack.gems) },
+            {
+              name: "price",
+              label: "Price in rupees",
+              value: rupees(pack.pricePaise),
+              note: "Paise are allowed — 99.50 is a real price.",
+            },
+            {
+              name: "tag",
+              label: "Ribbon on the tile",
+              value: pack.tag ?? "",
+              note: "Leave empty for none. e.g. POPULAR, BEST VALUE, +20% FREE",
+            },
+          ],
+          async onSubmit(v) {
+            const gems = Number(v.gems);
+            if (!Number.isInteger(gems) || gems < 1) return "Gems must be a whole number, at least 1.";
+            if (!/^\d{1,7}(\.\d{1,2})?$/.test(v.price.trim())) return "A price looks like 500 or 499.50.";
+            try {
+              const done = await withSudo(() =>
+                call(`/payments/packs/${encodeURIComponent(pack.id)}`, {
+                  method: "POST",
+                  body: JSON.stringify({ gems, pricePaise: v.price.trim(), tag: v.tag }),
+                })
+              );
+              return done === null ? "Cancelled." : null;
+            } catch (e) {
+              return e instanceof ApiFailure ? e.info.error : "That did not work";
+            }
+          },
+        });
+        if (answer) {
+          toast("Saved — the next payment opened uses it.");
+          void load();
+        }
+      };
+    });
+
+    host.querySelectorAll<HTMLButtonElement>("[data-toggle]").forEach((btn) => {
+      btn.onclick = async () => {
+        const on = btn.dataset.on === "1";
+        const answer = await ask({
+          title: on ? "Put this pack back on the shelf?" : "Take this pack off the shelf?",
+          intro: on
+            ? "Players will see it again the next time they open the store."
+            : "It disappears from the store. Anyone mid-payment for it still completes — their session already " +
+              "wrote down what they were buying.",
+          confirm: on ? "Show it" : "Hide it",
+          danger: !on,
+          async onSubmit() {
+            try {
+              const done = await withSudo(() =>
+                call(`/payments/packs/${encodeURIComponent(btn.dataset.toggle!)}`, {
+                  method: "POST",
+                  body: JSON.stringify({ active: on }),
+                })
+              );
+              return done === null ? "Cancelled." : null;
+            } catch (e) {
+              return e instanceof ApiFailure ? e.info.error : "That did not work";
+            }
+          },
+        });
+        if (answer) {
+          toast(on ? "Back on the shelf." : "Hidden.");
+          void load();
+        }
+      };
+    });
 
     host.querySelector<HTMLButtonElement>("#upi")!.onclick = async () => {
       const answer = await ask({

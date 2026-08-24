@@ -1268,3 +1268,86 @@ export const paymentHookLog = pgTable(
     index("idx_hooklog_amount").on(t.amountPaise, t.createdAt),
   ]
 );
+
+/** What the store sells, and for how much.
+ *
+ *  In the database rather than in the code, because a shelf is an operational
+ *  decision — a festival price, a pack pulled for a week — and the whole point
+ *  of the console is that those are not a redeploy. `DEFAULT_PACKS` in
+ *  services/payments.ts seeds this on first boot and is never read again.
+ *
+ *  Money is paise, like everywhere else. */
+export const gemPacks = pgTable("gem_packs", {
+  id: varchar("id", { length: 24 }).primaryKey(),
+  gems: integer("gems").notNull(),
+  pricePaise: integer("price_paise").notNull(),
+  /** Which sprite in frontend/public/store/. */
+  art: varchar("art", { length: 32 }).notNull(),
+  /** The ribbon on the tile — "POPULAR", "BEST VALUE". Null for none. */
+  tag: varchar("tag", { length: 24 }),
+  /** Left to right on the shelf. */
+  sort: integer("sort").notNull().default(0),
+  /** Off the shelf without being forgotten. A pack somebody is mid-payment for
+   *  still settles: the session snapshotted its gems and price when it opened,
+   *  so hiding a pack can never strand money already in the air. */
+  active: boolean("active").notNull().default(true),
+  updatedBy: text("updated_by"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** What a collection item costs.
+ *
+ *  NO ROW MEANS FREE, which is what every item was before this table existed —
+ *  so an empty table is exactly today's behaviour and nothing has to be
+ *  backfilled. A row with a null currency is an admin saying "free" out loud,
+ *  which is different from never having decided, and worth being able to tell
+ *  apart when reading the console. */
+export const itemPrices = pgTable(
+  "item_prices",
+  {
+    itemId: varchar("item_id", { length: 48 }).primaryKey(),
+    /** character · weapon · emote. Snapshotted so the console can group the
+     *  table without resolving every id against the catalog first. */
+    kind: varchar("kind", { length: 12 }).notNull(),
+    /** null = free. 'coin' = earned currency, 'gem' = bought currency. */
+    currency: varchar("currency", { length: 8 }),
+    price: bigint("price", { mode: "number" }).notNull().default(0),
+    updatedBy: text("updated_by"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("item_prices_currency", sql`${t.currency} is null or ${t.currency} in ('coin','gem')`),
+    check("item_prices_price", sql`${t.price} >= 0`),
+  ]
+);
+
+/** What a player owns.
+ *
+ *  Only ever holds things that had to be ACQUIRED. A free item is owned by
+ *  everybody and writing a row per player per free item would be a table the
+ *  size of the playerbase times the catalog, answering a question a constant
+ *  already answers.
+ *
+ *  This is the `user_items` lookup the catalog's three ownership seams have
+ *  been promising since the first character shipped. */
+export const userItems = pgTable(
+  "user_items",
+  {
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    itemId: varchar("item_id", { length: 48 }).notNull(),
+    /** What they paid with, and how much. Null for anything not bought — a
+     *  grant, or an item that was free when they put it on and was priced
+     *  afterwards. */
+    currency: varchar("currency", { length: 8 }),
+    pricePaid: bigint("price_paid", { mode: "number" }).notNull().default(0),
+    /** purchase · grant · grandfathered */
+    source: varchar("source", { length: 16 }).notNull().default("purchase"),
+    acquiredAt: timestamp("acquired_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.userId, t.itemId] }),
+    index("idx_user_items_item").on(t.itemId),
+  ]
+);

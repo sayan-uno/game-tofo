@@ -117,7 +117,10 @@ export type EventType =
   /** …and the two things an admin can do to a balance without a payment. */
   | "payments.settings"
   | "payments.approve"
-  | "payments.grant";
+  | "payments.grant"
+  /** A player spending what they earned or bought on something to wear. */
+  | "collection.claim"
+  | "pricing.set";
 
 export interface EventInput {
   type: EventType;
