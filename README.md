@@ -1183,6 +1183,158 @@ whichever argument actually holds one (`sockets/ack.ts`), and the process
 survives an unhandled rejection while printing the whole stack, because a net
 that stays quiet is worse than no net.
 
+## Money: coins, gems and a UPI gateway with no provider (P1)
+
+Two currencies, deliberately unalike. **Coins** are earned — every finished
+match pays some, so they cost nobody anything and can be minted freely.
+**Gems** are bought at **1 gem = ₹1**, which makes them somebody's actual
+money, and the only two things allowed to create one are a verified payment
+and an admin who has put their name to it.
+
+The store is the gem chip in the lobby HUD. It is its own lazy chunk like the
+locker, but unlike the locker it takes no canvas — it is DOM over a lobby that
+keeps rendering, so opening and closing it costs nothing.
+
+```bash
+npm run check:payments   # the logic, against real Postgres and Redis
+npm run e2e:payments     # the open route, against a RUNNING backend
+```
+
+### There is no payment provider
+
+A player scans a QR that pays a real UPI id from whatever app they like. The
+only thing that ever comes back is an **SMS on the owner's phone**, forwarded
+to a webhook by a rule in MacroDroid. That message says how much arrived and
+**nothing about who sent it**.
+
+So the amount is the identity, and the whole design falls out of that:
+
+- **No two live sessions may share an amount.** The second person buying a ₹100
+  pack while the first is still paying is asked for **₹100.01**, the third for
+  ₹100.02. The claim is a Redis `SET NX`, because two people pressing Buy in
+  the same millisecond is not hypothetical and only an atomic claim is safe.
+  Postgres records what the claim decided; Redis decides it.
+- **An amount is held longer than its QR is offered.** The QR expires after
+  **two minutes**; the reservation lasts **two and a half**. Somebody who paid
+  in the last second of the window, or whose bank took twenty seconds to send
+  the SMS, is still the only person that amount can belong to. Releasing at
+  expiry would hand their money to whoever bought next — the one failure here
+  that takes real money from a real person, so the player's own screen says
+  *"already paid? hold on"* rather than *"failed"*.
+- **Closing the window is not cancelling.** The flow this store asks for is
+  "screenshot the code and pay in another app", so the window is closed *on the
+  way to paying* far more often than instead of it. A session therefore runs
+  its full life whatever the player does with the window — nothing is released
+  on close. Releasing there, which is what it did at first, meant the bank SMS
+  arrived with nothing holding that amount and the purchase could only be put
+  right by hand.
+- **…and every press of Buy is a NEW payment.** Not a resumed one. The previous
+  session is still live and still holds its amount, so the next press takes the
+  next paise and gets its own fresh two minutes. That is better than handing
+  back what they already had in three ways: the clock on screen is never a
+  stale remainder, a screenshot of the *earlier* code is still payable because
+  that session is still running, and whichever of the two they end up scanning,
+  the money finds a session. Holding two amounts instead of one costs nothing
+  worth having — both expire on their own in two and a half minutes.
+  A player may hold ten at once before being asked to wait, which is loose
+  enough for somebody fiddling and far short of a pack's hundred amounts.
+- **A redelivered SMS is not a second payment.** MacroDroid retries. The bank's
+  reference is unique in `payment_sessions`, so a retry loses the race with
+  itself and is logged as a duplicate rather than crediting twice.
+- **Money is an integer.** Every amount is whole **paise**, never rupees and
+  never a float — 100.01 is not representable as a double, and a rounding that
+  goes the wrong way matches the wrong session or none. Rupees exist at exactly
+  two edges: the QR's `am=` and the screen.
+
+Nothing may move a balance without writing the line that explains it, in the
+same transaction. `wallets` is only a cache of the sum in `wallet_ledger`;
+"where did these gems come from" has to be answerable a year later by somebody
+who was not here. Match rewards go in the *same* transaction that records the
+match, so a match that could not be written has not paid out for itself.
+
+> `player_stats.coins` is a **different number** — coins picked up on a
+> Trackline course, a score component. It is deliberately not the wallet: a
+> game whose scoring can mint currency is a game somebody will farm.
+
+### The one door left open
+
+A phone forwarding a bank SMS cannot hold a session, so `POST /pay/sms` is
+reachable by anybody who finds it. It is mounted **outside** the `/api`
+maintenance gate on purpose — a session opened before a window still has money
+in the air. Everything about it follows from taking that seriously:
+
+- **It proves nothing by itself.** A shared key, compared in constant time, and
+  an amount matching a live session. Reaching the URL is not being paid.
+- **It cannot be made to do work.** Its own body parser with a 16 kB cap, its
+  own JSON parse inside a `try`, a Redis rate limit *ahead of* the database,
+  and a ceiling on how many refusals one address may write to the log. A flood
+  of 45 requests leaves **one** row, not 45 — the knocking must not become the
+  attack.
+- **It touches nothing but money.** No game state, no interpretation of
+  anything it was sent. The body is stored as text, truncated, and rendered
+  escaped. A payload built to be executed somewhere is a row like any other.
+- **It never throws.** Anything unexpected is caught, logged and answered. A
+  crash here is a payment nobody hears about.
+
+```json
+POST /pay/sms
+{ "sender": "100.00 was credited to … UPI Ref. No. 313080502571. - Groww",
+  "key":    "«the key from Payment management»" }
+```
+
+The parser refuses more than it accepts, and the two refusals that matter are
+that **a debit is not a credit**, and that **a masked account number is not an
+amount** — `A/C XXXX9203 credited` must never be read as ₹92.03. A number is
+only believed when it carries a currency marker or a decimal part.
+
+### What the console does with it
+
+Three screens under **Money**, all with a from/to window that means the same
+thing on each, so one can be lined up against the other.
+
+- **Payment sessions** — every QR ever put in front of anybody, paid or not.
+  Expect several rows per purchase: one per press of Buy, most of them timing
+  out unpaid, which is the design working rather than something going wrong.
+  `cancelled` means the API was told explicitly; closing the window is not
+  that, and leaves the row `pending` until it times out.
+  The amount column says *why* it is odd (`+1p · #2 at this price`) rather than
+  leaving an admin to wonder whether somebody was overcharged. Anything still
+  pending or timed out carries **Approve**, which credits the gems on an
+  admin's say-so — the most abusable button in the console, and gated like one:
+  admin-or-owner, a fresh authenticator code, a reason, and an audit row.
+- **Payment log** — every request the open route received, whatever it was,
+  with what each outcome *means* spelled out beside it. An unmatched credit
+  offers **"Who could this be?"**: sessions open near that amount and moment.
+  A shortlist, never a verdict — deciding for somebody is how the wrong player
+  gets the gems.
+- **Payment management** — the UPI id, the payee name, and the webhook key.
+  The key is **generated, never typed**, shown once when made and thereafter
+  only to somebody holding their authenticator, with the read itself audited.
+  Prices are not here: they live in the server's code, because a price somebody
+  can change from a browser is a price that can be changed to ₹1.
+
+A **Wallet** block on every player's page answers the support call directly —
+balances, every payment they opened, and every movement with its reason.
+
+### Two traps this milestone cost
+
+- **`display` beats the `hidden` attribute — and it caught us twice.** `hidden`
+  has no power of its own; it is a `display: none` in the UA stylesheet that any
+  rule setting `display` overrides. The *"Paid"* panel and the *"expired"* veil
+  were both on screen over a live QR for one build, telling a player their
+  payment had succeeded before they had made it. It was fixed per element — and
+  then reintroduced on an element added later, which stayed on screen billing
+  somebody for money they had already sent. A rule per element is a chance to
+  forget the next one, so it is now **one** descendant selector
+  (`.st-screen [hidden]`, 0-2-0, no `!important` needed) covering everything in
+  the page toggled that way. Same shape as the `pointer-events` trap in the
+  locker: a cascade quietly overriding a default nobody thought was a rule.
+- **A cleanup phrased as a time window eats real rows.** `delete … where
+  created_at > now() - interval '10 minutes'` is fine on an empty test database
+  and a disaster on one somebody is also using. Every check here deletes **by
+  id**, and sweeps its own residue at the start as well as the end — a run
+  killed by a closed pipe (`| head`) never reaches its own `finally`.
+
 ## What's next (planned)
 
 - Trackline gameplay: obstacles, jump/roll, crashes, coins, scoring.

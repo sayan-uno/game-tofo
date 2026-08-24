@@ -34,6 +34,9 @@ import { mountParty } from "./screens/party";
 import { mountParties } from "./screens/parties";
 import { mountHistory } from "./screens/history";
 import { mountWorld, mountWorlds } from "./screens/worlds";
+import { mountPayments } from "./screens/payments";
+import { mountPaySessions } from "./screens/paySessions";
+import { mountPayLog } from "./screens/payLog";
 
 const root = document.getElementById("root")!;
 let stopScreen: (() => void) | null = null;
@@ -46,7 +49,10 @@ const go = (hash: string) => {
 };
 
 interface Route {
-  nav: "overview" | "history" | "players" | "matches" | "parties" | "worlds" | "sanctions" | "voice" | "games" | "notices" | "events" | "platform" | "reports" | "analytics" | "signals";
+  nav:
+    | "overview" | "history" | "players" | "matches" | "parties" | "worlds" | "sanctions" | "voice"
+    | "games" | "notices" | "events" | "platform" | "reports" | "analytics" | "signals"
+    | "payments" | "paysessions" | "paylog";
   title: string;
   crumb?: string;
   /** What the header box should be showing — a search you navigated to by URL
@@ -63,7 +69,7 @@ function parse(): Route {
 
   if (parts[0] === "players" && parts[1]) {
     const uid = decodeURIComponent(parts[1]);
-    return { nav: "players", title: "Player", crumb: uid, mount: (h) => mountPlayer(h, uid, go) };
+    return { nav: "players", title: "Player", crumb: uid, mount: (h) => mountPlayer(h, uid, go, me?.role ?? "") };
   }
   if (parts[0] === "players") {
     return { nav: "players", title: "Players", crumb: q || undefined, query: q, mount: (h) => mountPlayers(h, q, go) };
@@ -128,6 +134,15 @@ function parse(): Route {
   if (parts[0] === "games") {
     return { nav: "games", title: "Games", mount: (h) => mountGames(h, me?.role ?? "") };
   }
+  if (parts[0] === "payments") {
+    return { nav: "payments", title: "Payment management", mount: (h) => mountPayments(h, me?.role ?? "") };
+  }
+  if (parts[0] === "paysessions") {
+    return { nav: "paysessions", title: "Payment sessions", mount: (h) => mountPaySessions(h, me?.role ?? "", go) };
+  }
+  if (parts[0] === "paylog") {
+    return { nav: "paylog", title: "Payment log", mount: (h) => mountPayLog(h, go) };
+  }
   if (parts[0] === "platform") {
     return { nav: "platform", title: "Platform", mount: (h) => mountPlatform(h, me?.role ?? "") };
   }
@@ -157,6 +172,10 @@ function shell(who: SignedIn): void {
           <a href="#/notices" data-nav="notices">${icon("mail")} Notices</a>
           <a href="#/events" data-nav="events">${icon("box")} Events</a>
           <a href="#/platform" data-nav="platform">${icon("power")} Platform</a>
+          <div class="heading">Money</div>
+          <a href="#/paysessions" data-nav="paysessions">${icon("gem")} Payment sessions</a>
+          <a href="#/paylog" data-nav="paylog">${icon("receipt")} Payment log</a>
+          <a href="#/payments" data-nav="payments">${icon("wallet")} Payment management</a>
         </nav>
         <div class="who">
           <div class="mail">${esc(who.email)}</div>

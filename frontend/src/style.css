@@ -4630,3 +4630,477 @@ body.in-match .chat-panel {
   color: #46c98a;
   margin: 0;
 }
+
+/* `display` BEATS THE `hidden` ATTRIBUTE. Read this before adding anything
+   below that toggles with `hidden`.
+
+   `hidden` has no power of its own — it is a `display: none` in the browser's
+   own stylesheet, which ANY rule setting `display` outranks. This page hides
+   four things that way (the expired veil, the "Paid" panel, the waiting strip)
+   and every one of them has a `display` on it, so without these two selectors
+   they are all permanently visible: a "Paid" panel over a QR nobody has paid
+   yet, and a bill for money already sent.
+
+   Written once, as a descendant selector, rather than per element. Three
+   separate rules is three chances to forget the fourth — and it was forgotten,
+   on the strip, after the same bug had already been fixed on the panel. Same
+   shape as the pointer-events trap in the locker: a cascade quietly overriding
+   a default nobody thought was a rule.
+
+   `[hidden]` in a descendant selector is 0-2-0 and beats any single class, so
+   no `!important` is needed. Elements toggled by CLASS are unaffected. */
+.st-screen [hidden],
+.st-pay [hidden] { display: none; }
+
+/* =========================================================================
+   THE STORE (P1)
+   Same language as the locker: a red-on-black header with a slashed kicker,
+   an opaque panel, and artwork carrying the weight. Unlike the locker this
+   takes no canvas — the lobby keeps rendering behind it, so opening and
+   closing the store costs nothing at all.
+   ========================================================================= */
+
+/* ---- the wallet chips, on the HUD ---- */
+.wallet-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.42);
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.1s ease;
+}
+.wallet-chip:hover { border-color: rgba(229, 24, 46, 0.55); background: rgba(229, 24, 46, 0.14); }
+.wallet-chip:active { transform: scale(0.96); }
+.wallet-chip img { display: block; flex: none; }
+.wallet-n { font-variant-numeric: tabular-nums; min-width: 1ch; }
+/* The gem chip is the door to the store, so it says so. */
+.wallet-plus {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  margin-left: 1px;
+  border-radius: 5px;
+  background: var(--red);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 800;
+}
+/* Only when the number actually changed — see Hud.setWallet. */
+@keyframes wallet-bump {
+  0% { transform: none; color: #fff; }
+  35% { transform: scale(1.35); color: var(--red-hot); }
+  100% { transform: none; color: #fff; }
+}
+.wallet-n.bumped { animation: wallet-bump 0.5s ease-out; display: inline-block; }
+
+/* ---- the page ---- */
+.st-screen {
+  --st-x: clamp(14px, 3vw, 28px);
+  position: absolute;
+  inset: 0;
+  z-index: 90; /* the same band as the locker: above panels, below toasts */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: radial-gradient(120% 90% at 50% -10%, rgba(229, 24, 46, 0.16), transparent 60%),
+    linear-gradient(180deg, rgba(11, 5, 7, 0.97), rgba(11, 5, 7, 0.99));
+  animation: cl-in 0.2s ease-out;
+}
+
+.st-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: max(10px, env(safe-area-inset-top)) 0 10px;
+  padding-inline: max(var(--st-x), env(safe-area-inset-left), env(safe-area-inset-right));
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  background: linear-gradient(180deg, rgba(11, 5, 7, 0.97), rgba(11, 5, 7, 0.86));
+  backdrop-filter: blur(6px);
+}
+.st-back {
+  flex: none;
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  border: 1px solid rgba(229, 24, 46, 0.4);
+  background: rgba(229, 24, 46, 0.1);
+  color: #fff;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+.st-back svg { width: 22px; height: 22px; }
+.st-back:hover { background: rgba(229, 24, 46, 0.22); }
+.st-back:active { transform: scale(0.94); }
+.st-head-text { flex: 1; min-width: 0; }
+.st-kicker {
+  display: block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--red-hot);
+  opacity: 0.9;
+}
+.st-head-title {
+  margin-top: 2px;
+  font-family: var(--display-font);
+  font-weight: 400;
+  font-size: clamp(18px, 2.4vw, 24px);
+  letter-spacing: 0.06em;
+  line-height: 1.1;
+  color: #fff;
+}
+.st-wallet { flex: none; display: flex; gap: 8px; }
+.st-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 11px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.st-chip img { display: block; }
+
+.st-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 14px var(--st-x) max(24px, env(safe-area-inset-bottom));
+}
+.st-intro {
+  margin-bottom: 14px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, 0.62);
+}
+.st-intro strong { color: #fff; }
+.st-loading {
+  padding: 40px 0;
+  text-align: center;
+  font-size: 11px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+/* ---- the shelf ---- */
+.st-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(158px, 1fr));
+  gap: 12px;
+}
+.st-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 14px 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.015));
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.1s ease;
+}
+.st-card::after {
+  /* A crimson floor-glow behind the artwork, so a tile reads as lit rather
+     than as a picture pasted on a panel. */
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 42px;
+  width: 120%;
+  height: 90px;
+  transform: translateX(-50%);
+  background: radial-gradient(50% 50% at 50% 50%, rgba(229, 24, 46, 0.34), transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+}
+.st-card:hover { border-color: rgba(229, 24, 46, 0.55); background: rgba(229, 24, 46, 0.09); }
+.st-card:active { transform: scale(0.97); }
+.st-card.busy { opacity: 0.6; pointer-events: none; }
+.st-art {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+}
+.st-art img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.55));
+}
+.st-amount {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--display-font);
+  font-size: 17px;
+  letter-spacing: 0.03em;
+}
+.st-price {
+  position: relative;
+  z-index: 1;
+  padding: 5px 14px;
+  border-radius: 999px;
+  background: var(--red);
+  box-shadow: 0 3px 14px rgba(229, 24, 46, 0.4);
+  font-size: 13.5px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.st-tag {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(229, 24, 46, 0.9);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+}
+
+/* ---- the payment popup ---- */
+.st-pay {
+  position: absolute;
+  inset: 0;
+  z-index: 95; /* above the store page, below toasts */
+  display: grid;
+  place-items: center;
+  padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
+  background: rgba(4, 2, 3, 0.82);
+  backdrop-filter: blur(5px);
+  animation: cl-in 0.16s ease-out;
+}
+.st-pay-card {
+  position: relative;
+  width: min(380px, 100%);
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 20px 20px 18px;
+  border-radius: 18px;
+  border: 1px solid rgba(229, 24, 46, 0.35);
+  background: radial-gradient(110% 70% at 50% 0%, rgba(229, 24, 46, 0.2), transparent 62%),
+    linear-gradient(180deg, #17090d, #0b0507);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+  text-align: center;
+}
+.st-pay-x {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.07);
+  color: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+}
+.st-pay-x svg { width: 16px; height: 16px; }
+.st-pay-x:hover { background: rgba(229, 24, 46, 0.25); color: #fff; }
+.st-pay-kicker {
+  display: block;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--red-hot);
+}
+.st-pay-title {
+  margin-top: 3px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--display-font);
+  font-weight: 400;
+  font-size: 21px;
+  letter-spacing: 0.05em;
+  color: #fff;
+}
+
+.st-pay-amount { margin: 14px 0 12px; }
+.st-pay-amount-label {
+  display: block;
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.5);
+}
+.st-pay-amount-value {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--display-font);
+  font-size: 34px;
+  line-height: 1.1;
+  letter-spacing: 0.01em;
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 22px rgba(229, 24, 46, 0.5);
+}
+/* Why the amount is odd. This is the one piece of the collision scheme a
+   player ever sees, so it is explained where they see it rather than left to
+   look like an overcharge. */
+.st-pay-odd {
+  display: block;
+  margin: 8px auto 0;
+  max-width: 320px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.st-qr {
+  position: relative;
+  width: min(230px, 62vw);
+  margin: 0 auto;
+  border-radius: 14px;
+  overflow: hidden;
+  background: #fff;
+  padding: 8px;
+}
+.st-qr-img { display: block; width: 100%; height: auto; }
+.st-qr-veil {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(6, 3, 4, 0.9);
+}
+.st-qr-veil-txt {
+  font-family: var(--display-font);
+  font-size: 14px;
+  letter-spacing: 0.16em;
+  color: var(--red-hot);
+  text-align: center;
+}
+
+.st-steps {
+  margin: 14px auto 0;
+  padding-left: 20px;
+  max-width: 320px;
+  text-align: left;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: rgba(255, 255, 255, 0.68);
+}
+.st-steps strong { color: #fff; }
+.st-steps li + li { margin-top: 4px; }
+
+.st-pay-foot {
+  margin-top: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.st-countdown {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.75);
+}
+.st-clock { width: 15px; height: 15px; }
+.st-time { font-weight: 800; font-variant-numeric: tabular-nums; }
+.st-time-label { font-size: 11px; color: rgba(255, 255, 255, 0.45); }
+.st-pay-card.ending .st-countdown { color: var(--red-hot); }
+.st-pay-card.expired .st-countdown { color: rgba(255, 255, 255, 0.5); }
+/* Only useful on the phone that is going to pay; harmless on a desktop, where
+   nothing claims the upi: scheme and the link simply does nothing. */
+.st-open-upi {
+  padding: 8px 14px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font-size: 12.5px;
+  font-weight: 700;
+  text-decoration: none;
+}
+.st-open-upi:hover { background: rgba(229, 24, 46, 0.2); border-color: rgba(229, 24, 46, 0.5); }
+.st-pay-card.expired .st-open-upi { opacity: 0.35; pointer-events: none; }
+
+.st-pay-note {
+  margin-top: 12px;
+  font-size: 11px;
+  line-height: 1.55;
+  color: rgba(255, 255, 255, 0.42);
+}
+
+/* Paid. The card is not torn down — it is covered, so the thing somebody was
+   looking at is still under the confirmation rather than replaced by it. */
+.st-pay-done {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(12, 30, 18, 0.97), rgba(6, 16, 10, 0.99));
+  animation: cl-in 0.2s ease-out;
+}
+.st-done-tick {
+  display: grid;
+  place-items: center;
+  width: 62px;
+  height: 62px;
+  border-radius: 50%;
+  background: #22c55e;
+  box-shadow: 0 0 34px rgba(34, 197, 94, 0.55);
+}
+.st-done-tick svg { width: 32px; height: 32px; color: #05130a; stroke-width: 2.6; }
+.st-pay-done strong {
+  font-family: var(--display-font);
+  font-weight: 400;
+  font-size: 24px;
+  letter-spacing: 0.08em;
+  color: #fff;
+}
+.st-done-sub { font-size: 13px; color: rgba(255, 255, 255, 0.72); }
+
+/* Phones: the popup is the screen, and the QR wants every pixel it can get. */
+@media (max-width: 560px) {
+  .st-grid { grid-template-columns: repeat(auto-fill, minmax(136px, 1fr)); gap: 10px; }
+  .st-wallet .st-chip { padding: 5px 8px; font-size: 12px; }
+  .st-pay-card { padding: 18px 14px 14px; }
+  .st-pay-amount-value { font-size: 30px; }
+  .st-qr { width: min(250px, 70vw); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .st-screen, .st-pay, .st-pay-done { animation: none; }
+  .wallet-n.bumped { animation: none; }
+}

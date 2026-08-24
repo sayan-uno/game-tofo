@@ -106,7 +106,18 @@ export type EventType =
   | "report.dismissed"
   | "case.opened"
   | "case.resolved"
-  | "case.export";
+  | "case.export"
+  /** Money (P1). In the ACTIVITY log as well as the payment tables, because
+   *  "I paid and got nothing" is a question asked from the player's side, at
+   *  the player's timeline, often by somebody who has never opened the
+   *  payments screen. `store.open` is a QR being put in front of somebody;
+   *  `store.paid` is a bank SMS having settled it. */
+  | "store.open"
+  | "store.paid"
+  /** …and the two things an admin can do to a balance without a payment. */
+  | "payments.settings"
+  | "payments.approve"
+  | "payments.grant";
 
 export interface EventInput {
   type: EventType;

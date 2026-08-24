@@ -14,6 +14,8 @@ import { gamesRouter } from "./routes/games.js";
 import { noticesRouter } from "./routes/notices.js";
 import { reportsRouter } from "./routes/reports.js";
 import { playerEventsRouter } from "./routes/events.js";
+import { storeRouter } from "./routes/store.js";
+import { payHookRouter } from "./routes/payHook.js";
 // Registers every game with the platform (one import per game folder).
 import "./games/index.js";
 import { registerSockets, broadcastLobby } from "./sockets/index.js";
@@ -30,6 +32,7 @@ import { clearOnlineSet, clearStalePresence } from "./redis.js";
 import { gateReason, gateShut, getFlags, setGate, startMaintenanceWatch } from "./platform/flags.js";
 import { refreshWithdrawn, startWithdrawnWatch } from "./platform/gameLocks.js";
 import { flushEvents, startEventLog, stopEventLog } from "./services/eventLog.js";
+import { startPaymentSweeper, stopPaymentSweeper } from "./platform/paymentSweeper.js";
 import { warmSanctionCache } from "./services/sanctions.js";
 import { startOpsSnapshot, stopOpsSnapshot } from "./platform/ops.js";
 import { startOpsCommands, stopOpsCommands } from "./platform/opsCommands.js";
@@ -78,7 +81,12 @@ if (config.role === "game") {
 const tightJson = express.json({ limit: "100kb" });
 app.use((req, res, next) => {
   const isUpload = req.method === "POST" && /\/events$/.test(req.path);
-  if (isUpload) return next();
+  // The payment webhook reads its OWN raw body (routes/payHook.ts). It has to:
+  // a malformed body from an open route must become a logged row, and a parser
+  // mounted out here would instead throw before the handler that knows how to
+  // record it ever ran.
+  const isPayHook = req.method === "POST" && req.path.startsWith("/pay/");
+  if (isUpload || isPayHook) return next();
   return tightJson(req, res, next);
 });
 
@@ -148,6 +156,12 @@ if (config.role === "recorder") {
   app.use("/api/notices", noticesRouter);
   app.use("/api/reports", reportsRouter);
   app.use("/api/events", playerEventsRouter);
+  app.use("/api/store", storeRouter(io));
+  // OUTSIDE the /api gate, on purpose. A session opened before a maintenance
+  // window still has real money in the air, and the SMS that settles it must
+  // land whatever else the platform is doing. It carries its own key, its own
+  // rate limit and its own body parser — see routes/payHook.ts.
+  app.use("/pay", payHookRouter(io));
   registerSockets(io);
   // The packer: fills waiting parties from the pool, then with bots.
   startMatchmaker(io);
@@ -185,6 +199,10 @@ async function start() {
     startChatRetention();
     // World chat's archive: buffered, flushed on a timer, never on a send.
     startWorldChatArchive();
+    // Payment sessions whose grace has run out, marked as such. Bookkeeping
+    // only — the Redis reservation carries its own TTL and has already let go,
+    // so a sweeper that never runs cannot strand an amount.
+    startPaymentSweeper();
 
     // ---- worlds and the population that fills them (W1–W3) ----
     //
@@ -301,6 +319,7 @@ async function shutdown(signal: string): Promise<void> {
   stopWorldLife();
   stopEventLog();
   stopWorldChatArchive();
+  stopPaymentSweeper();
   stopReplaySweeper();
   stopReplayWorker();
   await stopOpsCommands();

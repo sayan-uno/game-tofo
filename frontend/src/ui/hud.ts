@@ -13,6 +13,11 @@ export interface HudCallbacks {
   onOpenProfile: () => void;
   /** Characters and emotes the player owns. */
   onOpenCollection: () => void;
+  /** The gem store. Reached by tapping either wallet chip — a player who
+   *  wants more coins and a player who wants more gems both end up here, and
+   *  making only one of the two numbers tappable is a small mystery nobody
+   *  should have to solve. */
+  onOpenStore: () => void;
   /** The list of notices this player has been sent, read back from the
    *  server — a message seen once is a message half of them will say they
    *  never got. */
@@ -77,6 +82,11 @@ export class Hud {
   private readyRow!: HTMLElement;
   private readyBtn!: HTMLButtonElement;
   private objectBtn!: HTMLButtonElement;
+  private coinN!: HTMLElement;
+  private gemN!: HTMLElement;
+  /** The last numbers painted, so a repaint with the same values does not
+   *  restart the pop animation on every socket message. */
+  private wallet = { coins: -1, gems: -1 };
 
   constructor(user: User, callbacks: HudCallbacks) {
     this.root = document.createElement("div");
@@ -108,6 +118,15 @@ export class Hud {
           </div>
         </div>
         <div class="hud-actions">
+          <button class="wallet-chip coin-chip" type="button" title="Coins — earned by playing">
+            <img src="/store/coin.webp" alt="Coins" width="18" height="18" />
+            <span class="wallet-n coin-n">—</span>
+          </button>
+          <button class="wallet-chip gem-chip" type="button" title="Gems — tap to buy more">
+            <img src="/store/gem.webp" alt="Gems" width="18" height="18" />
+            <span class="wallet-n gem-n">—</span>
+            <span class="wallet-plus" aria-hidden="true">+</span>
+          </button>
           <button class="btn btn-ghost mic-btn" title="Toggle microphone">🎙 On</button>
           <button class="btn btn-ghost events-btn" title="What is on">★</button>
           <button class="btn btn-ghost notices-btn" title="Notices from TOFO">✉</button>
@@ -245,6 +264,10 @@ export class Hud {
     this.codeInput.onkeydown = (e) => {
       if (e.key === "Enter") void submit();
     };
+    this.coinN = this.root.querySelector<HTMLElement>(".coin-n")!;
+    this.gemN = this.root.querySelector<HTMLElement>(".gem-n")!;
+    this.root.querySelector<HTMLButtonElement>(".coin-chip")!.onclick = callbacks.onOpenStore;
+    this.root.querySelector<HTMLButtonElement>(".gem-chip")!.onclick = callbacks.onOpenStore;
     this.root.querySelector<HTMLButtonElement>(".events-btn")!.onclick = callbacks.onOpenEvents;
     this.root.querySelector<HTMLButtonElement>(".notices-btn")!.onclick = callbacks.onOpenNotices;
     this.root.querySelector<HTMLButtonElement>(".collection-btn")!.onclick = callbacks.onOpenCollection;
@@ -335,6 +358,25 @@ export class Hud {
       }
     }
     this.startHint.classList.toggle("hidden", !state.hint);
+  }
+
+  /** Coins and gems, from the wallet. Animated only when the number actually
+   *  changed — gems arriving is worth noticing, and a chip that pulses every
+   *  few seconds teaches people to stop looking at it. */
+  setWallet(balance: { coins: number; gems: number }) {
+    const paint = (el: HTMLElement, was: number, now: number) => {
+      el.textContent = now.toLocaleString("en-IN");
+      if (was < 0 || was === now) return;
+      el.classList.remove("bumped");
+      // Force a reflow so the animation restarts even on a second change in
+      // quick succession; without it the class is added in the same frame it
+      // was removed and nothing plays.
+      void el.offsetWidth;
+      el.classList.add("bumped");
+    };
+    paint(this.coinN, this.wallet.coins, balance.coins);
+    paint(this.gemN, this.wallet.gems, balance.gems);
+    this.wallet = { coins: balance.coins, gems: balance.gems };
   }
 
   setChatUnread(show: boolean) {

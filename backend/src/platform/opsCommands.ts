@@ -45,7 +45,15 @@ const MAX_AGE_MS = 30_000;
  *  already refused for being stale, so remembering costs nothing but memory. */
 const SEEN_TTL_MS = MAX_AGE_MS * 2;
 
-export type OpsCommandName = "ping" | "disconnect" | "endMatch" | "broadcast" | "silence" | "maintenance" | "noticeGone";
+export type OpsCommandName =
+  | "ping"
+  | "disconnect"
+  | "endMatch"
+  | "broadcast"
+  | "silence"
+  | "maintenance"
+  | "noticeGone"
+  | "wallet";
 
 export interface OpsCommand {
   id: string;
@@ -165,6 +173,24 @@ async function execute(io: Server, c: OpsCommand): Promise<unknown> {
         sent++;
       }
       return { sent, of: uids.length };
+    }
+
+    case "wallet": {
+      // An admin approved a payment by hand, in the OTHER process. This is the
+      // only way the player looking at a QR right now hears about it — the
+      // console's process holds no sockets, so it cannot tell anybody
+      // anything. Read here rather than sent in the command, so the number on
+      // the player's screen is the one in the database and not one that was
+      // true when the command was signed.
+      const userId = String(c.args.userId ?? "");
+      if (!userId) throw new Error("userId required");
+      const { getBalance } = await import("../services/wallet.js");
+      const balance = await getBalance(userId);
+      io.to(`user:${userId}`).emit("wallet:update", {
+        balance,
+        paidSessionId: c.args.sessionId ? String(c.args.sessionId) : null,
+      });
+      return { told: true };
     }
 
     case "noticeGone": {

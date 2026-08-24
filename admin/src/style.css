@@ -665,3 +665,38 @@ table.rt .rt-cell.muted b, table.rt .rt-cell.muted { color: var(--faint); }
 .worldline.server .worldline-body { color: var(--dim); }
 .worldline-body { flex: 1; overflow-wrap: anywhere; }
 .worldline-at { color: var(--faint); font-family: var(--mono); font-size: 10.5px; flex: none; }
+
+/* ---- money (P1) --------------------------------------------------------- */
+
+/* The forwarded SMS, exactly as it arrived. `pre-wrap` rather than `pre`
+   because a bank message is one long line and a horizontal scrollbar is a
+   message nobody reads; `break-word` because the other thing that lands here
+   is a scanner's payload, which has no spaces in it at all. */
+.hookbody {
+  margin-top: 6px; padding: 8px 10px; border-radius: var(--r);
+  background: var(--ground); border: 1px solid var(--line);
+  font-family: var(--mono); font-size: 11.5px; line-height: 1.55; color: var(--dim);
+  white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto;
+}
+.cands { margin-top: 4px; }
+
+/* A tile whose number is the reason you opened the screen. `live` for money in
+   the air, `warn` for money that arrived and reached nobody — the second is
+   the one that needs somebody, so it is the one that is coloured. */
+.tile.live .t-value { color: var(--green); }
+.tile.warn .t-value { color: var(--amber); }
+
+/* The secret, shown once. Wider than an ordinary dialog because a key and a
+   URL both have to be readable in full — a credential wrapped mid-string is a
+   credential somebody copies wrongly. */
+.keybox .modal { max-width: 560px; }
+.keybox input { font-family: var(--mono); font-size: 12.5px; }
+.keybox code {
+  background: var(--ground); border: 1px solid var(--line); border-radius: 4px;
+  padding: 1px 5px; font-size: 11.5px; overflow-wrap: anywhere;
+}
+
+/* Money right-aligns, always. A column of amounts you cannot compare at a
+   glance is a column that hides the odd one out — and the odd one out is the
+   whole point of the collision scheme. */
+.tbl td.num, .tbl th.num { text-align: right; font-variant-numeric: tabular-nums; }

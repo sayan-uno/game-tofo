@@ -30,6 +30,7 @@ import { worldsRouter } from "./routes/worlds.js";
 import { voiceRouter } from "./routes/voice.js";
 import { reportsRouter } from "./routes/reports.js";
 import { analyticsRouter } from "./routes/analytics.js";
+import { paymentsRouter } from "./routes/payments.js";
 
 /** JSON only, so the headers that matter are the ones that stop a browser
  *  guessing at content and stop anything being cached on the way. */
@@ -63,6 +64,9 @@ export function mountAdmin(app: Express): void {
   router.use(worldsRouter);
   router.use(reportsRouter);
   router.use(analyticsRouter);
+  // Mounted at the root: it owns /payments/*, and /players/:uid/wallet, which
+  // belongs on the player page rather than under a "payments" noun.
+  router.use(paymentsRouter);
   router.use(historyRouter);
   router.use(chatsRouter);
   router.use(eventsRouter);

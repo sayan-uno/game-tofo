@@ -21,6 +21,7 @@ import { eq, sql } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { botStats, matchPlayers, matches, playerStats } from "../db/schema.js";
 import type { MatchEndReason, Standing } from "../shared/core/protocol.js";
+import { credit } from "./wallet.js";
 
 export interface RecordedRunner {
   uid: string;
@@ -42,6 +43,28 @@ export interface RecordedRunner {
   inputs?: number;
   rejects?: Record<string, number>;
   cadence?: number | null;
+}
+
+/** COINS for one match — the earned half of the wallet.
+ *
+ *  Deliberately shaped like `xpFor` and deliberately NOT the same number as
+ *  `player_stats.coins`, which is a Trackline score component (coins picked up
+ *  on the track) and must never be spendable: a game whose scoring can mint
+ *  currency is a game somebody will find a way to farm.
+ *
+ *  Turning up is paid, because a currency you only earn by winning is one that
+ *  punishes the people already losing. Winning is paid more, and a lobby of
+ *  bots is worth less than a lobby of people — the same `humanShare` the XP
+ *  curve uses, for the same reason. */
+export function coinsFor(standing: Standing, humanShare: number): number {
+  const placed = Math.max(1, standing.placement);
+  // 60 for finishing, +40 for first, tapering to nothing by fourth.
+  const base = 60 + Math.max(0, 40 - (placed - 1) * 14);
+  // Leaving early earns the appearance fee and nothing else — enough that a
+  // dropped connection is not a punishment, little enough that quitting out of
+  // a losing match is not a strategy.
+  const earned = standing.forfeit ? 30 : base;
+  return Math.max(10, Math.round(earned * humanShare));
 }
 
 export interface RecordMatchInput {
@@ -216,6 +239,22 @@ export async function recordMatch(input: RecordMatchInput): Promise<RecordedResu
               updatedAt: sql`now()`,
             },
           });
+
+        // …and the wallet, in this same transaction. A match that could not be
+        // recorded must not have paid out for itself, and one that WAS
+        // recorded must have paid out exactly once — which is the property
+        // `matches.match_key` already gives every other number in this block.
+        await credit(
+          {
+            userId: runner.userId,
+            currency: "coin",
+            delta: coinsFor(s, humanShare),
+            reason: "match",
+            ref: input.matchKey,
+            note: `${input.gameId} · placed ${s.placement}`,
+          },
+          tx
+        );
       }
       return { written: true, xp };
     });

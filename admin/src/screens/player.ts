@@ -13,6 +13,7 @@ import { loadParties, partyRow } from "./party";
 import { renderLog, type LogRow } from "../log";
 import { failure, loadConversation, loadFriends, loadThreads, renderFriends, renderMessages, renderThreads } from "../chats";
 import { duration, esc, num, pill, sanctionLabel, table, toast, when } from "../ui";
+import { mountWallet } from "../wallet";
 
 interface Player {
   uid: string; username: string | null; name: string; email: string; avatarUrl: string | null;
@@ -148,7 +149,7 @@ async function lift(id: string, what: string, reload: () => void): Promise<void>
   }
 }
 
-function render(host: HTMLElement, p: Profile, go: (h: string) => void, reload: () => void): void {
+function render(host: HTMLElement, p: Profile, go: (h: string) => void, reload: () => void, role: string): void {
   const { player: u, stats: s } = p;
   const active = Object.entries(p.activeSanctions);
 
@@ -318,6 +319,8 @@ function render(host: HTMLElement, p: Profile, go: (h: string) => void, reload: 
       p.sanctions.length
     )}
 
+    ${card("Wallet", `<div id="wallet"></div>`)}
+
     ${card(
       "What they did",
       `<div class="pad" style="display:flex;gap:8px;align-items:center">
@@ -453,6 +456,11 @@ function render(host: HTMLElement, p: Profile, go: (h: string) => void, reload: 
     }
   }
 
+  // Their money. Loaded separately so a slow query about payments can never
+  // delay the profile somebody actually came for.
+  const walletEl = host.querySelector<HTMLElement>("#wallet");
+  if (walletEl) mountWallet(walletEl, u.uid, role);
+
   // Their conversations. Admin-and-above only, and reading one is audited —
   // see the note in admin/routes/chats.ts.
   const threadsEl = host.querySelector<HTMLElement>("#threads");
@@ -543,13 +551,13 @@ function render(host: HTMLElement, p: Profile, go: (h: string) => void, reload: 
 /** The one live-refresh timer for a player's log — see the note in render(). */
 let ownTimer = 0;
 
-export function mountPlayer(host: HTMLElement, uid: string, go: (h: string) => void): () => void {
+export function mountPlayer(host: HTMLElement, uid: string, go: (h: string) => void, role = ""): () => void {
   let cancelled = false;
   const load = () => {
     void (async () => {
       try {
         const p = await call<Profile>(`/players/${encodeURIComponent(uid)}`);
-        if (!cancelled) render(host, p, go, load);
+        if (!cancelled) render(host, p, go, load, role);
       } catch (e) {
         if (cancelled) return;
         const why = e instanceof ApiFailure ? e.info.error : "Could not load that player";

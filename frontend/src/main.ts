@@ -105,6 +105,15 @@ async function enterLobby(user: User) {
   const collectionChunk = import("./ui/collection");
   const catalogReady = collectionChunk.then((m) => m.primeCollection()).catch(() => null);
 
+  // The store is its own chunk too, and NOT pulled now: most sessions never
+  // open it. What is fetched immediately is the balance, because the HUD's two
+  // chips are on screen from the first frame and a wallet that says "—" for a
+  // second reads as a wallet that is broken.
+  const storeChunk = () => import("./ui/store");
+  const walletReady = storeChunk()
+    .then((m) => m.primeWallet())
+    .catch(() => null);
+
   // Tapping any teammate's character opens their player card. Everyone sees
   // the snapshot and the way through to the full profile; only the leader also
   // gets the group controls on it.
@@ -218,6 +227,11 @@ async function enterLobby(user: User) {
       void loadProfileUi()
         .then(({ profile }) => profile.openProfile(user, { self: true, ...profileHooks }))
         .catch(() => toast("Couldn't open your profile", true));
+    },
+    onOpenStore: () => {
+      void storeChunk()
+        .then((m) => m.openStore())
+        .catch(() => toast("Couldn't open the store", true));
     },
     onOpenCollection: () => {
       // The page takes the canvas for its own preview scene; restoreLobby hands
@@ -369,6 +383,27 @@ async function enterLobby(user: User) {
   });
 
   // ---- what the platform has to say -------------------------------------
+  // The wallet, both ways: whatever the first read found, and every change
+  // after it. `onBalance` fires immediately with what is already known, so the
+  // chips are correct even if the socket message beat this subscription.
+  void walletReady.then(() =>
+    storeChunk()
+      .then((m) => m.onBalance((b) => hud.setWallet(b)))
+      .catch(() => undefined)
+  );
+  // Gems landing — a bank SMS matched, or an admin credited by hand. Carries
+  // the new balance so nothing has to go and ask for it.
+  socket.on(
+    "wallet:update",
+    (p: { balance?: { coins: number; gems: number; spentPaise: number }; paidSessionId?: string | null } | null) => {
+      const balance = (p ?? {}).balance;
+      if (!balance) return;
+      void storeChunk()
+        .then((m) => m.walletUpdated(balance, (p ?? {}).paidSessionId ?? null))
+        .catch(() => undefined);
+    }
+  );
+
   socket.on("platform:notice", (p: { message?: string; level?: string } | null) => {
     if (p?.message) showNotice(p.message, p.level ?? "info");
   });

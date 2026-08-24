@@ -46,6 +46,21 @@ export function when(iso: string | null | undefined): string {
 export const pill = (text: string, kind: "" | "on" | "off" | "bad" | "warn" = ""): string =>
   `<span class="pill ${kind}">${esc(text)}</span>`;
 
+/** Paise as money. INTEGER arithmetic and Indian digit grouping: every amount
+ *  on this console came from a column of whole paise, and dividing by 100 into
+ *  a float is how ₹100.01 starts rendering as ₹100. */
+export function rupees(paise: number | null | undefined): string {
+  if (typeof paise !== "number" || !Number.isFinite(paise)) return "—";
+  const n = Math.trunc(paise);
+  const sign = n < 0 ? "-" : "";
+  const abs = Math.abs(n);
+  const whole = String(Math.floor(abs / 100));
+  const last3 = whole.slice(-3);
+  const rest = whole.slice(0, -3);
+  const grouped = rest ? `${rest.replace(/\B(?=(\d{2})+(?!\d))/g, ",")},${last3}` : last3;
+  return `${sign}${grouped}.${String(abs % 100).padStart(2, "0")}`;
+}
+
 /** A sanction type as the console words it. The database stores a short key;
  *  nobody should have to remember that "match" means "cannot be matched". */
 export const sanctionLabel = (type: string): string =>
@@ -70,6 +85,9 @@ const ICONS: Record<string, string> = {
   box: '<path d="M21 8 12 3 3 8v8l9 5 9-5Z"/><path d="m3 8 9 5 9-5"/><path d="M12 13v8"/>',
   flag: '<path d="M4 21V4h11l-1 3h7v9h-8l-1-3H4"/>',
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18Z"/>',
+  gem: '<path d="M6 3h12l4 6-10 12L2 9Z"/><path d="M2 9h20"/><path d="m12 21-4-12 2-6"/><path d="m12 21 4-12-2-6"/>',
+  receipt: '<path d="M5 3v18l2.5-2 2.5 2 2-2 2 2 2.5-2L19 21V3Z"/><path d="M9 8h6"/><path d="M9 12h6"/>',
+  wallet: '<path d="M3 7a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M16 12h4"/>',
 };
 export const icon = (name: keyof typeof ICONS | string): string =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] ?? ""}</svg>`;

@@ -1061,3 +1061,210 @@ export const worldMessages = pgTable(
     index("idx_world_msgs_created").on(t.createdAt),
   ]
 );
+
+// ===========================================================================
+// Money (P1) — the wallet, the store, and the self-made UPI gateway
+//
+// Two rules run through every table below, and both exist because this is the
+// only part of the platform where being wrong costs somebody real rupees:
+//
+//   MONEY IS AN INTEGER. Every amount here is in PAISE, never rupees, and
+//   never a float. The collision scheme deliberately produces amounts like
+//   ₹100.01 and ₹100.02, and 100.01 is not representable in binary floating
+//   point — a `numeric` column read back through a driver that hands you a
+//   double is a mismatched payment waiting to happen. 10001 paise is exact.
+//
+//   EVERY CHANGE OF BALANCE IS A ROW. `wallets` is only a cache of the sum in
+//   `wallet_ledger`; nothing may ever move a balance without writing the line
+//   that explains it, in the same transaction. "Where did these gems come
+//   from" has to be answerable a year later, by somebody who was not here.
+// ===========================================================================
+
+/** What a player currently holds. Two currencies, deliberately unalike:
+ *
+ *   COINS are EARNED — matches, events, whatever the platform decides to pay
+ *   for. They can be minted freely because they cost nobody anything.
+ *
+ *   GEMS are BOUGHT, at 1 gem = ₹1. They are somebody's money, so the only
+ *   things that may create them are a verified payment and an admin who has
+ *   put their name to it.
+ *
+ * Kept as a separate table from `player_stats` on purpose. That row is a
+ * career total rebuilt from match history; this one is a balance that must
+ * never be recomputed from anything — note that `player_stats.coins` is a
+ * DIFFERENT number entirely (coins picked up in Trackline, a score component),
+ * and merging them would have made a game's scoring able to mint currency. */
+export const wallets = pgTable("wallets", {
+  userId: uuid("user_id")
+    .primaryKey()
+    .references(() => users.id, { onDelete: "cascade" }),
+  coins: bigint("coins", { mode: "number" }).notNull().default(0),
+  gems: bigint("gems", { mode: "number" }).notNull().default(0),
+  /** Lifetime paise actually received from this player. Not derivable from
+   *  `gems` once they start spending them, and it is the number anybody
+   *  looking at an account wants first. */
+  spentPaise: bigint("spent_paise", { mode: "number" }).notNull().default(0),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** Every movement of every balance, with the reason attached.
+ *
+ *  bigserial rather than uuid because this is append-only and read in time
+ *  order, and a monotonic key is what makes "the next page" cheap. */
+export const walletLedger = pgTable(
+  "wallet_ledger",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    currency: varchar("currency", { length: 8 }).notNull(),
+    /** Signed. Negative is a spend. */
+    delta: bigint("delta", { mode: "number" }).notNull(),
+    /** The balance AFTER this line, so a statement never has to be replayed
+     *  from the beginning to be read. */
+    balanceAfter: bigint("balance_after", { mode: "number" }).notNull(),
+    /** Why: "purchase", "purchase.manual", "admin.grant", "match", "event". */
+    reason: varchar("reason", { length: 40 }).notNull(),
+    /** What it points at — a payment session id, a match key, an admin email.
+     *  Deliberately not a foreign key: this trail must outlive its subjects. */
+    ref: text("ref"),
+    note: text("note"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("wallet_ledger_currency", sql`${t.currency} in ('coin','gem')`),
+    index("idx_ledger_user").on(t.userId, t.id),
+    index("idx_ledger_created").on(t.createdAt),
+  ]
+);
+
+/** One attempt to buy a gem pack: opened when the player presses Buy, and
+ *  closed by a matching bank SMS, by an admin, or by running out of time.
+ *
+ *  `amount_paise` is UNIQUE AMONG LIVE SESSIONS, and that is the entire trick
+ *  the gateway rests on. A bank SMS says how much arrived and nothing about
+ *  who sent it, so the amount has to be the identifier: the second person to
+ *  buy a ₹100 pack while the first is still paying is charged ₹100.01. The
+ *  reservation itself is a Redis key (see services/payments.ts) — Redis is
+ *  where a short-lived exclusive claim belongs, and it is the only thing that
+ *  makes two simultaneous presses safe. This column is the durable record of
+ *  what that claim decided. */
+export const paymentSessions = pgTable(
+  "payment_sessions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /** Snapshotted, so the console can show who this was without a join and
+     *  without a rename rewriting history. */
+    uid: varchar("uid", { length: 12 }).notNull(),
+    username: text("username").notNull(),
+    packId: varchar("pack_id", { length: 24 }).notNull(),
+    /** What they are buying, snapshotted for the same reason. */
+    gems: integer("gems").notNull(),
+    /** The pack's list price. */
+    basePaise: integer("base_paise").notNull(),
+    /** What they were actually asked for: base + the collision offset. */
+    amountPaise: integer("amount_paise").notNull(),
+    /** 0 for the first buyer of this amount, 1 for the next, and so on. */
+    collisionOffset: integer("collision_offset").notNull().default(0),
+    /** pending · paid · approved · expired · cancelled */
+    status: varchar("status", { length: 12 }).notNull().default("pending"),
+    /** The QR stops being offered here — two minutes. */
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    /** …but the amount stays reserved until here, thirty seconds longer, so a
+     *  payment made in the last second of the window and an SMS that took a
+     *  moment to arrive are both still this player's. Releasing at expiry is
+     *  what would hand their money to whoever bought next. */
+    graceUntil: timestamp("grace_until", { withTimezone: true }).notNull(),
+    settledAt: timestamp("settled_at", { withTimezone: true }),
+    /** The log row that paid for it, when one did. */
+    hookId: bigint("hook_id", { mode: "number" }),
+    /** The bank's own reference, which is the only thing both sides share. */
+    upiRef: text("upi_ref"),
+    /** Who approved it by hand, if anybody. */
+    approvedBy: text("approved_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "payment_sessions_status",
+      sql`${t.status} in ('pending','paid','approved','expired','cancelled')`
+    ),
+    index("idx_paysess_created").on(t.createdAt),
+    index("idx_paysess_status").on(t.status, t.graceUntil),
+    index("idx_paysess_amount").on(t.amountPaise, t.graceUntil),
+    index("idx_paysess_user").on(t.userId, t.createdAt),
+    // The bank's reference is the one thing that makes a redelivered SMS
+    // recognisable. Unique so that crediting twice is impossible rather than
+    // merely unlikely — MacroDroid retries, and a retry must not be a gift.
+    uniqueIndex("payment_sessions_upi_ref_key").on(t.upiRef).where(sql`${t.upiRef} is not null`),
+  ]
+);
+
+/** Where the money goes, and the shared secret that lets a phone forward a
+ *  bank SMS in. One row, for ever — `id` is checked to be 1.
+ *
+ *  In Postgres rather than in Redis (where the platform's other switches live)
+ *  and rather than in the environment, for one reason each. Not Redis: a
+ *  flushed cache would silently blank the UPI id, and the first anybody would
+ *  know is a player staring at a QR code that pays nobody. Not the
+ *  environment: changing where the money lands would then be a redeploy, and
+ *  the whole point of the console is that it is not. */
+export const paymentSettings = pgTable(
+  "payment_settings",
+  {
+    id: integer("id").primaryKey().default(1),
+    /** The VPA the QR pays — "someone@bank". */
+    upiId: text("upi_id").notNull().default(""),
+    /** The name UPI apps show the payer before they confirm. */
+    payeeName: text("payee_name").notNull().default("TOFO"),
+    /** The shared secret every webhook call must carry. Empty means the
+     *  webhook refuses EVERYTHING, which is the right thing for a route that
+     *  has not been configured yet — a gateway that fails open is a gateway
+     *  that gives gems away to whoever finds the URL. */
+    hookKey: text("hook_key").notNull().default(""),
+    updatedBy: text("updated_by"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [check("payment_settings_singleton", sql`${t.id} = 1`)]
+);
+
+/** EVERY request that reached the webhook, whatever it was.
+ *
+ *  The route is open to the internet by necessity — a phone forwarding a bank
+ *  SMS cannot hold a session — so this table is also the place that proves
+ *  what an open route was actually sent. Nothing here is ever executed,
+ *  interpreted or interpolated: the body is stored as text, truncated, and
+ *  rendered escaped. A scanner's payload is a row like any other. */
+export const paymentHookLog = pgTable(
+  "payment_hook_log",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    /** verified · unmatched · duplicate · ignored · rejected · malformed */
+    outcome: varchar("outcome", { length: 12 }).notNull(),
+    /** One line an admin can read without opening the row. */
+    detail: text("detail").notNull(),
+    /** The forwarded SMS, as sent. Truncated — a webhook is not a file drop. */
+    body: text("body").notNull(),
+    /** What the parser made of it, null when it made nothing. */
+    amountPaise: integer("amount_paise"),
+    upiRef: text("upi_ref"),
+    sessionId: uuid("session_id"),
+    /** Snapshotted from the session it paid for, so the log reads on its own. */
+    uid: varchar("uid", { length: 12 }),
+    ip: inet("ip"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "payment_hook_log_outcome",
+      sql`${t.outcome} in ('verified','unmatched','duplicate','ignored','rejected','malformed')`
+    ),
+    index("idx_hooklog_created").on(t.createdAt),
+    index("idx_hooklog_outcome").on(t.outcome, t.createdAt),
+    index("idx_hooklog_amount").on(t.amountPaise, t.createdAt),
+  ]
+);
