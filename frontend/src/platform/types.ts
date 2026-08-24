@@ -101,4 +101,27 @@ export interface GameRuntime {
 
 export interface GameModule {
   createRuntime(ctx: GameRuntimeContext): GameRuntime | Promise<GameRuntime>;
+
+  /** ---------------------------------------------------------------------
+   *  What a WATCHER can be told about an input, for the admin console's
+   *  replay studio. All optional: a game that declares none of them is shown
+   *  the tape it has always been shown.
+   *
+   *  On the MODULE rather than on a runtime, because these are facts about the
+   *  game's input encoding rather than about one match — and because the studio
+   *  builds its tape before any runtime exists.
+   * ------------------------------------------------------------------- */
+
+  /** One input kind in words: "flick · 72% power · from −0.42". Null for a kind
+   *  a watcher has no use for. */
+  describeInput?(kind: string): string | null;
+
+  /** How much EFFORT this input carries, 0…1, or null when the kind has no such
+   *  notion. The studio draws the tape's marks at this height, which turns "who
+   *  hits everything as hard as they can" into something visible at a glance
+   *  across a whole match rather than something to be counted by hand. */
+  inputWeight?(kind: string): number | null;
+
+  /** Numbers worth printing beside a player, from their whole input log. */
+  summarise?(inputs: { tick: number; kind: string }[]): { label: string; value: string }[];
 }

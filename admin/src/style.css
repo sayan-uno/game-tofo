@@ -348,13 +348,49 @@ time { cursor: help; }
   position: relative; background: var(--panel); border: 1px solid var(--line);
   border-top: 0; border-radius: 0 0 var(--r) var(--r); padding: 8px 14px 10px;
 }
-.studio .lane { display: flex; align-items: center; gap: var(--gap); height: 17px; }
+.studio .lane { display: flex; align-items: center; gap: var(--gap); height: 22px; }
 .studio .lane .who {
   font-family: var(--mono); font-size: 10px; color: var(--faint);
   width: var(--name-w); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: none;
 }
-.studio .lane .marks { position: relative; flex: 1; height: 11px; border-radius: 2px; background: var(--panel-2); }
-.studio .lane .marks i { position: absolute; top: 2px; width: 2px; height: 7px; background: var(--dim); border-radius: 1px; }
+.studio .lane .marks { position: relative; flex: 1; height: 16px; border-radius: 2px; background: var(--panel-2); }
+/* A mark grows UP from the floor of its lane, because its height is how hard
+   that input was — see GameModule.inputWeight. Anchored at the bottom so a row
+   of them reads as a bar chart of the match rather than as a row of ticks. */
+.studio .lane .marks i {
+  position: absolute;
+  bottom: 2px;
+  width: 2px;
+  height: 7px;
+  background: var(--dim);
+  border-radius: 1px;
+}
+/* An input the game gave no weight to — a thought rather than a shot. */
+.studio .lane .marks i.faint { background: var(--panel-3, rgba(255, 255, 255, 0.16)); width: 1px; }
+
+/* The most recent input, in the game's own words. One line: a feed of every
+   input would bury the chat this console came for. */
+.studio .nowline {
+  min-height: 18px;
+  margin: 6px 0 0;
+  padding: 0 2px;
+  font-size: 12px;
+  color: var(--dim);
+}
+.studio .nowline .at { font-variant-numeric: tabular-nums; opacity: 0.7; margin-right: 6px; }
+.studio .nowline b { color: var(--ink); }
+
+/* How a player played, under their row in the table.
+
+   A game that says nothing about its inputs leaves this empty, and an empty row
+   in a table is a gap a reader has to work out. `:empty` collapses it to
+   nothing at all, so the games that have no summary look exactly as they did. */
+.studio .how:empty { display: none; }
+.studio .howrow td { padding-top: 0 !important; border-top: none !important; }
+.studio .howrow:has(.how:empty) { display: none; }
+.studio .how { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 0 0 6px 22px; }
+.studio .how span { font-size: 11px; color: var(--dim); }
+.studio .how b { display: inline-block; margin-right: 5px; color: var(--ink); font-variant-numeric: tabular-nums; }
 .studio .playhead {
   position: absolute; top: 8px; bottom: 10px; width: 1px; background: var(--crimson);
   pointer-events: none;

@@ -145,8 +145,8 @@ No code changes needed, ever — only those env values.
 
 ## Games
 
-Two so far, and they are deliberately unalike — the platform is only proved
-game-agnostic by a game that does not resemble the first one.
+Three so far, and they are deliberately unalike — the platform is only proved
+game-agnostic by games that do not resemble the first one.
 
 **Trackline** is a four-lane runner: the leader picks it, every member
 downloads its pack into IndexedDB with a progress bar under their name plate,
@@ -174,7 +174,80 @@ measurably, nine games in ten. After a few unanswered questions the server
 declares that seat away: it keeps its turn and keeps playing, but instantly,
 and one tap from its owner — on anyone's turn — gives the clock straight back.
 
-### Two shapes of netcode, both inputs-only
+**Carrom** is the board game with physics, for two (singles) or four
+(doubles). Like Ludo it downloads **nothing** and paints onto its own two
+canvases, and like Ludo the server authors every move. What is new is that a
+move is now a *shot*: a striker slid along a base line, flicked at an angle,
+and nineteen discs sliding, colliding and dropping into four corner pockets.
+
+Everything about it follows from one requirement — **every device has to
+compute the identical slide**. So a flick is not a direction and a speed, it is
+four whole numbers (`t` where the striker was set down, `dx`/`dy` the aim,
+`p` the weight), and the solver turns them into motion using nothing but
+`+ − × ÷` and `Math.sqrt`. Those five are the operations IEEE-754 requires to
+be *correctly rounded*, so they return the same bits on every machine that has
+ever run JavaScript. `Math.sin`, `Math.cos`, `Math.atan2`, `Math.pow` and
+`Math.hypot` are not specified that tightly and appear nowhere in the
+simulation — `check:carrom` greps the source to keep it that way, because one
+of them in the collision loop would put a coin in a pocket on one phone and
+against the wall on another, and there is no way back from that on a platform
+that relays inputs rather than state.
+
+Two more things carrom needed that the other games did not:
+
+- **Substeps.** Inputs are stamped in ticks, but a coin crossing the board at
+  four board-widths a second would tunnel straight through another coin in a
+  sixtieth of a second. Each tick therefore runs six fixed physics steps, and
+  both numbers are rules rather than settings.
+- **A keyframe.** Rewinding for a late input means replaying, and on a physics
+  board that is every collision of every shot so far — tens of milliseconds by
+  the twentieth minute, on the animation thread. So the sim keeps a copy of the
+  board taken at the top of the current turn, when nothing is moving and the
+  copy is twenty discs' worth of numbers, and rewinds to that instead. Measured:
+  0.2 ms instead of 30.
+
+Seating is the other thing worth knowing. Matchmaking seats whole parties
+contiguously, so teams are seats {0,1} and {2,3} — which keeps friends together
+— while the *physical* sides are dealt out so partners face each other and the
+turn alternates as it goes round the board (bottom, right, top, left = seats 0,
+2, 1, 3). The board is always drawn turned so **you** are at the bottom. Who
+*breaks* is drawn from the match seed rather than always being seat 0: opening
+is a measurable disadvantage — you scatter the pack and hand the next player an
+open board — and measured over 150 bot boards, a fixed opener won only 36% of
+them.
+
+**The controls are three things, not one.** Aim is a drag anywhere on the felt
+and the line points from the striker *at your finger*, a full 360° including
+straight back at your own frame. Power is its own bar and keeps its value
+between shots. The striker has its own bar (and can still just be dragged).
+Nothing is sent until **SHOOT**. The first version did all of it with one
+slingshot drag, which could not turn all the way round, could not be adjusted
+without recharging, and could not be stopped once begun — the controls cost the
+board about a seventh of its size and are worth every pixel.
+
+**You can watch the others think.** Most of sitting at a carrom board is
+watching somebody else line a shot up, and at first there was none of it: the
+other three saw a glow on an edge and then, with no warning, a struck striker.
+So while a player composes, their placement, their angle and their weight go out
+as `m…` inputs — four times a second at most, and only when something actually
+changed — and every other table draws them in amber. **Bots do it too**, which
+is not a flourish: a seat that goes from nothing to a struck striker is the one
+tell no roster entry can hide, so a bot decides its shot the moment it starts
+"thinking" and shows a rougher version of it on the way there. It always plays
+the aim it advertised.
+
+An `m…` is deliberately its own kind rather than a stream of requests. The
+server reads a request as *take my shot now*, so an aim sent that way would fire
+the striker the instant a thumb moved.
+
+The opening arrangement is fair by construction: turn it half a turn and it is
+the same board with the colours swapped, so the player opposite is looking at
+exactly what you are, in their own colour. That needs the outer ring to
+alternate one way through its first half and the other way through its second —
+plain alternation is *not* fair on a ring of twelve, and measured over eighteen
+thousand bot boards the difference showed up as a lopsided result.
+
+### Three shapes of netcode, all inputs-only
 
 Only **inputs** cross the wire in either game (`{tick, kind}`), and every client
 and the server run the same seeded simulation over them. What differs is who is
@@ -199,11 +272,39 @@ deterministic *and* readable in advance by any client, since every client is
 told the seed. The round trip costs nothing a player can see, because the dice
 starts tumbling under their thumb and the answer arrives before it stops.
 
+**Carrom** is Ludo's rule again, and for the identical reason: a flick is a
+request (`a<t>,<dx>,<dy>,<p>`) that the simulation ignores, and the server
+checks it against the live board — is that placement on the base line, is
+anything standing on it, does the aim go forward — and writes the shot as its
+own input (`s<t>,<dx>,<dy>,<p>`). The extra thing that buys here is that the
+striker's placement is settled **once**, in shared code, so the line the player
+is shown before they let go is the line the shot actually travels.
+
 Two hooks on `GameServerDefinition` exist for this and are optional, so a game
 that needs neither declares neither: `serverInputs` (inputs the server authors —
 also how a board game's bots react, since they cannot be planned up front the
 way a runner's are) and the `MatchContext` passed to `createSim` (a game whose
 players share one board keeps one state per *match*, not one per runner).
+
+### What a game can tell the replay studio
+
+Three optional hooks on a game's client `GameModule`, all game-agnostic and all
+ignorable — a game that declares none of them gets the tape the console has
+always drawn:
+
+| hook | what the studio does with it |
+| --- | --- |
+| `describeInput(kind)` | a one-line readout under the tape: *0:02 · Bot Kori · flick · 71% power · from centre*, and the tooltip on every mark |
+| `inputWeight(kind)` | the **height** of that input's mark, so a lane becomes a bar chart of how hard somebody played rather than a row of identical ticks |
+| `summarise(inputs)` | numbers under each player's row: *12 shots · 36% avg power · 13% softest · 61% hardest · 0 of 12 full-blooded · 18 aim changes* |
+
+They live on the module rather than on a runtime because they are facts about
+the game's input encoding, not about one match — and because the studio builds
+its tape before any runtime exists. Every call is wrapped: a game that throws in
+one of them loses its tape decorations and nothing else. The studio is evidence
+first.
+
+Carrom declares all three; Trackline and Ludo declare none and are unchanged.
 
 ### Checking a game's simulation
 
@@ -213,11 +314,44 @@ directly, so it can never pass against a stale build:
 ```bash
 npm run check:sim      # Trackline: determinism, solvability, replay parity
 npm run check:ludo     # Ludo: board geometry, rules, authority, liveness, replay parity
+npm run check:carrom   # Carrom: arithmetic, physics, rules, replay parity, fairness
+npm run check:carromui # Carrom's CLIENT, in a real browser (starts its own dev server)
 ```
 
-Run the one for the game you touched before committing. Ludo's also drives its
-own server definition through a whole match, which is what proves the bots, the
-dice and the ranking rather than just the rules.
+Run the one for the game you touched before committing. Ludo's and carrom's
+also drive their own server definitions through a whole match, which is what
+proves the bots, the shots and the ranking rather than just the rules.
+
+There is a live one too, against a running backend, Postgres and Redis:
+
+```bash
+npm run e2e:carrom     # a REAL solo match: bot fill, the flick round trip,
+                       # a forged shot refused, and the archive re-ranked
+```
+
+It starts a real carrom match, lets matchmaking fill it with bots, plays real
+flicks for forty-five seconds — broadcasting its aim before each one, and
+watching the bots broadcast theirs — tries once to forge a shot the way a
+modified client would, then walks out and checks the archived replay: every
+input it was relayed is in the file, the forged one is nowhere in it, and
+re-ranking the file gives the standings the server wrote. It creates its own
+throwaway account and deletes it again, pass or fail.
+
+If another backend is already running, give the one under test its own Redis
+database (`REDIS_URL=<the usual>/4`) — every backend on a keyspace runs a
+matchmaker, and the loser of that race reports nothing at all.
+
+`check:carromui` is the only one that opens a browser. It proves four things
+Node cannot see: that the board is really painted (by the *weight* of a PNG of
+each canvas — a blank canvas passes every selector-based test there is); that
+the controls work, driven with real pointer events (the aim goes all the way
+round, each bar moves only its own thing, aiming is *broadcast* but never
+committed, and nothing is committed until SHOOT); that an opponent's aim
+arriving off the wire changes what is drawn; and that a recorded match played
+back through the **admin console's own path** — spectator runtime, a clock the
+harness owns, dispose → seed → go → deliver — lands on exactly the board the
+server's cold replay produces, bit for bit, both from the top and after a scrub
+into the middle, with no controls anywhere near the watcher.
 
 To look at Ludo without a server, a login or a match, run the frontend dev
 server and open `/ludo-preview.html?w=900&h=460&p=4&turns=140`. It plays a
@@ -225,6 +359,13 @@ mid-game with the real simulation and mounts the real runtime inside the real
 platform DOM, so what you see is the shipped screen; `p=2` shows the two-handed
 board and `w`/`h` check a phone-shaped landscape. Vite builds only
 `index.html`, so it never ships.
+
+Carrom has the same page: `/carrom-preview.html?w=900&h=460&p=4&shots=30`.
+`p=2` is singles, `&aim=1` stages a charged aim line and power ring, and
+`&stop=flight` freezes a frame with the discs still moving — the one frame in
+which a coin is in two places if the painter is wrong; `&fired=1` freezes the
+instant after SHOOT, while the striker is springing and the server has not
+answered. `&replay=1` is what `check:carromui` drives.
 
 Asset packs are built and published separately from the code:
 

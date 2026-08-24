@@ -1,0 +1,554 @@
+/* Carrom's in-match chrome. Scoped by .cr-* so nothing here reaches another
+   game or the lobby, and shipped inside the game's own chunk.
+
+   The board itself is canvas; everything in this file is the text around it —
+   the two sides' cards, the coin score, the line that says what just happened
+   and the chat wheel. Keeping them as elements is what lets a fourteen-second
+   turn pass without a single repaint: the turn clock below is one CSS
+   animation, not a drawn arc. */
+
+/* `isolation: isolate` matters more than it looks. Without it every z-index in
+   this file competes with the PLATFORM's overlays — the "Preparing match…"
+   curtain, the 3·2·1 countdown, the results card — which are siblings of the
+   HUD root with no z-index of their own and so lose to any positive one here.
+   Isolating keeps carrom's layering entirely inside carrom. */
+.cr-root {
+  position: absolute;
+  inset: 0;
+  isolation: isolate;
+  overflow: hidden;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: #e8ecf8;
+  /* The rail either side of the square board, set from the layout so the DOM
+     can sit beside the canvas rather than on top of it. */
+  --cr-rail: 110px;
+  --cr-ctrl: 52px;
+}
+
+.cr-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  /* The board is a drag surface, so the browser must not treat a drag on it as
+     a scroll or a pinch — the same rule the platform puts on its own canvas.
+     Without it the flick gesture is stolen by the page on every phone. */
+  touch-action: none;
+}
+.cr-board {
+  z-index: 0;
+}
+.cr-live {
+  z-index: 1;
+}
+
+/* ---------- the two sides' cards ----------
+
+   Yours on the left, theirs on the right. On a doubles board that is the whole
+   point of the layout: a player has to know at a glance whose shot helps them,
+   and reading it off four names in one column does not happen at speed. */
+
+.cr-players {
+  position: absolute;
+  top: calc(50% - var(--cr-ctrl) / 2);
+  transform: translateY(-50%);
+  width: calc(var(--cr-rail) - 10px);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  z-index: 2;
+  pointer-events: none;
+}
+.cr-ours {
+  left: max(5px, env(safe-area-inset-left));
+}
+.cr-theirs {
+  right: max(5px, env(safe-area-inset-right));
+}
+
+.cr-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px 8px;
+  border-radius: 10px;
+  background: rgba(12, 8, 11, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(6px);
+  transition:
+    border-color 160ms ease,
+    background 160ms ease;
+}
+.cr-card.turn {
+  border-color: var(--cr-c);
+  background: rgba(12, 8, 11, 0.88);
+  box-shadow: 0 0 0 1px var(--cr-c, #e5182e) inset;
+}
+.cr-card.gone {
+  opacity: 0.45;
+}
+/* Not waiting for this one any more. Dimmed rather than struck through: they
+   are still playing, and one touch brings them straight back. */
+.cr-card.away {
+  opacity: 0.6;
+}
+.cr-card.away .cr-name::after {
+  content: " · away";
+  font-weight: 400;
+  color: rgba(232, 236, 248, 0.5);
+}
+.cr-card.queen .cr-sunk::after {
+  content: " 👑";
+}
+
+/* The coin swatch: an actual disc, in the colour that player is shooting. */
+.cr-dot {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--cr-c);
+  box-shadow:
+    0 0 0 2px rgba(0, 0, 0, 0.5),
+    inset 0 1px 2px rgba(255, 255, 255, 0.5);
+}
+.cr-who {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.15;
+}
+.cr-name {
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cr-sunk {
+  font-size: 10.5px;
+  color: rgba(232, 236, 248, 0.55);
+  letter-spacing: 0.02em;
+}
+.cr-sunk::before {
+  content: "sank ";
+}
+
+/* The turn clock. One animation, started when the turn starts, then left to
+   run — no per-frame work anywhere. */
+.cr-timer {
+  grid-column: 1 / -1;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+.cr-timer i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--cr-c);
+  transform-origin: left center;
+  transform: scaleX(0);
+}
+@keyframes cr-timer {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+
+/* Above its own card, never beside it: the rail is exactly as wide as a card,
+   so a bubble to the side would be a bubble over the board. */
+.cr-bubble {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 4px);
+  padding: 5px 9px;
+  border-radius: 10px 10px 2px 10px;
+  background: #f2f5ff;
+  color: #12090d;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  opacity: 0;
+  transform: translateY(4px) scale(0.9);
+  transition:
+    opacity 140ms ease,
+    transform 140ms ease;
+  pointer-events: none;
+}
+.cr-bubble.on {
+  opacity: 1;
+  transform: none;
+}
+
+/* ---------- the board score ----------
+
+   Nine coins a side, and which of them is yours. Along the top, clear of the
+   felt: the corners are pockets and a number over one of them would sit on the
+   very thing somebody is aiming at. */
+.cr-score {
+  position: absolute;
+  top: max(4px, env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: rgba(12, 8, 11, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 12.5px;
+  line-height: 1;
+  z-index: 3;
+  pointer-events: none;
+  backdrop-filter: blur(6px);
+}
+.cr-side {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  opacity: 0.62;
+}
+.cr-side.mine {
+  opacity: 1;
+}
+.cr-side.mine .cr-n {
+  color: #fff;
+}
+.cr-chip {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--cr-c);
+  box-shadow:
+    0 0 0 1.5px rgba(0, 0, 0, 0.55),
+    inset 0 1px 2px rgba(255, 255, 255, 0.45);
+}
+.cr-n {
+  font-weight: 800;
+  font-size: 14px;
+}
+.cr-of {
+  color: rgba(232, 236, 248, 0.45);
+  font-size: 11px;
+}
+.cr-vs {
+  color: rgba(232, 236, 248, 0.35);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+/* ---------- the line that says what is happening ----------
+
+   In the rail, under the player's own cards — the one place on this screen that
+   is neither felt nor a button. It has been at the bottom (now the controls)
+   and at the top (where it and the hint covered the far edge of the board and
+   whatever was sitting on it). */
+.cr-banner {
+  padding: 6px 9px;
+  border-radius: 10px;
+  background: rgba(12, 8, 11, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.25;
+  text-align: center;
+  z-index: 3;
+  pointer-events: none;
+  backdrop-filter: blur(6px);
+}
+.cr-banner.hidden {
+  display: none;
+}
+.cr-banner.good {
+  border-color: rgba(255, 255, 255, 0.4);
+}
+.cr-banner.bad {
+  border-color: #ff5566;
+  color: #ffd7dc;
+}
+
+/* The control hint, under the banner and only until the first shot. */
+.cr-hint {
+  padding: 5px 9px;
+  border-radius: 10px;
+  background: rgba(12, 8, 11, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  color: rgba(232, 236, 248, 0.7);
+  font-size: 10.5px;
+  line-height: 1.35;
+  text-align: center;
+  z-index: 3;
+  pointer-events: none;
+}
+.cr-hint.hidden {
+  display: none;
+}
+
+/* ---------- quick chat (bottom right) ---------- */
+
+.cr-quick-btn {
+  position: absolute;
+  right: max(8px, env(safe-area-inset-right));
+  bottom: calc(max(8px, env(safe-area-inset-bottom)) + var(--cr-ctrl));
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(12, 8, 11, 0.7);
+  color: #e8ecf8;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  z-index: 4;
+  backdrop-filter: blur(6px);
+}
+.cr-quick-btn:active {
+  transform: scale(0.94);
+}
+.cr-quick-btn.on {
+  border-color: #e5182e;
+}
+
+.cr-wheel {
+  position: absolute;
+  right: max(8px, env(safe-area-inset-right));
+  bottom: calc(max(8px, env(safe-area-inset-bottom)) + var(--cr-ctrl) + 48px);
+  width: min(190px, 44vw);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 7px;
+  border-radius: 12px;
+  background: rgba(12, 8, 11, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  z-index: 4;
+  backdrop-filter: blur(10px);
+}
+.cr-wheel.hidden {
+  display: none;
+}
+.cr-wheel > button {
+  padding: 6px 9px;
+  border-radius: 8px;
+  border: none;
+  background: rgba(255, 255, 255, 0.06);
+  color: #e8ecf8;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.cr-wheel > button:active {
+  background: rgba(229, 24, 46, 0.5);
+}
+.cr-emotes {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 3px;
+  margin-top: 2px;
+}
+.cr-emotes button {
+  padding: 5px 0;
+  border-radius: 7px;
+  border: none;
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.cr-emotes button:active {
+  background: rgba(229, 24, 46, 0.5);
+}
+
+/* Dark until they speak — see the Trackline board for why "mic on" is not
+   worth drawing. */
+.cr-mic {
+  font-style: normal;
+  font-size: 11px;
+  margin: 0 4px;
+  opacity: 0;
+  transition: opacity 0.08s linear;
+}
+.cr-mic.live {
+  opacity: 1;
+  text-shadow: 0 0 8px rgba(120, 220, 160, 0.8);
+}
+
+/* On a short screen the cards have to give way before the board does. */
+@media (max-height: 380px) {
+  .cr-name {
+    font-size: 11px;
+  }
+  .cr-card {
+    padding: 4px 6px 6px;
+  }
+  .cr-banner {
+    font-size: 12px;
+    padding: 5px 11px;
+  }
+  .cr-hint {
+    display: none;
+  }
+  .cr-bar-label {
+    display: none;
+  }
+  .cr-shoot {
+    min-width: 84px;
+    padding: 0 12px;
+    font-size: 13px;
+  }
+}
+
+/* ---------- the control strip ----------
+
+   Three controls in a row along the bottom, and they are the answer to the one
+   complaint this screen actually earned: one gesture cannot carry an aim, a
+   weight and a decision at the same time. Each of these does exactly one thing,
+   all three are live together, and nothing is sent until SHOOT.
+
+   Sized from --cr-ctrl, which the LAYOUT sets — the same number that decided
+   how much room was left for the board, so the two can never disagree about
+   who owns the bottom of the screen. */
+.cr-strip {
+  position: absolute;
+  left: max(6px, env(safe-area-inset-left));
+  right: max(6px, env(safe-area-inset-right));
+  bottom: max(4px, env(safe-area-inset-bottom));
+  height: calc(var(--cr-ctrl) - 8px);
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  z-index: 4;
+}
+/* A replay. Not dimmed — GONE: a watcher who can see a SHOOT button will press
+   it, and a replay somebody can appear to steer is not a replay. */
+.cr-strip.watch {
+  display: none;
+}
+/* Not this player's turn: everything greys out together. A live SHOOT button
+   that does nothing is worse than one that is plainly off. */
+.cr-strip.off {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.cr-bar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px 0 10px;
+  border-radius: 12px;
+  background: rgba(12, 8, 11, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(6px);
+  /* A bar is dragged, so the browser must not read the drag as a scroll. */
+  touch-action: none;
+  cursor: pointer;
+  user-select: none;
+}
+.cr-power {
+  flex: 0 1 28%;
+}
+.cr-slide {
+  flex: 1 1 auto;
+}
+
+.cr-bar-label {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: rgba(232, 236, 248, 0.5);
+}
+/* The track is padded away from the ends of its box so the knob — which is
+   centred on the value — never hangs outside the control it belongs to. */
+.cr-bar-track {
+  position: relative;
+  flex: 1 1 auto;
+  height: 10px;
+  margin: 0 9px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.5);
+}
+.cr-bar-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 55%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #7c0d1a, #e5182e);
+}
+/* The striker bar shows a POSITION, not an amount, so it has no fill — a bar
+   that is 70% full reads as "70% of something" and there is no something. A
+   notch marks the middle of the base line instead. */
+.cr-slide .cr-bar-fill {
+  display: none;
+}
+.cr-slide .cr-bar-track::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 2px;
+  height: 12px;
+  margin: -6px 0 0 -1px;
+  border-radius: 1px;
+  background: rgba(255, 255, 255, 0.25);
+}
+.cr-bar-knob {
+  position: absolute;
+  top: 50%;
+  left: 55%;
+  width: 18px;
+  height: 18px;
+  margin: -9px 0 0 -9px;
+  border-radius: 50%;
+  background: #f4f7ff;
+  box-shadow:
+    0 0 0 2px rgba(12, 8, 11, 0.85),
+    0 2px 6px rgba(0, 0, 0, 0.6);
+}
+.cr-power .cr-bar-knob {
+  background: #ffd7dc;
+}
+
+.cr-shoot {
+  flex: 0 0 auto;
+  min-width: 108px;
+  padding: 0 18px;
+  border-radius: 12px;
+  border: 1px solid rgba(229, 24, 46, 0.55);
+  background: linear-gradient(180deg, #e5182e, #8d0b1a);
+  color: #fff;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.cr-shoot:disabled {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: rgba(232, 236, 248, 0.4);
+  cursor: default;
+}
+.cr-shoot.ready {
+  box-shadow: 0 0 18px rgba(229, 24, 46, 0.45);
+}
+.cr-shoot:active:not(:disabled) {
+  transform: scale(0.96);
+}

@@ -211,6 +211,7 @@ export function mountStudio(host: HTMLElement, matchKey: string, go: (h: string)
     const canvas = host.querySelector<HTMLCanvasElement>("#studio-canvas")!;
     const hudRoot = host.querySelector<HTMLElement>("#studio-hud")!;
     const status = host.querySelector<HTMLElement>("#status")!;
+    const nowline = host.querySelector<HTMLElement>("#nowline")!;
     const scrub = host.querySelector<HTMLInputElement>("#scrub")!;
     const playBtn = host.querySelector<HTMLButtonElement>("#play")!;
     const clock = host.querySelector<HTMLElement>("#clock")!;
@@ -291,6 +292,8 @@ export function mountStudio(host: HTMLElement, matchKey: string, go: (h: string)
       return;
     }
     let pack: { assets: GameRuntimeContext["assets"]; module: GameModule };
+    /** The game's own words for one of its inputs, once its module is loaded. */
+    let describe: ((kind: string) => string | null) | undefined;
     let babylon: GameRuntimeContext["engine"];
     try {
       status.textContent = data.game.packBytes > 0 ? "Downloading the game's files…" : "Loading the game…";
@@ -307,6 +310,18 @@ export function mountStudio(host: HTMLElement, matchKey: string, go: (h: string)
       const engine = createEngine(canvas);
       engineHandle = engine;
       babylon = engine;
+      // ---- what THIS game can tell a watcher ---------------------------
+      //
+      // Three optional hooks (see GameModule). A game that declares none of
+      // them gets the tape it always got. Wrapped, and deliberately: they are a
+      // game's COSMETICS, and a game that throws in one of them must not be
+      // able to stop a replay from playing. The studio is evidence first.
+      describe = pack.module.describeInput?.bind(pack.module);
+      try {
+        applyGameHooks(host, pack.module, flat, roster, file.endTick, rate);
+      } catch (err) {
+        console.warn("[studio] this game's input descriptions failed; the plain tape stands", err);
+      }
       // NOTE: the engine's own render loop is deliberately NOT started. The
       // studio drives render() from its single frame loop instead — see
       // frame() for why that ordering is not optional.
@@ -368,6 +383,7 @@ export function mountStudio(host: HTMLElement, matchKey: string, go: (h: string)
       next.go(T0);
       seeking = false;
       status.textContent = "";
+      nowline.innerHTML = "";
       drawFeed();
     }
 
@@ -391,6 +407,20 @@ export function mountStudio(host: HTMLElement, matchKey: string, go: (h: string)
       while (cursor < flat.length && flat[cursor].tick <= horizon) {
         const i = flat[cursor++];
         runtime.onRemoteInput({ uid: i.uid, tick: i.tick, kind: i.kind });
+        // ONE LINE, not a feed. Every input described would bury the chat this
+        // console came for; the most recent one, under the tape, answers "what
+        // just happened" without pushing anything else off the screen.
+        let said: string | null = null;
+        try {
+          said = describe?.(i.kind) ?? null;
+        } catch {
+          said = null;
+        }
+        if (said) {
+          nowline.innerHTML = `<span class="at">${esc(fmtTick(i.tick, rate))}</span> <b>${esc(
+            nameOfUid.get(i.uid) ?? i.uid
+          )}</b> ${esc(said)}`;
+        }
       }
       while (quickCursor < quick.length && quick[quickCursor].tick <= at) {
         const q = quick[quickCursor++];
@@ -647,6 +677,51 @@ async function holdReplay(matchKey: string, tier: string): Promise<void> {
   if (answer) toast(keeping ? "Kept — retention will not sweep it." : "Released back to normal retention.");
 }
 
+/** Redraw the tape and the per-player lines using whatever the GAME is willing
+ *  to say about its own inputs.
+ *
+ *  A mark's HEIGHT is the effort the game reports for that input, so a lane
+ *  becomes a bar chart of how somebody played rather than a row of identical
+ *  ticks — which is what makes "who winds it right up every time" answerable at
+ *  a glance. An input the game gives no weight to still gets a mark, a short
+ *  faint one: it happened, and a tape that hid it would be lying by omission. */
+function applyGameHooks(
+  host: HTMLElement,
+  module: GameModule,
+  flat: { tick: number; uid: string; seat: number; kind: string }[],
+  roster: ReplayRoster[],
+  endTick: number,
+  rate: number
+): void {
+  const weigh = module.inputWeight;
+  if (weigh) {
+    host.querySelectorAll<HTMLElement>(".marks[data-seat]").forEach((lane) => {
+      const seat = Number(lane.dataset.seat);
+      lane.innerHTML = flat
+        .filter((i) => i.seat === seat)
+        .map((i) => {
+          const w = weigh(i.kind);
+          const h = w === null ? 0.18 : 0.25 + 0.75 * Math.max(0, Math.min(1, w));
+          const left = ((i.tick / Math.max(1, endTick)) * 100).toFixed(3);
+          const title = module.describeInput?.(i.kind) ?? i.kind;
+          const cls = w === null ? "faint" : "";
+          return `<i class="${cls}" style="left:${left}%;height:${(h * 100).toFixed(0)}%" title="${esc(
+            fmtTick(i.tick, rate)
+          )} · ${esc(title)}"></i>`;
+        })
+        .join("");
+    });
+  }
+  const summarise = module.summarise;
+  if (!summarise) return;
+  for (const r of roster) {
+    const box = host.querySelector<HTMLElement>(`.how[data-how="${CSS.escape(r.uid)}"]`);
+    if (!box) continue;
+    const stats = summarise(flat.filter((i) => i.uid === r.uid).map((i) => ({ tick: i.tick, kind: i.kind })));
+    box.innerHTML = stats.map((x) => `<span><b>${esc(x.value)}</b>${esc(x.label)}</span>`).join("");
+  }
+}
+
 const fmtTick = (tick: number, rate: number): string => {
   const s = Math.floor(tick / rate);
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
@@ -661,9 +736,13 @@ function shell(file: ReplayFile, data: Answer, roster: ReplayRoster[]): string {
         .filter((t) => t >= 0)
         .map((t) => `<i style="left:${((t / Math.max(1, file.endTick)) * 100).toFixed(3)}%"></i>`)
         .join("");
+      // `data-seat` so these can be redrawn once the GAME's module is in hand:
+      // a game that can say how much effort each input carried gets a tape of
+      // BARS rather than one of ticks, and "who hits everything as hard as they
+      // can" stops being something a viewer has to count by hand.
       return `<div class="lane"><span class="who"><i class="mic" data-mic="${esc(r.uid)}">🎙</i>${esc(
         r.name
-      )}</span><div class="marks">${marks}</div></div>`;
+      )}</span><div class="marks" data-seat="${r.seat}">${marks}</div></div>`;
     })
     .join("");
 
@@ -686,6 +765,7 @@ function shell(file: ReplayFile, data: Answer, roster: ReplayRoster[]): string {
       </div>
 
       <div class="tape"><div id="talk"></div>${tape}<div class="playhead" data-tickmark></div></div>
+      <div class="nowline" id="nowline"></div>
 
       <div id="mixer" class="mixerslot">${
         data.voice && data.voice.length > 0
@@ -708,7 +788,8 @@ function shell(file: ReplayFile, data: Answer, roster: ReplayRoster[]): string {
                   <td class="mono">${st ? (st.placement === 1 ? "<strong>1st</strong>" : st.placement) : "—"}</td>
                   <td class="mono">${num(st?.score)}</td>
                   <td><button class="btn ghost" data-focus="${esc(r.uid)}">Watch</button></td>
-                </tr>`;
+                </tr>
+                <tr class="howrow"><td colspan="4"><div class="how" data-how="${esc(r.uid)}"></div></td></tr>`;
               }),
               "Nobody was at this table."
             )}

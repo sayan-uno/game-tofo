@@ -41,6 +41,8 @@ const GAME = [
   "how do people run that fast", "i crashed on the first turn lol",
   "6 6 6 and still lost", "my luck is gone", "one more one more",
   "best i got was 2nd", "someone carry me", "im ranking up today for real",
+  "carrom doubles anyone", "i keep pocketing the striker lol", "queen is mine",
+  "carrom or ludo", "my cut shots are terrible", "9-0 carrom lets go",
 ];
 
 /** Reactions — the bulk of any real chat. */
@@ -55,6 +57,7 @@ const ASK = [
   "what rank are you", "anyone else lagging", "how do i change my character",
   "where is everyone", "what time is it there", "anyone here plays daily",
   "is trackline down for anyone", "how long you been playing",
+  "anyone up for carrom doubles",
   "whats your best score", "anyone wanna duo", "squad?", "who's the best here",
 ];
 
@@ -70,6 +73,7 @@ const REPLIES: { when: RegExp; say: string[] }[] = [
   { when: /\b(duo|squad|team|party|join)\b/i, say: ["im in", "me", "count me", "sure", "gimme a sec", "yes pls"] },
   { when: /\b(ludo)\b/i, say: ["ludo gang", "i hate ludo lol", "ludo is luck", "one ludo then", "ludo carry me"] },
   { when: /\b(trackline|run|running)\b/i, say: ["trackline is the best", "i keep crashing", "im ok at it", "lets go trackline"] },
+  { when: /\b(carrom|striker|queen)\b/i, say: ["carrom gang", "im decent at carrom", "one carrom then", "i always miss the cut", "cover the queen first"] },
   { when: /\b(win|won|first)\b/i, say: ["nice", "congrats", "gz", "let's go", "sheesh"] },
   { when: /\b(lost|lose|last)\b/i, say: ["unlucky", "next one", "same lol", "happens", "rematch"] },
 ];

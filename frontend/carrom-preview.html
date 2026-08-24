@@ -1,0 +1,329 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Carrom runtime preview</title>
+    <!--
+      A DEV-ONLY page that mounts the REAL CarromRuntime inside the REAL
+      platform DOM (#ui-root > .match-layer > .match-hud-root, plus the
+      platform's own mic/Leave controls), so the whole screen can be looked at —
+      board, coins, the two sides' cards, the score, the banner, the aim line
+      and the power ring — without a server, a login or a match.
+
+      Vite builds only index.html, so this never ships.
+
+      It plays a plausible mid-board offline first, driving the REAL simulation
+      with a miniature of the server's own ghost-ball policy, so what you are
+      looking at is a board a real match could have produced.
+
+      Run `npm --prefix frontend run dev` and open
+        /carrom-preview.html?w=900&h=460&p=4&shots=30
+      `p=2` shows singles; w/h check a phone-shaped landscape; `shots` is how
+      far into the board to start. `&stop=flight` freezes mid-shot with discs
+      moving; `&aim=1` shows a charged aim line as if a thumb were on the glass.
+
+      `&fired=1` freezes the instant after a flick, while the striker is
+      springing and the server has not answered yet. `&watch=1` shows what the
+      OTHER three see while somebody is lining a shot up.
+
+      `&replay=1` runs the ADMIN CONSOLE'S path instead: a whole board played
+      out, then handed to a spectator runtime driven by a clock this page owns,
+      exactly the way admin/src/screens/studio.ts drives it — dispose, seed the
+      inputs up to the playhead, go, deliver the rest as the clock passes them.
+      It reports whether the board the runtime ends on is BIT FOR BIT the board
+      the server's own replay produces, from tick zero and from a seek into the
+      middle. That is the check the studio itself cannot make: the console can
+      only tell you the picture moved, not that it moved correctly.
+    -->
+  </head>
+  <body>
+    <div id="ui-root">
+      <div class="match-layer">
+        <div class="match-hud-root" id="hud"></div>
+        <div class="match-controls">
+          <button class="mx-mic">🎙 On</button><button class="mx-leave">Leave</button>
+        </div>
+      </div>
+    </div>
+    <script type="module">
+      import "/src/style.css";
+      import "/src/games/carrom/carrom.css";
+      import { CarromRuntime } from "/src/games/carrom/runtime.ts";
+      import {
+        CarromSim, COIN_COUNT, COIN_R, POCKETS, STRIKER_R, TICK_MS, TICK_RATE,
+        aimKind, awaitingServer, baseSpot, coinTeam, publicRules, replay, shotKind, sideOf,
+        slotFree, teamOf, toLocal, toWorld,
+      } from "/src/shared/games/carrom/index.ts";
+
+      const q = new URLSearchParams(location.search);
+      const W = Number(q.get("w") || 900);
+      const H = Number(q.get("h") || 460);
+      const players = Number(q.get("p") || 4);
+      const shots = Number(q.get("shots") || 30);
+      const stop = q.get("stop") || "";
+      const showAim = q.get("aim") === "1";
+      // Somebody ELSE mid-shot: the thing the other three players see while a
+      // player is deciding, which is what `m…` exists to carry.
+      const watch = q.get("watch") === "1";
+      document.body.style.width = W + "px";
+      document.body.style.height = H + "px";
+      document.body.style.margin = "0";
+      const layer = document.querySelector(".match-layer");
+      layer.style.position = "absolute";
+      layer.style.inset = "0";
+
+      const SEED = 20260824;
+      const DURATION = 30 * 60 * TICK_RATE;
+      const names = ["You", "Nova", "Rift92", "Kaze"];
+      const roster = names.slice(0, players).map((name, i) => ({
+        uid: `u${i}`, name, character: "c", weapon: null,
+      }));
+
+      // A pinned random source, so the same URL is the same board every time.
+      let rnd = 7;
+      const rand = () => ((rnd = (rnd * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+
+      // A ghost-ball chooser, in miniature. The real one lives on the SERVER
+      // (backend/src/games/carrom/bot.ts) and this page cannot reach across the
+      // two deployables to import it — that separation is a platform rule, not
+      // an inconvenience. Twenty lines of the same idea is enough to produce a
+      // board that looks like a real one.
+      function pickShot(s, seat) {
+        const side = sideOf(seat, s.players);
+        const team = teamOf(seat, s.players);
+        let best = null;
+        let bestValue = -Infinity;
+        for (let coin = 0; coin < COIN_COUNT; coin++) {
+          if (!s.alive[coin] || coinTeam(s.kind[coin]) !== team) continue;
+          for (const pk of POCKETS) {
+            const ux = s.x[coin] - pk.x, uy = s.y[coin] - pk.y;
+            const ul = Math.hypot(ux, uy) || 1;
+            const gx = s.x[coin] + (ux / ul) * (COIN_R + STRIKER_R);
+            const gy = s.y[coin] + (uy / ul) * (COIN_R + STRIKER_R);
+            for (let k = 0; k < 17; k++) {
+              const t = (k / 16) * 2 - 1;
+              if (!slotFree(side, t, s.x, s.y, s.alive)) continue;
+              const local = baseSpot(t);
+              const from = toWorld(side, local.x, local.y);
+              const ax = gx - from.x, ay = gy - from.y;
+              const al = Math.hypot(ax, ay) || 1;
+              const aim = toLocal(side, ax / al, ay / al);
+              if (aim.y <= 0.05) continue;
+              const cut = (ax / al) * (-ux / ul) + (ay / al) * (-uy / ul);
+              if (cut < 0.4) continue;
+              const value = cut * 140 - al * 9 - ul * 16 + rand() * 20;
+              if (value <= bestValue) continue;
+              bestValue = value;
+              best = { t, aim, power: Math.min(1, 0.28 + (al + ul) * 0.22) };
+            }
+          }
+        }
+        if (!best) return { t: 0, dx: Math.round((rand() * 2 - 1) * 400), dy: 1000, p: 520 };
+        return {
+          t: Math.round(best.t * 1000),
+          dx: Math.round(best.aim.x * 1000),
+          dy: Math.max(1, Math.round(best.aim.y * 1000)),
+          p: Math.round(best.power * 1000),
+        };
+      }
+
+      // Play a plausible opening offline, exactly the way the server does, so
+      // the log handed to the runtime is one a real match could have produced.
+      const mirror = new CarromSim(SEED, players, DURATION);
+      const log = [];
+      let answered = "";
+      let tick = 0;
+      let holdFor = 0;
+      for (tick = 1; tick < DURATION; tick++) {
+        mirror.advanceTo(tick);
+        const s = mirror.state;
+        if (s.over) break;
+        // ?stop=flight freezes with the discs still moving — the one frame
+        // where a coin is in two places if the painter gets it wrong.
+        if (stop === "flight" && s.phase === "shoot" && s.shots > 3 && tick - s.since > 12) { holdFor = 0; break; }
+        if (stop !== "flight" && s.shots >= shots && s.phase === "aim" && (watch ? s.turn !== 0 : s.turn === 0)) break;
+        if (!awaitingServer(s)) continue;
+        const key = `${s.turn}:${s.since}`;
+        if (answered === key || tick - s.since < 6) continue;
+        answered = key;
+        const p = pickShot(s, s.turn);
+        // The working first, then the shot — the shape a real log has, so the
+        // replay path is exercised on aims as well as on flicks.
+        log.push({ uid: `u${s.turn}`, tick: Math.max(1, tick - 2), kind: aimKind(p.t, p.dx + 90, p.dy, Math.max(0, p.p - 70)) });
+        log.push({ uid: `u${s.turn}`, tick: Math.max(1, tick - 1), kind: aimKind(p.t, p.dx, p.dy, p.p) });
+        const input = { uid: `u${s.turn}`, tick: tick + 4, kind: shotKind(p.t, p.dx, p.dy, p.p) };
+        log.push(input);
+        mirror.addInput({ tick: input.tick, seat: s.turn, kind: input.kind });
+      }
+
+      /** Everything about a board, at full precision. The same shape the
+       *  carrom self-check uses, for the same reason: a rounded comparison
+       *  lets two boards that have already parted company look identical. */
+      const print = (st) => [
+        st.tick, st.phase, st.turn, st.since, st.shots, st.queenBy, st.queenPending,
+        st.winner, st.decided ? 1 : 0, st.over ? 1 : 0, st.coinsBy.join(","),
+        st.fouls.join(","), st.alive.join(""), st.x.join(","), st.y.join(","),
+        st.vx.join(","), st.vy.join(","),
+      ].join("|");
+
+      // ---- the admin console's path ---------------------------------------
+      if (q.get("replay") === "1") {
+        // The board is already played (above); keep going to the end of it.
+        for (; tick < DURATION; tick++) {
+          mirror.advanceTo(tick);
+          const s = mirror.state;
+          if (s.over) break;
+          if (!awaitingServer(s)) continue;
+          const key = `${s.turn}:${s.since}`;
+          if (answered === key || tick - s.since < 6) continue;
+          answered = key;
+          const p = pickShot(s, s.turn);
+          const input = { uid: `u${s.turn}`, tick: tick + 4, kind: shotKind(p.t, p.dx, p.dy, p.p) };
+          log.push(input);
+          mirror.addInput({ tick: input.tick, seat: s.turn, kind: input.kind });
+        }
+        const endTick = Math.min(tick, DURATION);
+        const T0 = 1_700_000_000_000;
+        const LEAD = 20; // studio.ts
+        let vTime = 0;
+        const base = {
+          engine: null, canvas: null, assets: null,
+          roster, seed: SEED, rules: { tickRate: TICK_RATE, durationTicks: DURATION },
+          sendInput: () => {}, sendQuick: () => {}, requestLeave: () => {},
+          hudRoot: document.getElementById("hud"),
+          now: () => T0 + vTime,
+          spectator: true,
+        };
+        const flat = log.slice().sort((a, b) => a.tick - b.tick);
+        let watched = null;
+
+        // A seek, exactly as the studio does one: dispose, rebuild, seed
+        // everything at or before the playhead, then start the clock there.
+        async function seekTo(at) {
+          try { watched?.dispose(); } catch { /* ignore */ }
+          base.hudRoot.replaceChildren();
+          vTime = (at * 1000) / TICK_RATE;
+          const rt2 = new CarromRuntime({ ...base, you: "u0" });
+          await rt2.prepare();
+          const before = flat.filter((i) => i.tick <= at);
+          rt2.seedInputs(before);
+          rt2.go(T0);
+          watched = rt2;
+          return before.length;
+        }
+
+        // 1. from the top, delivered as the clock passes each input.
+        let cursor = await seekTo(0);
+        for (let t = 0; t <= endTick; t += 30) {
+          vTime = (t * 1000) / TICK_RATE;
+          const horizon = t + LEAD;
+          while (cursor < flat.length && flat[cursor].tick <= horizon) watched.onRemoteInput(flat[cursor++]);
+          watched.render();
+        }
+        vTime = (endTick * 1000) / TICK_RATE;
+        while (cursor < flat.length) watched.onRemoteInput(flat[cursor++]);
+        watched.render();
+        const fromTop = print(watched.sim.state);
+
+        // 2. a seek into the middle, which is the studio's scrub.
+        const mid = Math.floor(endTick * 0.55);
+        await seekTo(mid);
+        watched.render();
+        const fromSeek = print(watched.sim.state);
+        // Compare at the tick the runtime actually LANDED on. The studio seeks
+        // by setting a virtual millisecond clock and letting the runtime divide
+        // it back into ticks, and that round trip through 1000/60 can land a
+        // tick either side of the one asked for. Demanding the requested tick
+        // would be testing the arithmetic of the harness rather than the
+        // fidelity of the replay.
+        const seekTick = watched.sim.state.tick;
+
+        // What the SERVER would say the board was at each of those two ticks,
+        // computed the way rank() computes it: cold, from the log.
+        const seated = flat.map((i) => ({ tick: i.tick, seat: Number(i.uid.slice(1)), kind: i.kind }));
+        const serverEnd = print(replay(SEED, players, seated, endTick, DURATION));
+        const serverMid = print(replay(SEED, players, seated, seekTick, DURATION));
+        window.__replay = {
+          endTick,
+          mid,
+          seekTick,
+          shots: mirror.state.shots,
+          inputs: flat.length,
+          aims: flat.filter((i) => i.kind[0] === "m").length,
+          topMatches: fromTop === serverEnd,
+          seekMatches: fromSeek === serverMid,
+        };
+        window.__ready = true;
+      } else {
+
+      const ctx = {
+        engine: null, canvas: null, assets: null,
+        roster, you: "u0", seed: SEED, rules: { ...publicRules(), durationTicks: DURATION },
+        sendInput: (i) => console.log("sendInput", i),
+        sendQuick: (k, id) => console.log("sendQuick", k, id),
+        requestLeave: () => {},
+        hudRoot: document.getElementById("hud"),
+      };
+      const rt = new CarromRuntime(ctx);
+      await rt.prepare();
+      rt.seedInputs(log);
+      rt.go(Date.now() - (tick + holdFor) * TICK_MS);
+      rt.onQuick("u1", "chat", "nice");
+      if (showAim) {
+        // Reach past the class to stage a charged shot — this page is the one
+        // place that is allowed to, and it is what makes the aim line and the
+        // power ring visible in a still screenshot.
+        rt.aimT = 0.42;
+        rt.aimDir = { x: -0.42, y: 0.9076 };
+        rt.aimPower = 0.62;
+        rt.lastSig = "";
+        rt.lastBars = "";
+      }
+      for (let i = 0; i < 4; i++) { rt.render(); await new Promise((r) => requestAnimationFrame(r)); }
+      if (watch) {
+        // Hand the runtime an aim from whoever is holding the turn, exactly as
+        // the relay would.
+        const st = rt.sim.state;
+        rt.onRemoteInput({ uid: `u${st.turn}`, tick: Math.max(1, st.since + 1), kind: aimKind(-380, 240, 960, 720) });
+        rt.lastSig = "";
+        for (let i = 0; i < 2; i++) { rt.render(); await new Promise((r) => requestAnimationFrame(r)); }
+      }
+      if (q.get("fired") === "1") {
+        // Freeze the instant after a flick: the request is away and the striker
+        // is springing off the base line while the server answers. Staged AFTER
+        // the first frames, because the turn this is keyed on only exists once
+        // the runtime has advanced its own clock to the playhead.
+        rt.aimT = 0.42;
+        rt.aimDir = { x: -0.42, y: 0.9076 };
+        rt.asked = { key: `${rt.sim.state.turn}:${rt.sim.state.since}`, at: Date.now() - 55 };
+        rt.lastSig = "";
+        for (let i = 0; i < 2; i++) { rt.render(); await new Promise((r) => requestAnimationFrame(r)); }
+      }
+      // The three optional hooks the replay studio reads (see GameModule).
+      // Checked from here because they live in the game's ENTRY module, which
+      // pulls in CSS and the DOM and so cannot be imported by a Node check.
+      {
+        const entry = await import("/src/games/carrom/entry.ts");
+        window.__hooks = {
+          shot: entry.describeInput?.(shotKind(-420, 100, 900, 720)) ?? null,
+          aim: entry.describeInput?.(aimKind(0, 0, 1000, 300)) ?? null,
+          quit: entry.describeInput?.("q") ?? null,
+          junk: entry.describeInput?.("zzz") ?? null,
+          weightShot: entry.inputWeight?.(shotKind(0, 0, 1000, 720)) ?? null,
+          weightAim: entry.inputWeight?.(aimKind(0, 0, 1000, 720)) ?? null,
+          summary: entry.summarise?.([
+            { tick: 1, kind: shotKind(0, 0, 1000, 200) },
+            { tick: 2, kind: aimKind(0, 0, 1000, 900) },
+            { tick: 3, kind: shotKind(0, 0, 1000, 900) },
+            { tick: 4, kind: shotKind(0, 0, 1000, 850) },
+          ]) ?? null,
+        };
+      }
+      window.__rt = rt;
+      window.__state = rt.debug();
+      window.__shots = mirror.state.shots;
+      window.__ready = true;
+      }
+    </script>
+  </body>
+</html>
