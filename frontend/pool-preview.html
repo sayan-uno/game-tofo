@@ -1,0 +1,356 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>8 Ball Pool runtime preview</title>
+    <!--
+      A DEV-ONLY page that mounts the REAL PoolRuntime inside the REAL platform
+      DOM (#ui-root > .match-layer > .match-hud-root, plus the platform's own
+      mic/Leave controls), so the whole screen can be looked at — table, balls,
+      the two racks, the aim line and its ghost ball, the cue, and the control
+      strip — without a server, a login or a match.
+
+      Vite builds only index.html, so this never ships.
+
+      It plays a plausible rack offline first, driving the REAL simulation with
+      a miniature of the server's own policy, so what you are looking at is a
+      table a real match could have produced.
+
+      Run `npm --prefix frontend run dev` and open
+        /pool-preview.html?w=900&h=460&p=2&shots=10
+      `p=4` is scotch doubles; w/h check a phone-shaped landscape; `shots` is
+      how far into the rack to start. `&aim=1` shows an aim lined up with the
+      SHOOT button live; `&watch=1` shows what the others see while somebody
+      else is lining up; `&hand=1` shows the ball in hand after a foul;
+      `&roll=1` freezes half way through a shot with the balls still moving.
+
+      `&replay=1` runs the ADMIN CONSOLE'S path instead: a whole rack played
+      out, then handed to a spectator runtime driven by a clock this page owns,
+      exactly the way admin/src/screens/studio.ts drives it — dispose, seed the
+      inputs up to the playhead, go, deliver the rest as the clock passes them.
+      It reports whether the table the runtime ends on is BIT FOR BIT the table
+      the server's own replay produces, from tick zero and from a seek into the
+      middle.
+    -->
+  </head>
+  <body>
+    <div id="ui-root">
+      <div class="match-layer">
+        <div class="match-hud-root" id="hud"></div>
+        <div class="match-controls">
+          <button class="mx-mic">🎙 On</button><button class="mx-leave">Leave</button>
+        </div>
+      </div>
+    </div>
+    <script type="module">
+      import "/src/style.css";
+      import "/src/games/pool/pool.css";
+      import { PoolRuntime } from "/src/games/pool/runtime.ts";
+      import {
+        BALL_R, CUE, EIGHT, POCKETS, PoolSim, TICK_MS, TICK_RATE,
+        aimKind, awaitingServer, firstHit, legalTargets, nearestSpot,
+        publicRules, replay, shotKind, teamOf,
+      } from "/src/shared/games/pool/index.ts";
+
+      const q = new URLSearchParams(location.search);
+      const W = Number(q.get("w") || 900);
+      const H = Number(q.get("h") || 460);
+      const players = Number(q.get("p") || 2);
+      const shots = Number(q.get("shots") || 10);
+      const showAim = q.get("aim") === "1";
+      const watch = q.get("watch") === "1";
+      const wantHand = q.get("hand") === "1";
+      const wantRoll = q.get("roll") === "1";
+      document.body.style.width = W + "px";
+      document.body.style.height = H + "px";
+      document.body.style.margin = "0";
+      const layer = document.querySelector(".match-layer");
+      layer.style.position = "absolute";
+      layer.style.inset = "0";
+
+      const SEED = 20260824;
+      const DURATION = 20 * 60 * TICK_RATE;
+      const names = ["You", "Nova", "Rift92", "Kaze"];
+      const roster = names.slice(0, players).map((name, i) => ({
+        uid: `u${i}`, name, character: "c", weapon: null,
+      }));
+
+      // A pinned random source, so the same URL is the same rack every time.
+      let rnd = 11;
+      const rand = () => ((rnd = (rnd * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+
+      // A miniature of the server's policy: the ghost ball, over this side's
+      // legal targets against the six pockets, best cut first. The real one
+      // lives on the SERVER and this page cannot reach across the two
+      // deployables to import it — that separation is a platform rule.
+      function pickShot(s) {
+        const team = teamOf(s.turn, s.players);
+        const targets = legalTargets(s, team);
+        const from = s.ballInHand || !s.alive[CUE]
+          ? nearestSpot(s.behindLine ? -0.68 : 0, (rand() - 0.5) * 0.5, s.x, s.y, s.alive, s.behindLine)
+          : { x: s.x[CUE], y: s.y[CUE] };
+        let best = null;
+        for (const t of targets) {
+          for (const p of POCKETS) {
+            // The ghost: where the cue ball has to be at contact.
+            const px = p.x - s.x[t], py = p.y - s.y[t];
+            const pl = Math.hypot(px, py) || 1;
+            const gx = s.x[t] - (px / pl) * BALL_R * 2;
+            const gy = s.y[t] - (py / pl) * BALL_R * 2;
+            const dx = gx - from.x, dy = gy - from.y;
+            const dl = Math.hypot(dx, dy);
+            if (dl < 1e-4) continue;
+            const ux = dx / dl, uy = dy / dl;
+            const cut = ux * (px / pl) + uy * (py / pl);
+            if (cut < 0.35) continue;
+            const hit = firstHit(s, from.x, from.y, ux, uy, CUE);
+            if (hit.index !== t) continue;
+            const value = cut * 100 - dl * 20 - pl * 30;
+            if (!best || value > best.value) {
+              best = { value, from, ux, uy, power: 0.34 + pl * 0.5 + dl * 0.14 };
+            }
+          }
+        }
+        if (!best) {
+          // Nothing on: roll at one of ours and leave it safe.
+          const t = targets[Math.floor(rand() * targets.length)] ?? EIGHT;
+          const dx = s.x[t] - from.x, dy = s.y[t] - from.y;
+          const dl = Math.hypot(dx, dy) || 1;
+          best = { from, ux: dx / dl, uy: dy / dl, power: 0.42 };
+        }
+        const wobble = (rand() - 0.5) * 0.02;
+        const ux = best.ux - best.uy * wobble;
+        const uy = best.uy + best.ux * wobble;
+        const ul = Math.hypot(ux, uy) || 1;
+        return {
+          x: Math.round(best.from.x * 1000), y: Math.round(best.from.y * 1000),
+          dx: Math.round((ux / ul) * 1000) || 1, dy: Math.round((uy / ul) * 1000),
+          p: Math.round(Math.max(0.06, Math.min(1, best.power)) * 1000),
+        };
+      }
+
+      // The break: hard, straight at the apex, from a hair off centre.
+      function breakShot(s) {
+        let apex = -1, bx = Infinity;
+        for (let i = 1; i < 16; i++) if (s.alive[i] && s.x[i] < bx) { bx = s.x[i]; apex = i; }
+        const oy = (rand() - 0.5) * 0.06;
+        const dx = s.x[apex] - -0.68, dy = s.y[apex] - oy;
+        const dl = Math.hypot(dx, dy) || 1;
+        return {
+          x: -680, y: Math.round(oy * 1000),
+          dx: Math.round((dx / dl) * 1000), dy: Math.round((dy / dl) * 1000) || 1,
+          p: 940,
+        };
+      }
+
+      // Play a plausible rack offline, exactly the way the server does.
+      const mirror = new PoolSim(SEED, players, DURATION);
+      const log = [];
+      let answered = "";
+      let played = 0;
+      let tick = 0;
+
+      function stepRack(limit) {
+        for (; tick < DURATION; tick++) {
+          mirror.advanceTo(tick);
+          const s = mirror.state;
+          if (s.over) return false;
+          if (!awaitingServer(s)) continue;
+          const key = `${s.turn}:${s.since}`;
+          // STOP ON A TURN NOBODY HAS ANSWERED YET. Stopping the tick after a
+          // shot was authored looks the same from here and is not: the shot is
+          // already in the log, stamped a couple of ticks ahead, so the moment
+          // the runtime's clock reached it the staged table played on by itself.
+          if (limit !== null && played >= limit && answered !== key) {
+            if (wantHand && !s.ballInHand) { /* keep going until somebody fouls */ }
+            else if (watch ? s.turn !== 0 : s.turn === 0) return true;
+          }
+          if (answered === key) continue;
+          answered = key;
+          const p = s.broken ? pickShot(s) : breakShot(s);
+          // The working first, then the shot — the shape a real log has.
+          log.push({ uid: `u${s.turn}`, tick: Math.max(1, tick), kind: aimKind(p.x, p.y, p.dx, p.dy, p.p) });
+          const input = { uid: `u${s.turn}`, tick: tick + 2, kind: shotKind(p.x, p.y, p.dx, p.dy, p.p) };
+          log.push(input);
+          mirror.addInput({ tick: input.tick, seat: s.turn, kind: input.kind });
+          played++;
+        }
+        return false;
+      }
+      stepRack(shots);
+      // A frozen frame mid-roll: step on until the balls are actually moving.
+      if (wantRoll) {
+        for (let k = 0; k < 40 && mirror.state.phase !== "shoot"; k++) { tick += 2; mirror.advanceTo(tick); }
+        tick += 18;
+        mirror.advanceTo(tick);
+      }
+
+      /** Everything about a table, for the replay comparison below. */
+      const print = (st) => [
+        st.tick, st.phase, st.turn, st.since, st.shots, st.open ? 1 : 0,
+        st.broken ? 1 : 0, st.ballInHand ? 1 : 0, st.behindLine ? 1 : 0,
+        st.winner, st.decided ? 1 : 0, st.over ? 1 : 0, st.finisher,
+        st.group.join(","), st.potted.join(","), st.fouls.join(","),
+        st.alive.join(""), st.x.join(","), st.y.join(","), st.vx.join(","), st.vy.join(","),
+      ].join("|");
+
+      // ---- the admin console's path ---------------------------------------
+      if (q.get("replay") === "1") {
+        stepRack(null);
+        const endTick = Math.min(tick, DURATION);
+        const T0 = 1_700_000_000_000;
+        const LEAD = 20; // studio.ts
+        let vTime = 0;
+        const base = {
+          engine: null, canvas: null, assets: null,
+          roster, seed: SEED, rules: { tickRate: TICK_RATE, durationTicks: DURATION },
+          sendInput: () => {}, sendQuick: () => {}, requestLeave: () => {},
+          hudRoot: document.getElementById("hud"),
+          now: () => T0 + vTime,
+          spectator: true,
+        };
+        const flat = log.slice().sort((a, b) => a.tick - b.tick);
+        let watched = null;
+        async function seekTo(at) {
+          try { watched?.dispose(); } catch { /* ignore */ }
+          base.hudRoot.replaceChildren();
+          vTime = (at * 1000) / TICK_RATE;
+          const rt2 = new PoolRuntime({ ...base, you: "u0" });
+          await rt2.prepare();
+          const before = flat.filter((i) => i.tick <= at);
+          rt2.seedInputs(before);
+          rt2.go(T0);
+          watched = rt2;
+          return before.length;
+        }
+        let cursor = await seekTo(0);
+        for (let t = 0; t <= endTick; t += 10) {
+          vTime = (t * 1000) / TICK_RATE;
+          const horizon = t + LEAD;
+          while (cursor < flat.length && flat[cursor].tick <= horizon) watched.onRemoteInput(flat[cursor++]);
+          watched.render();
+        }
+        vTime = (endTick * 1000) / TICK_RATE;
+        while (cursor < flat.length) watched.onRemoteInput(flat[cursor++]);
+        watched.render();
+        const fromTop = print(watched.sim.state);
+        // Compared at the tick the runtime LANDED on, not at the one asked for.
+        // The studio drives a millisecond clock and the runtime divides it back
+        // into ticks by flooring, and endTick·(1000/60)/(1000/60) is allowed to
+        // come out a hair under endTick — which on a rolling shot is sixteen
+        // balls in different places. Asking the cold replay for the same tick is
+        // the comparison that means something.
+        const topTick = watched.sim.state.tick;
+
+        const mid = Math.floor(endTick * 0.55);
+        await seekTo(mid);
+        watched.render();
+        const fromSeek = print(watched.sim.state);
+        // Compare at the tick the runtime actually LANDED on: the studio seeks
+        // by setting a millisecond clock and letting the runtime divide it back
+        // into ticks, and that round trip can land a tick either side.
+        const seekTick = watched.sim.state.tick;
+
+        const seated = flat.map((i) => ({ tick: i.tick, seat: Number(i.uid.slice(1)), kind: i.kind }));
+        window.__replay = {
+          endTick, mid, seekTick,
+          inputs: flat.length,
+          aims: flat.filter((i) => i.kind[0] === "m").length,
+          topTick,
+          topMatches: fromTop === print(replay(SEED, players, seated, topTick, DURATION)),
+          seekMatches: fromSeek === print(replay(SEED, players, seated, seekTick, DURATION)),
+        };
+        window.__ready = true;
+      } else {
+
+      // A STOPPED CLOCK, and it has to be stopped rather than merely started
+      // in the past. This is a still frame somebody pokes at, and the dev
+      // server can take twenty seconds to compile the modules underneath it —
+      // twenty seconds in which a running clock would carry the table through
+      // the very shot the page was staged to sit in front of.
+      const FROZEN = 1_700_000_000_000;
+      const ctx = {
+        engine: null, canvas: null, assets: null,
+        roster, you: "u0", seed: SEED, rules: { ...publicRules(), durationTicks: DURATION },
+        sendInput: (i) => console.log("sendInput", i),
+        sendQuick: (k, id) => console.log("sendQuick", k, id),
+        requestLeave: () => {},
+        hudRoot: document.getElementById("hud"),
+        now: () => FROZEN,
+      };
+      const rt = new PoolRuntime(ctx);
+      await rt.prepare();
+      rt.seedInputs(log);
+      // Two ticks of slack, because the runtime derives its tick by dividing a
+      // millisecond clock by 16.666… and floors it — landing one tick SHORT of
+      // where this page staged the table, which on a turn that has just changed
+      // hands is still the beat before it. Overshooting is free: nothing else
+      // authors a shot here, so the extra ticks pass in an open aim.
+      rt.go(FROZEN - Math.round((tick + 2) * TICK_MS));
+      rt.onQuick("u1", "chat", "nice");
+      for (let i = 0; i < 4; i++) { rt.render(); await new Promise((r) => requestAnimationFrame(r)); }
+      if (showAim) {
+        // Stage an aim — what the table looks like with the SHOOT button live.
+        // Reaching past the class is something only this page may do.
+        const st = rt.sim.state;
+        const team = teamOf(st.turn, st.players);
+        const t = legalTargets(st, team)[0] ?? EIGHT;
+        const dx = st.x[t] - st.x[CUE], dy = st.y[t] - st.y[CUE];
+        const dl = Math.hypot(dx, dy) || 1;
+        rt.aimDir = { x: dx / dl, y: dy / dl };
+        rt.aimPower = 0.46;
+        rt.lastSig = "";
+        for (let i = 0; i < 2; i++) { rt.render(); await new Promise((r) => requestAnimationFrame(r)); }
+      }
+      if (watch) {
+        const st = rt.sim.state;
+        const team = teamOf(st.turn, st.players);
+        const t = legalTargets(st, team)[0] ?? EIGHT;
+        const dx = st.x[t] - st.x[CUE], dy = st.y[t] - st.y[CUE];
+        const dl = Math.hypot(dx, dy) || 1;
+        rt.onRemoteInput({
+          uid: `u${st.turn}`, tick: Math.max(1, st.since + 1),
+          kind: aimKind(Math.round(st.x[CUE] * 1000), Math.round(st.y[CUE] * 1000),
+                        Math.round((dx / dl) * 1000) || 1, Math.round((dy / dl) * 1000), 520),
+        });
+        rt.lastSig = "";
+        for (let i = 0; i < 2; i++) { rt.render(); await new Promise((r) => requestAnimationFrame(r)); }
+      }
+
+      // The optional hooks the replay studio reads (see GameModule). Checked
+      // from here because they live in the game's ENTRY module, which pulls in
+      // CSS and the DOM and so cannot be imported by a Node check.
+      {
+        const entry = await import("/src/games/pool/entry.ts");
+        const seated = log.map((i) => ({ tick: i.tick, seat: Number(i.uid.slice(1)), kind: i.kind }));
+        window.__hooks = {
+          shotSoft: entry.describeInput?.(shotKind(0, 0, 1000, 0, 120)) ?? null,
+          shotHard: entry.describeInput?.(shotKind(0, 0, 1000, 0, 1000)) ?? null,
+          ask: entry.describeInput?.("a0,0,1000,0,500") ?? null,
+          aim: entry.describeInput?.(aimKind(0, 0, 1000, 0, 500)) ?? null,
+          quit: entry.describeInput?.("q") ?? null,
+          junk: entry.describeInput?.("zz9") ?? null,
+          weightHard: entry.inputWeight?.(shotKind(0, 0, 1000, 0, 1000)) ?? null,
+          weightSoft: entry.inputWeight?.(shotKind(0, 0, 1000, 0, 60)) ?? null,
+          weightAim: entry.inputWeight?.(aimKind(0, 0, 1000, 0, 900)) ?? null,
+          summary: entry.summarise?.(
+            seated.filter((i) => i.seat === 1).map((i) => ({ tick: i.tick, kind: i.kind })),
+            { seat: 1, players, seed: SEED, durationTicks: DURATION, all: seated }
+          ) ?? null,
+        };
+      }
+      window.__rt = rt;
+      // What this page staged, so a failing check can say whether the table it
+      // is looking at is the one the page meant to build.
+      window.__staged = { tick, phase: mirror.state.phase, turn: mirror.state.turn, shots: mirror.state.shots, log: log.length };
+      window.__state = rt.debug();
+      // The SHARED placement function, handed out so the browser check can ask
+      // the runtime and the simulation the same question and compare. Exposing
+      // it here rather than importing it in the check keeps the check honest
+      // about which copy it is talking to: this is the one the page loaded.
+      window.__nearestSpot = nearestSpot;
+      window.__ready = true;
+      }
+    </script>
+  </body>
+</html>

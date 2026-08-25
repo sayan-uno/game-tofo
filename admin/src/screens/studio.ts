@@ -318,7 +318,7 @@ export function mountStudio(host: HTMLElement, matchKey: string, go: (h: string)
       // able to stop a replay from playing. The studio is evidence first.
       describe = pack.module.describeInput?.bind(pack.module);
       try {
-        applyGameHooks(host, pack.module, flat, roster, file.endTick, rate);
+        applyGameHooks(host, pack.module, flat, roster, file.endTick, rate, file.seed, file.durationTicks);
       } catch (err) {
         console.warn("[studio] this game's input descriptions failed; the plain tape stands", err);
       }
@@ -691,7 +691,9 @@ function applyGameHooks(
   flat: { tick: number; uid: string; seat: number; kind: string }[],
   roster: ReplayRoster[],
   endTick: number,
-  rate: number
+  rate: number,
+  seed: number,
+  durationTicks: number
 ): void {
   const weigh = module.inputWeight;
   if (weigh) {
@@ -714,10 +716,16 @@ function applyGameHooks(
   }
   const summarise = module.summarise;
   if (!summarise) return;
+  // The whole log, seat-tagged, for the games whose interesting numbers cannot
+  // be worked out from one player's moves — see GameModule.summarise.
+  const all = flat.map((i) => ({ tick: i.tick, seat: i.seat, kind: i.kind }));
   for (const r of roster) {
     const box = host.querySelector<HTMLElement>(`.how[data-how="${CSS.escape(r.uid)}"]`);
     if (!box) continue;
-    const stats = summarise(flat.filter((i) => i.uid === r.uid).map((i) => ({ tick: i.tick, kind: i.kind })));
+    const stats = summarise(
+      flat.filter((i) => i.uid === r.uid).map((i) => ({ tick: i.tick, kind: i.kind })),
+      { seat: r.seat, players: roster.length, seed, durationTicks, all }
+    );
     box.innerHTML = stats.map((x) => `<span><b>${esc(x.value)}</b>${esc(x.label)}</span>`).join("");
   }
 }

@@ -65,9 +65,9 @@ const MARK = `replaycheck-${Date.now()}`;
 /** Play a real match through a real game's server definition and rank it.
  *
  *  Trackline's bots are PLANNED, so their whole input list exists up front.
- *  Ludo's and carrom's must REACT, so they are stepped a tick at a time and
- *  asked what the server would author — dice and flicks included. Either way
- *  what comes out is what the match runtime would have held. */
+ *  The three board games' must REACT, so they are stepped a tick at a time and
+ *  asked what the server would author — dice, flicks and lines included. Either
+ *  way what comes out is what the match runtime would have held. */
 function playedMatch(gameId: string, seed: number, players: number) {
   const game = getGame(gameId)!;
   const ctx = { id: `${MARK}-${gameId}`, players };
@@ -138,7 +138,13 @@ function fileFor(gameId: string, seed: number, played: ReturnType<typeof playedM
 
 try {
   // ---- the round trip, per game -------------------------------------------
-  for (const [gameId, players] of [["trackline", 4], ["ludo", 4], ["carrom", 4]] as [string, number][]) {
+  for (const [gameId, players] of [
+    ["trackline", 4],
+    ["ludo", 4],
+    ["carrom", 4],
+    ["dots", 4],
+    ["pool", 4],
+  ] as [string, number][]) {
     console.log(`\n${gameId} · the round trip`);
     const seed = 0x51ed_beef;
     const played = playedMatch(gameId, seed, players);
@@ -154,9 +160,10 @@ try {
     // The dictionary holds each DISTINCT kind once. For a runner or a Ludo
     // board that is a fixed vocabulary of a dozen strings shared by hundreds of
     // inputs, and the saving is most of the file. For carrom every flick is
-    // four numbers nobody has sent before, so the dictionary is one entry per
-    // input and saves nothing — which is correct, not broken, and worth
-    // asserting rather than assuming a small number.
+    // four numbers nobody has sent before — and for pool every stroke is five —
+    // so the dictionary is one entry per input and saves nothing, which is
+    // correct, not broken, and worth asserting rather than assuming a small
+    // number.
     const distinctKinds = new Set([...played.inputsBySeat.values()].flat().map((i) => i.kind)).size;
     ok(
       back.kinds.length === distinctKinds && back.kinds.length > 0,

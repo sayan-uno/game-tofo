@@ -1,0 +1,277 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Dots &amp; Boxes runtime preview</title>
+    <!--
+      A DEV-ONLY page that mounts the REAL DotsRuntime inside the REAL platform
+      DOM (#ui-root > .match-layer > .match-hud-root, plus the platform's own
+      mic/Leave controls), so the whole screen can be looked at — grid, filled
+      boxes, player cards, the chosen line and the control strip — without a
+      server, a login or a match.
+
+      Vite builds only index.html, so this never ships.
+
+      It plays a plausible middlegame offline first, driving the REAL simulation
+      with a miniature of the server's own policy, so what you are looking at is
+      a board a real match could have produced.
+
+      Run `npm --prefix frontend run dev` and open
+        /dots-preview.html?w=900&h=460&p=4&moves=40
+      `p=2` is the two-player board; w/h check a phone-shaped landscape; `moves`
+      is how far into the game to start. `&pick=1` shows a line chosen and the
+      DRAW button live; `&watch=1` shows what the others see while somebody else
+      is choosing; `&stop=fill` freezes with a box filling in.
+
+      `&replay=1` runs the ADMIN CONSOLE'S path instead: a whole game played
+      out, then handed to a spectator runtime driven by a clock this page owns,
+      exactly the way admin/src/screens/studio.ts drives it — dispose, seed the
+      inputs up to the playhead, go, deliver the rest as the clock passes them.
+      It reports whether the grid the runtime ends on is BIT FOR BIT the grid
+      the server's own replay produces, from tick zero and from a seek into the
+      middle.
+    -->
+  </head>
+  <body>
+    <div id="ui-root">
+      <div class="match-layer">
+        <div class="match-hud-root" id="hud"></div>
+        <div class="match-controls">
+          <button class="mx-mic">🎙 On</button><button class="mx-leave">Leave</button>
+        </div>
+      </div>
+    </div>
+    <script type="module">
+      import "/src/style.css";
+      import "/src/games/dots/dots.css";
+      import { DotsRuntime } from "/src/games/dots/runtime.ts";
+      import {
+        DotsSim, LINE_COUNT, TICK_MS, TICK_RATE, drawKind, freeLines, hoverKind,
+        closesBoxes, publicRules, replay,
+      } from "/src/shared/games/dots/index.ts";
+
+      const q = new URLSearchParams(location.search);
+      const W = Number(q.get("w") || 900);
+      const H = Number(q.get("h") || 460);
+      const players = Number(q.get("p") || 4);
+      const moves = Number(q.get("moves") || 40);
+      const stop = q.get("stop") || "";
+      const showPick = q.get("pick") === "1";
+      const watch = q.get("watch") === "1";
+      document.body.style.width = W + "px";
+      document.body.style.height = H + "px";
+      document.body.style.margin = "0";
+      const layer = document.querySelector(".match-layer");
+      layer.style.position = "absolute";
+      layer.style.inset = "0";
+
+      const SEED = 20260824;
+      const DURATION = 20 * 60 * TICK_RATE;
+      const names = ["You", "Nova", "Rift92", "Kaze"];
+      const roster = names.slice(0, players).map((name, i) => ({
+        uid: `u${i}`, name, character: "c", weapon: null,
+      }));
+
+      // A pinned random source, so the same URL is the same board every time.
+      let rnd = 11;
+      const rand = () => ((rnd = (rnd * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+
+      // A miniature of the server's policy: take a box when there is one, else
+      // play a line that gives nothing away, else give away the least. The real
+      // one lives on the SERVER and this page cannot reach across the two
+      // deployables to import it — that separation is a platform rule.
+      function pickLine(s) {
+        const free = freeLines(s);
+        const take = free.filter((l) => closesBoxes(s, l) > 0);
+        if (take.length) return take[Math.floor(rand() * take.length)];
+        const safe = free.filter((l) => !givesAway(s, l));
+        if (safe.length) return safe[Math.floor(rand() * safe.length)];
+        return free[Math.floor(rand() * free.length)];
+      }
+      /** Would this line leave a box on three sides — that is, hand it over? */
+      function givesAway(s, line) {
+        for (const box of BOX_LINES_LOCAL.keys()) {
+          if (s.box[box] >= 0) continue;
+          const lines = BOX_LINES_LOCAL[box];
+          if (!lines.includes(line)) continue;
+          let n = 0;
+          for (const l of lines) if (s.line[l] >= 0) n++;
+          if (n === 2) return true;
+        }
+        return false;
+      }
+      // The box-to-line table, rebuilt here rather than imported so this page
+      // depends on the runtime and the simulation and nothing else.
+      const BOX_LINES_LOCAL = (() => {
+        const G = publicRules().grid;
+        const H_COUNT = (G + 1) * G;
+        const out = [];
+        for (let r = 0; r < G; r++) {
+          for (let c = 0; c < G; c++) {
+            out.push([r * G + c, (r + 1) * G + c, H_COUNT + r * (G + 1) + c, H_COUNT + r * (G + 1) + c + 1]);
+          }
+        }
+        return out;
+      })();
+
+      // Play a plausible middlegame offline, exactly the way the server does.
+      const mirror = new DotsSim(SEED, players, DURATION);
+      const log = [];
+      let answered = "";
+      let tick = 0;
+      for (tick = 1; tick < DURATION; tick++) {
+        mirror.advanceTo(tick);
+        const s = mirror.state;
+        if (s.over) break;
+        if (stop === "fill" && s.phase === "draw" && s.last && s.last.boxes.length > 0 && s.drawn > 20) break;
+        if (stop !== "fill" && s.drawn >= moves && s.phase === "turn" && (watch ? s.turn !== 0 : s.turn === 0)) break;
+        if (s.phase !== "turn") continue;
+        const key = `${s.turn}:${s.since}`;
+        if (answered === key) continue;
+        answered = key;
+        const line = pickLine(s);
+        // The working first, then the move — the shape a real log has.
+        log.push({ uid: `u${s.turn}`, tick: Math.max(1, tick), kind: hoverKind(line) });
+        const input = { uid: `u${s.turn}`, tick: tick + 2, kind: drawKind(line) };
+        log.push(input);
+        mirror.addInput({ tick: input.tick, seat: s.turn, kind: input.kind });
+      }
+
+      /** Everything about a grid, for the replay comparison below. */
+      const print = (st) => [
+        st.tick, st.phase, st.turn, st.since, st.drawn, st.claimed, st.winner,
+        st.decided ? 1 : 0, st.over ? 1 : 0, st.score.join(","), st.moves.join(","),
+        st.gifts.join(","), st.best.join(","), st.line.join(","), st.box.join(","),
+      ].join("|");
+
+      // ---- the admin console's path ---------------------------------------
+      if (q.get("replay") === "1") {
+        for (; tick < DURATION; tick++) {
+          mirror.advanceTo(tick);
+          const s = mirror.state;
+          if (s.over) break;
+          if (s.phase !== "turn") continue;
+          const key = `${s.turn}:${s.since}`;
+          if (answered === key) continue;
+          answered = key;
+          const line = pickLine(s);
+          log.push({ uid: `u${s.turn}`, tick: Math.max(1, tick), kind: hoverKind(line) });
+          const input = { uid: `u${s.turn}`, tick: tick + 2, kind: drawKind(line) };
+          log.push(input);
+          mirror.addInput({ tick: input.tick, seat: s.turn, kind: input.kind });
+        }
+        const endTick = Math.min(tick, DURATION);
+        const T0 = 1_700_000_000_000;
+        const LEAD = 20; // studio.ts
+        let vTime = 0;
+        const base = {
+          engine: null, canvas: null, assets: null,
+          roster, seed: SEED, rules: { tickRate: TICK_RATE, durationTicks: DURATION },
+          sendInput: () => {}, sendQuick: () => {}, requestLeave: () => {},
+          hudRoot: document.getElementById("hud"),
+          now: () => T0 + vTime,
+          spectator: true,
+        };
+        const flat = log.slice().sort((a, b) => a.tick - b.tick);
+        let watched = null;
+        async function seekTo(at) {
+          try { watched?.dispose(); } catch { /* ignore */ }
+          base.hudRoot.replaceChildren();
+          vTime = (at * 1000) / TICK_RATE;
+          const rt2 = new DotsRuntime({ ...base, you: "u0" });
+          await rt2.prepare();
+          const before = flat.filter((i) => i.tick <= at);
+          rt2.seedInputs(before);
+          rt2.go(T0);
+          watched = rt2;
+          return before.length;
+        }
+        let cursor = await seekTo(0);
+        for (let t = 0; t <= endTick; t += 10) {
+          vTime = (t * 1000) / TICK_RATE;
+          const horizon = t + LEAD;
+          while (cursor < flat.length && flat[cursor].tick <= horizon) watched.onRemoteInput(flat[cursor++]);
+          watched.render();
+        }
+        vTime = (endTick * 1000) / TICK_RATE;
+        while (cursor < flat.length) watched.onRemoteInput(flat[cursor++]);
+        watched.render();
+        const fromTop = print(watched.sim.state);
+
+        const mid = Math.floor(endTick * 0.55);
+        await seekTo(mid);
+        watched.render();
+        const fromSeek = print(watched.sim.state);
+        // Compare at the tick the runtime actually LANDED on: the studio seeks
+        // by setting a millisecond clock and letting the runtime divide it back
+        // into ticks, and that round trip can land a tick either side.
+        const seekTick = watched.sim.state.tick;
+
+        const seated = flat.map((i) => ({ tick: i.tick, seat: Number(i.uid.slice(1)), kind: i.kind }));
+        window.__replay = {
+          endTick, mid, seekTick,
+          inputs: flat.length,
+          hovers: flat.filter((i) => i.kind[0] === "m").length,
+          topMatches: fromTop === print(replay(SEED, players, seated, endTick, DURATION)),
+          seekMatches: fromSeek === print(replay(SEED, players, seated, seekTick, DURATION)),
+        };
+        window.__ready = true;
+      } else {
+
+      const ctx = {
+        engine: null, canvas: null, assets: null,
+        roster, you: "u0", seed: SEED, rules: { ...publicRules(), durationTicks: DURATION },
+        sendInput: (i) => console.log("sendInput", i),
+        sendQuick: (k, id) => console.log("sendQuick", k, id),
+        requestLeave: () => {},
+        hudRoot: document.getElementById("hud"),
+      };
+      const rt = new DotsRuntime(ctx);
+      await rt.prepare();
+      rt.seedInputs(log);
+      rt.go(Date.now() - tick * TICK_MS);
+      rt.onQuick("u1", "chat", "nice");
+      for (let i = 0; i < 4; i++) { rt.render(); await new Promise((r) => requestAnimationFrame(r)); }
+      if (showPick) {
+        // Stage a chosen line — what the board looks like with the DRAW button
+        // live. Reaching past the class is something only this page may do.
+        const free = freeLines(rt.sim.state);
+        rt.pick = free.find((l) => closesBoxes(rt.sim.state, l) > 0) ?? free[Math.floor(free.length / 3)];
+        rt.lastSig = "";
+        for (let i = 0; i < 2; i++) { rt.render(); await new Promise((r) => requestAnimationFrame(r)); }
+      }
+      if (watch) {
+        const st = rt.sim.state;
+        const free = freeLines(st);
+        rt.onRemoteInput({ uid: `u${st.turn}`, tick: Math.max(1, st.since + 1), kind: hoverKind(free[Math.floor(free.length / 2)]) });
+        rt.lastSig = "";
+        for (let i = 0; i < 2; i++) { rt.render(); await new Promise((r) => requestAnimationFrame(r)); }
+      }
+
+      // The optional hooks the replay studio reads (see GameModule). Checked
+      // from here because they live in the game's ENTRY module, which pulls in
+      // CSS and the DOM and so cannot be imported by a Node check.
+      {
+        const entry = await import("/src/games/dots/entry.ts");
+        const seated = log.map((i) => ({ tick: i.tick, seat: Number(i.uid.slice(1)), kind: i.kind }));
+        window.__hooks = {
+          draw: entry.describeInput?.(drawKind(37)) ?? null,
+          hover: entry.describeInput?.(hoverKind(4)) ?? null,
+          quit: entry.describeInput?.("q") ?? null,
+          junk: entry.describeInput?.("zz9") ?? null,
+          weightDraw: entry.inputWeight?.(drawKind(0)) ?? null,
+          weightHover: entry.inputWeight?.(hoverKind(0)) ?? null,
+          summary: entry.summarise?.(
+            seated.filter((i) => i.seat === 1).map((i) => ({ tick: i.tick, kind: i.kind })),
+            { seat: 1, players, seed: SEED, durationTicks: DURATION, all: seated }
+          ) ?? null,
+        };
+      }
+      window.__rt = rt;
+      window.__state = rt.debug();
+      window.__lines = LINE_COUNT;
+      window.__ready = true;
+      }
+    </script>
+  </body>
+</html>

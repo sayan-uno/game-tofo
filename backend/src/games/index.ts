@@ -3,3 +3,5 @@
 import "./trackline/index.js";
 import "./ludo/index.js";
 import "./carrom/index.js";
+import "./dots/index.js";
+import "./pool/index.js";

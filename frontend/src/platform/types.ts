@@ -122,6 +122,24 @@ export interface GameModule {
    *  across a whole match rather than something to be counted by hand. */
   inputWeight?(kind: string): number | null;
 
-  /** Numbers worth printing beside a player, from their whole input log. */
-  summarise?(inputs: { tick: number; kind: string }[]): { label: string; value: string }[];
+  /** Numbers worth printing beside a player.
+   *
+   *  `inputs` is that player's own log. `match` is the whole match, and it is
+   *  optional for a reason: a game whose interesting numbers are personal (how
+   *  hard somebody hit things) needs only the first, while a game whose numbers
+   *  are POSITIONAL (how many boxes they ended up with) cannot know anything
+   *  without replaying the board every seat played on. A hook given only one
+   *  player's moves can answer the first kind of question and none of the
+   *  second, which is why the second argument exists. */
+  summarise?(
+    inputs: { tick: number; kind: string }[],
+    match?: {
+      seat: number;
+      players: number;
+      seed: number;
+      durationTicks: number;
+      /** Every input in the match, seat-tagged and in tick order. */
+      all: { tick: number; seat: number; kind: string }[];
+    }
+  ): { label: string; value: string }[];
 }

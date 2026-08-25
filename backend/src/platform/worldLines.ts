@@ -43,6 +43,11 @@ const GAME = [
   "best i got was 2nd", "someone carry me", "im ranking up today for real",
   "carrom doubles anyone", "i keep pocketing the striker lol", "queen is mine",
   "carrom or ludo", "my cut shots are terrible", "9-0 carrom lets go",
+  "dots and boxes is so underrated", "i always open the long chain",
+  "took 9 boxes in one go", "anyone up for dots", "dots is pure maths lol",
+  "8 ball anyone", "i scratched on the black again", "that break was filthy",
+  "solids or stripes", "cleared the table in one visit", "pool doubles?",
+  "my safety game is non existent", "potted the 8 early lol",
 ];
 
 /** Reactions — the bulk of any real chat. */
@@ -57,7 +62,8 @@ const ASK = [
   "what rank are you", "anyone else lagging", "how do i change my character",
   "where is everyone", "what time is it there", "anyone here plays daily",
   "is trackline down for anyone", "how long you been playing",
-  "anyone up for carrom doubles",
+  "anyone up for carrom doubles", "who's good at dots and boxes",
+  "anyone play 8 ball", "whos on for pool",
   "whats your best score", "anyone wanna duo", "squad?", "who's the best here",
 ];
 
@@ -74,6 +80,8 @@ const REPLIES: { when: RegExp; say: string[] }[] = [
   { when: /\b(ludo)\b/i, say: ["ludo gang", "i hate ludo lol", "ludo is luck", "one ludo then", "ludo carry me"] },
   { when: /\b(trackline|run|running)\b/i, say: ["trackline is the best", "i keep crashing", "im ok at it", "lets go trackline"] },
   { when: /\b(carrom|striker|queen)\b/i, say: ["carrom gang", "im decent at carrom", "one carrom then", "i always miss the cut", "cover the queen first"] },
+  { when: /\b(dots|boxes|chain|square)\b/i, say: ["dots is my game", "count the chains", "i always give the first one away", "one dots then", "never open a long chain"] },
+  { when: /\b(pool|8 ?ball|cue|break|snooker|stripes|solids)\b/i, say: ["pool gang", "one 8 ball then", "i always scratch", "never play safe enough", "im on stripes", "call the black"] },
   { when: /\b(win|won|first)\b/i, say: ["nice", "congrats", "gz", "let's go", "sheesh"] },
   { when: /\b(lost|lose|last)\b/i, say: ["unlucky", "next one", "same lol", "happens", "rematch"] },
 ];

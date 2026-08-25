@@ -1,0 +1,569 @@
+/* 8-Ball Pool's in-match chrome. Scoped by .pl-* so nothing here reaches
+   another game or the lobby, and shipped inside the game's own chunk.
+
+   The table itself is canvas; everything in this file is the text around it —
+   the player cards, the two racks of balls, the line that says what just
+   happened, the two bars, the one button and the chat wheel. Keeping them as
+   elements is what lets an eighteen-second turn pass without a single repaint:
+   the turn clock below is one CSS animation, not a drawn arc. */
+
+/* `isolation: isolate` matters more than it looks. Without it every z-index in
+   this file competes with the PLATFORM's overlays — the "Preparing match…"
+   curtain, the 3·2·1 countdown, the results card — which are siblings of the
+   HUD root with no z-index of their own and so lose to any positive one here. */
+.pl-root {
+  position: absolute;
+  inset: 0;
+  isolation: isolate;
+  overflow: hidden;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: #e8ecf8;
+  /* Both set from the LAYOUT, so the DOM and the canvas can never disagree
+     about who owns the edges of the screen. */
+  --pl-side: 0px;
+  --pl-ctrl: 52px;
+}
+
+.pl-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  /* The cloth is a drag surface, so the browser must not read a drag on it as a
+     scroll or a pinch — the same rule the platform puts on its own canvas. */
+  touch-action: none;
+}
+.pl-table {
+  z-index: 0;
+}
+.pl-live {
+  z-index: 1;
+}
+
+/* ---------- the player cards ----------
+
+   A ROW ALONG THE TOP, not two rails. A pool table is two units by one and
+   fills a landscape phone edge to edge, so there is nothing at the sides to put
+   a card in — and unlike carrom there is no "your edge" for a card to sit
+   beside, because both sides play the whole table. */
+
+.pl-players {
+  position: absolute;
+  top: max(4px, env(safe-area-inset-top));
+  left: max(6px, env(safe-area-inset-left));
+  display: flex;
+  gap: 6px;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.pl-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 6px;
+  min-width: 92px;
+  max-width: 150px;
+  padding: 5px 8px 7px;
+  border-radius: 10px;
+  background: rgba(8, 14, 11, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(6px);
+  transition:
+    border-color 160ms ease,
+    background 160ms ease;
+}
+/* Your own side, so a doubles player can tell at a glance whose shot helps
+   them — the one thing a free-for-all game's cards never have to say. */
+.pl-card.ours .pl-dot {
+  background: #e5182e;
+}
+.pl-card.turn {
+  border-color: #e5182e;
+  background: rgba(8, 14, 11, 0.9);
+  box-shadow: 0 0 0 1px rgba(229, 24, 46, 0.7) inset;
+}
+.pl-card.gone {
+  opacity: 0.45;
+}
+/* Not waiting for this one any more. Dimmed rather than struck through: they
+   are still playing, and one touch brings them straight back. */
+.pl-card.away {
+  opacity: 0.6;
+}
+.pl-card.away .pl-name::after {
+  content: " · away";
+  font-weight: 400;
+  color: rgba(232, 236, 248, 0.5);
+}
+
+.pl-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.35);
+  box-shadow:
+    0 0 0 2px rgba(0, 0, 0, 0.5),
+    inset 0 1px 2px rgba(255, 255, 255, 0.35);
+}
+.pl-who {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+  line-height: 1.15;
+}
+.pl-name {
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* How many of their own group this player put down. A number and nothing else:
+   what it counts is on the card's title, and the racks opposite say the rest. */
+.pl-sunk {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 700;
+  color: rgba(232, 236, 248, 0.75);
+}
+
+/* The turn clock. One animation, started when the turn starts, then left to
+   run — no per-frame work anywhere. */
+.pl-timer {
+  grid-column: 1 / -1;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+.pl-timer i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: #e5182e;
+  transform-origin: left center;
+  transform: scaleX(0);
+}
+@keyframes pl-timer {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+
+/* Below its own card, because the cards are at the very top of the screen and
+   there is nothing above them. */
+.pl-bubble {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  padding: 5px 9px;
+  border-radius: 2px 10px 10px 10px;
+  background: #f2f5ff;
+  color: #12090d;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  opacity: 0;
+  transform: translateY(-4px) scale(0.9);
+  transition:
+    opacity 140ms ease,
+    transform 140ms ease;
+  pointer-events: none;
+}
+.pl-bubble.on {
+  opacity: 1;
+  transform: none;
+}
+
+/* ---------- the two racks ----------
+
+   Which of YOUR seven are still up. 8-ball is not played by counting, it is
+   played by looking, and no number can say "the yellow, the green and the black
+   are left and two of them are on a rail". */
+
+.pl-score {
+  position: absolute;
+  top: max(4px, env(safe-area-inset-top));
+  right: max(6px, env(safe-area-inset-right));
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 8px;
+  border-radius: 10px;
+  background: rgba(8, 14, 11, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(6px);
+  z-index: 2;
+  pointer-events: none;
+}
+.pl-rack {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.pl-rack-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(232, 236, 248, 0.55);
+  white-space: nowrap;
+}
+.pl-rack.mine .pl-rack-label {
+  color: #ff8a95;
+}
+.pl-chips {
+  display: flex;
+  gap: 2px;
+}
+
+.pl-chip {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  font-style: normal;
+  font-size: 8px;
+  font-weight: 800;
+  line-height: 13px;
+  text-align: center;
+  color: #14161b;
+  background: var(--pl-c, rgba(255, 255, 255, 0.14));
+  box-shadow: inset 0 1px 1.5px rgba(255, 255, 255, 0.5);
+}
+/* A stripe is a white ball with a band across it — the same way round as the
+   ball on the cloth, because it is the white that has to survive being
+   thirteen pixels wide. */
+.pl-chip.striped {
+  background: linear-gradient(
+    180deg,
+    #f3f1e8 0 30%,
+    var(--pl-c) 30% 70%,
+    #f3f1e8 70% 100%
+  );
+}
+/* An open table owns nothing yet, and the chips say so by being blank. */
+.pl-rack.open .pl-chip {
+  background: rgba(255, 255, 255, 0.1);
+  box-shadow: none;
+}
+.pl-chip.down {
+  opacity: 0.2;
+  color: transparent;
+  box-shadow: none;
+}
+.pl-eight {
+  margin: 0 1px;
+  align-self: flex-end;
+  color: #f3f1e8;
+  box-shadow:
+    inset 0 1px 1.5px rgba(255, 255, 255, 0.35),
+    0 0 0 1px rgba(255, 255, 255, 0.18);
+}
+
+/* ---------- the line that says what just happened ----------
+
+   Centred over the cloth rather than in a rail, because a pool table has no
+   rails to spare and a great deal of empty green. Never interactive, and gone
+   entirely when there is nothing to say. */
+.pl-banner {
+  position: absolute;
+  top: calc(max(4px, env(safe-area-inset-top)) + 46px);
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(70vw, 340px);
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: rgba(6, 12, 9, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 12.5px;
+  font-weight: 700;
+  line-height: 1.25;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  z-index: 3;
+  pointer-events: none;
+  backdrop-filter: blur(6px);
+}
+.pl-banner.hidden {
+  display: none;
+}
+.pl-banner.good {
+  border-color: rgba(229, 24, 46, 0.8);
+  color: #ffe3e6;
+}
+.pl-banner.bad {
+  border-color: #ff5566;
+  color: #ffd7dc;
+}
+
+.pl-hint {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(var(--pl-ctrl) + max(6px, env(safe-area-inset-bottom)) + 4px);
+  max-width: min(80vw, 420px);
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(6, 12, 9, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  color: rgba(232, 236, 248, 0.72);
+  font-size: 10.5px;
+  line-height: 1.35;
+  text-align: center;
+  white-space: nowrap;
+  z-index: 3;
+  pointer-events: none;
+}
+.pl-hint.hidden {
+  display: none;
+}
+
+/* ---------- the controls ----------
+
+   Two bars and a button. Carrom needs a placement bar as well because its
+   striker only ever slides along one line; a cue ball goes anywhere, so its
+   placement is a drag on the table itself and the strip keeps the room. */
+.pl-strip {
+  position: absolute;
+  left: max(6px, env(safe-area-inset-left));
+  right: max(6px, env(safe-area-inset-right));
+  bottom: max(4px, env(safe-area-inset-bottom));
+  height: calc(var(--pl-ctrl) - 8px);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  z-index: 4;
+}
+/* A replay. Not dimmed — GONE: a watcher who can see a button will press it,
+   and a replay somebody can appear to steer is not a replay. */
+.pl-strip.watch {
+  display: none;
+}
+/* Not this player's turn: the whole strip greys out together. */
+.pl-strip.off {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.pl-bar {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 100%;
+  padding: 0 10px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  border-radius: 12px;
+  background: rgba(8, 14, 11, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(6px);
+  touch-action: none;
+  cursor: pointer;
+}
+.pl-bar-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(232, 236, 248, 0.55);
+}
+.pl-bar-track {
+  position: relative;
+  height: 7px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.14);
+}
+.pl-bar-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 50%;
+  border-radius: 4px;
+  background: linear-gradient(90deg, #8d0b1a, #e5182e);
+}
+/* The fine bar has no "amount" to fill: it is a trim either side of straight,
+   so it is drawn as a centre line and a knob rather than as a level. */
+.pl-trim .pl-bar-fill {
+  display: none;
+}
+.pl-trim .pl-bar-track::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: -2px;
+  bottom: -2px;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.45);
+}
+.pl-bar-knob {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 15px;
+  height: 15px;
+  margin: -7.5px 0 0 -7.5px;
+  border-radius: 50%;
+  background: #f4f7ff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+}
+
+.pl-shoot {
+  flex: 0 0 auto;
+  min-width: 104px;
+  height: 100%;
+  padding: 0 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(229, 24, 46, 0.55);
+  background: linear-gradient(180deg, #e5182e, #8d0b1a);
+  color: #fff;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.pl-shoot:disabled {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: rgba(232, 236, 248, 0.4);
+  cursor: default;
+}
+.pl-shoot.ready {
+  box-shadow: 0 0 18px rgba(229, 24, 46, 0.45);
+}
+.pl-shoot:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+/* ---------- quick chat ---------- */
+
+.pl-quick-btn {
+  position: absolute;
+  right: max(8px, env(safe-area-inset-right));
+  bottom: calc(max(8px, env(safe-area-inset-bottom)) + var(--pl-ctrl));
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(8, 14, 11, 0.7);
+  color: #e8ecf8;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  z-index: 4;
+  backdrop-filter: blur(6px);
+}
+.pl-quick-btn:active {
+  transform: scale(0.94);
+}
+.pl-quick-btn.on {
+  border-color: #e5182e;
+}
+
+.pl-wheel {
+  position: absolute;
+  right: max(8px, env(safe-area-inset-right));
+  bottom: calc(max(8px, env(safe-area-inset-bottom)) + var(--pl-ctrl) + 48px);
+  width: min(190px, 44vw);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 7px;
+  border-radius: 12px;
+  background: rgba(8, 14, 11, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  z-index: 4;
+  backdrop-filter: blur(10px);
+}
+.pl-wheel.hidden {
+  display: none;
+}
+.pl-wheel > button {
+  padding: 6px 9px;
+  border-radius: 8px;
+  border: none;
+  background: rgba(255, 255, 255, 0.06);
+  color: #e8ecf8;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.pl-wheel > button:active {
+  background: rgba(229, 24, 46, 0.5);
+}
+.pl-emotes {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 3px;
+  margin-top: 2px;
+}
+.pl-emotes button {
+  padding: 5px 0;
+  border-radius: 7px;
+  border: none;
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.pl-emotes button:active {
+  background: rgba(229, 24, 46, 0.5);
+}
+
+/* Dark until they speak — see the Trackline board for why "mic on" is not
+   worth drawing. */
+.pl-mic {
+  font-style: normal;
+  font-size: 11px;
+  opacity: 0;
+  transition: opacity 0.08s linear;
+}
+.pl-mic.live {
+  opacity: 1;
+  text-shadow: 0 0 8px rgba(120, 220, 160, 0.8);
+}
+
+/* On a short screen the chrome gives way before the table does. */
+@media (max-height: 380px) {
+  .pl-name {
+    font-size: 11px;
+  }
+  .pl-card {
+    min-width: 78px;
+    padding: 4px 6px 6px;
+  }
+  .pl-hint {
+    display: none;
+  }
+  .pl-chip {
+    width: 11px;
+    height: 11px;
+    line-height: 11px;
+    font-size: 7px;
+  }
+  .pl-shoot {
+    min-width: 84px;
+    padding: 0 12px;
+    font-size: 13px;
+  }
+}
+/* And on a narrow one the racks lose their labels before they lose their
+   balls, because the balls are the information. */
+@media (max-width: 620px) {
+  .pl-rack-label {
+    display: none;
+  }
+}

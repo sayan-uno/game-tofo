@@ -1,0 +1,445 @@
+/* Dots & Boxes' in-match chrome. Scoped by .dt-* so nothing here reaches
+   another game or the lobby, and shipped inside the game's own chunk.
+
+   The grid itself is canvas; everything in this file is the text around it —
+   the player cards, how much board is left, the line that says what just
+   happened, the one button and the chat wheel. Keeping them as elements is what
+   lets a twelve-second turn pass without a single repaint: the turn clock below
+   is one CSS animation, not a drawn arc. */
+
+/* `isolation: isolate` matters more than it looks. Without it every z-index in
+   this file competes with the PLATFORM's overlays — the "Preparing match…"
+   curtain, the 3·2·1 countdown, the results card — which are siblings of the
+   HUD root with no z-index of their own and so lose to any positive one here. */
+.dt-root {
+  position: absolute;
+  inset: 0;
+  isolation: isolate;
+  overflow: hidden;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: #e8ecf8;
+  /* Both set from the LAYOUT, so the DOM and the canvas can never disagree
+     about who owns the edges of the screen. */
+  --dt-rail: 110px;
+  --dt-ctrl: 46px;
+}
+
+.dt-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  /* The grid is a drag surface, so the browser must not read a drag on it as a
+     scroll or a pinch — the same rule the platform puts on its own canvas. */
+  touch-action: none;
+}
+.dt-grid {
+  z-index: 0;
+}
+.dt-live {
+  z-index: 1;
+}
+
+/* ---------- the player cards ----------
+
+   Half in each rail. It is a free-for-all, so there is no side to put anybody
+   on, and splitting them keeps each card wide enough for a name at a readable
+   size — on a two-player board it also puts the two of them either side of the
+   grid, like a scoreboard. */
+
+.dt-players {
+  position: absolute;
+  top: calc(50% - var(--dt-ctrl) / 2);
+  transform: translateY(-50%);
+  width: calc(var(--dt-rail) - 10px);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  z-index: 2;
+  pointer-events: none;
+}
+.dt-left {
+  left: max(5px, env(safe-area-inset-left));
+}
+.dt-right {
+  right: max(5px, env(safe-area-inset-right));
+}
+
+.dt-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px 8px;
+  border-radius: 10px;
+  background: rgba(12, 8, 11, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(6px);
+  transition:
+    border-color 160ms ease,
+    background 160ms ease;
+}
+.dt-card.turn {
+  border-color: var(--dt-c);
+  background: rgba(12, 8, 11, 0.88);
+  box-shadow: 0 0 0 1px var(--dt-c, #e5182e) inset;
+}
+/* Whoever is ahead. A ring round their colour chip rather than a word: the
+   count already has "boxes" after it, and an ::after on the same element would
+   replace that rather than join it — which is how the leader ended up as the
+   one player whose card did not say what the number meant. */
+.dt-card.lead .dt-boxes {
+  color: var(--dt-cl);
+  font-weight: 700;
+}
+.dt-card.lead .dt-dot {
+  box-shadow:
+    0 0 0 2px var(--dt-cl),
+    0 0 10px var(--dt-c),
+    inset 0 1px 2px rgba(255, 255, 255, 0.35);
+}
+.dt-card.gone {
+  opacity: 0.45;
+}
+/* Not waiting for this one any more. Dimmed rather than struck through: they
+   are still playing, and one touch brings them straight back. */
+.dt-card.away {
+  opacity: 0.6;
+}
+.dt-card.away .dt-name::after {
+  content: " · away";
+  font-weight: 400;
+  color: rgba(232, 236, 248, 0.5);
+}
+
+.dt-dot {
+  width: 13px;
+  height: 13px;
+  border-radius: 3px;
+  background: var(--dt-c);
+  box-shadow:
+    0 0 0 2px rgba(0, 0, 0, 0.5),
+    inset 0 1px 2px rgba(255, 255, 255, 0.35);
+}
+.dt-who {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.15;
+}
+.dt-name {
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dt-boxes {
+  font-size: 10.5px;
+  color: rgba(232, 236, 248, 0.55);
+  letter-spacing: 0.02em;
+}
+
+/* The turn clock. One animation, started when the turn starts, then left to
+   run — no per-frame work anywhere. */
+.dt-timer {
+  grid-column: 1 / -1;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+.dt-timer i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--dt-c);
+  transform-origin: left center;
+  transform: scaleX(0);
+}
+@keyframes dt-timer {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+
+/* Above its own card, never beside it: the rail is exactly as wide as a card,
+   so a bubble to the side would be a bubble over the grid. */
+.dt-bubble {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 4px);
+  padding: 5px 9px;
+  border-radius: 10px 10px 2px 10px;
+  background: #f2f5ff;
+  color: #12090d;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  opacity: 0;
+  transform: translateY(4px) scale(0.9);
+  transition:
+    opacity 140ms ease,
+    transform 140ms ease;
+  pointer-events: none;
+}
+.dt-bubble.on {
+  opacity: 1;
+  transform: none;
+}
+
+/* ---------- how much board is left ----------
+
+   One number, along the top. The four scores are already on the cards; what a
+   player cannot see from those is how near the end they are, which on a board
+   that can be decided with a third of it still undrawn is the thing that tells
+   them whether to take a risk. */
+.dt-tally {
+  position: absolute;
+  top: max(4px, env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4px 14px;
+  border-radius: 999px;
+  background: rgba(12, 8, 11, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: rgba(232, 236, 248, 0.75);
+  line-height: 1.3;
+  z-index: 3;
+  pointer-events: none;
+  backdrop-filter: blur(6px);
+}
+
+/* ---------- the line that says what happened ----------
+
+   In the rail under the local player's own cards, which is the one place on
+   this screen that is neither grid nor button. */
+.dt-banner {
+  margin-top: 4px;
+  padding: 6px 9px;
+  border-radius: 10px;
+  background: rgba(12, 8, 11, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.25;
+  text-align: center;
+  z-index: 3;
+  pointer-events: none;
+  backdrop-filter: blur(6px);
+}
+.dt-banner.hidden {
+  display: none;
+}
+.dt-banner.good {
+  border-color: rgba(255, 255, 255, 0.4);
+}
+.dt-banner.bad {
+  border-color: #ff5566;
+  color: #ffd7dc;
+}
+
+.dt-hint {
+  padding: 5px 9px;
+  border-radius: 10px;
+  background: rgba(12, 8, 11, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  color: rgba(232, 236, 248, 0.7);
+  font-size: 10.5px;
+  line-height: 1.35;
+  text-align: center;
+  z-index: 3;
+  pointer-events: none;
+}
+.dt-hint.hidden {
+  display: none;
+}
+
+/* ---------- the one control ----------
+
+   What has been chosen, and the button that plays it. Carrom needs three of
+   these because a flick is three decisions; a line is one, so this strip is
+   thinner and the grid keeps the difference. */
+.dt-strip {
+  position: absolute;
+  left: max(6px, env(safe-area-inset-left));
+  right: max(6px, env(safe-area-inset-right));
+  bottom: max(4px, env(safe-area-inset-bottom));
+  height: calc(var(--dt-ctrl) - 8px);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  z-index: 4;
+}
+/* A replay. Not dimmed — GONE: a watcher who can see a button will press it,
+   and a replay somebody can appear to steer is not a replay. */
+.dt-strip.watch {
+  display: none;
+}
+/* Not this player's turn: the whole strip greys out together. */
+.dt-strip.off {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.dt-picked {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0 14px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  border-radius: 12px;
+  background: rgba(12, 8, 11, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 12.5px;
+  color: rgba(232, 236, 248, 0.8);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  backdrop-filter: blur(6px);
+}
+
+.dt-draw {
+  flex: 0 0 auto;
+  min-width: 112px;
+  height: 100%;
+  padding: 0 18px;
+  border-radius: 12px;
+  border: 1px solid rgba(229, 24, 46, 0.55);
+  background: linear-gradient(180deg, #e5182e, #8d0b1a);
+  color: #fff;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.dt-draw:disabled {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: rgba(232, 236, 248, 0.4);
+  cursor: default;
+}
+.dt-draw.ready {
+  box-shadow: 0 0 18px rgba(229, 24, 46, 0.45);
+}
+.dt-draw:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+/* ---------- quick chat ---------- */
+
+.dt-quick-btn {
+  position: absolute;
+  right: max(8px, env(safe-area-inset-right));
+  bottom: calc(max(8px, env(safe-area-inset-bottom)) + var(--dt-ctrl));
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(12, 8, 11, 0.7);
+  color: #e8ecf8;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  z-index: 4;
+  backdrop-filter: blur(6px);
+}
+.dt-quick-btn:active {
+  transform: scale(0.94);
+}
+.dt-quick-btn.on {
+  border-color: #e5182e;
+}
+
+.dt-wheel {
+  position: absolute;
+  right: max(8px, env(safe-area-inset-right));
+  bottom: calc(max(8px, env(safe-area-inset-bottom)) + var(--dt-ctrl) + 48px);
+  width: min(190px, 44vw);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 7px;
+  border-radius: 12px;
+  background: rgba(12, 8, 11, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  z-index: 4;
+  backdrop-filter: blur(10px);
+}
+.dt-wheel.hidden {
+  display: none;
+}
+.dt-wheel > button {
+  padding: 6px 9px;
+  border-radius: 8px;
+  border: none;
+  background: rgba(255, 255, 255, 0.06);
+  color: #e8ecf8;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.dt-wheel > button:active {
+  background: rgba(229, 24, 46, 0.5);
+}
+.dt-emotes {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 3px;
+  margin-top: 2px;
+}
+.dt-emotes button {
+  padding: 5px 0;
+  border-radius: 7px;
+  border: none;
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.dt-emotes button:active {
+  background: rgba(229, 24, 46, 0.5);
+}
+
+/* Dark until they speak — see the Trackline board for why "mic on" is not
+   worth drawing. */
+.dt-mic {
+  font-style: normal;
+  font-size: 11px;
+  margin: 0 4px;
+  opacity: 0;
+  transition: opacity 0.08s linear;
+}
+.dt-mic.live {
+  opacity: 1;
+  text-shadow: 0 0 8px rgba(120, 220, 160, 0.8);
+}
+
+/* On a short screen the cards give way before the grid does. */
+@media (max-height: 380px) {
+  .dt-name {
+    font-size: 11px;
+  }
+  .dt-card {
+    padding: 4px 6px 6px;
+  }
+  .dt-hint {
+    display: none;
+  }
+  .dt-draw {
+    min-width: 88px;
+    padding: 0 12px;
+    font-size: 13px;
+  }
+}

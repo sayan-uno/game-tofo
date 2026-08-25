@@ -145,7 +145,7 @@ No code changes needed, ever — only those env values.
 
 ## Games
 
-Three so far, and they are deliberately unalike — the platform is only proved
+Five so far, and they are deliberately unalike — the platform is only proved
 game-agnostic by games that do not resemble the first one.
 
 **Trackline** is a four-lane runner: the leader picks it, every member
@@ -247,7 +247,90 @@ alternate one way through its first half and the other way through its second �
 plain alternation is *not* fair on a ring of twelve, and measured over eighteen
 thousand bot boards the difference showed up as a lopsided result.
 
-### Three shapes of netcode, all inputs-only
+**Dots & Boxes** is the fourth, and the odd one out: no dice, no physics, no
+hidden information. Everybody can see the whole grid and work out the whole
+future of it, which makes it the one game here where **the bot's opinion of a
+position is the entire difficulty curve**. It is also the cheapest thing on the
+platform — a whole match is eighty-four integers, a cold replay costs a tenth
+of a millisecond, and it downloads nothing.
+
+Six boxes a side: forty-nine dots, eighty-four lines, thirty-six boxes,
+free-for-all at both match sizes (a box belongs to whoever closed it, so there
+is nothing to pair up). Close a box and you go again, which is what makes the
+game about **chains** rather than about lines.
+
+Three things make it work:
+
+- **The bot plays properly.** Take what is free; never leave a box on three
+  sides while a safe line exists; when everything gives something away, give
+  away the shortest chain. And the move that separates a good player from a
+  beginner — the **double-cross**: with two boxes left in the chain you are
+  eating, play a line that scores nothing, hand your opponent those two, and
+  make them open the next chain for you. Measured, a strong bot beats a weak one
+  60/60 and a middling one 52/60.
+- **Choosing is not a lottery.** A line is two pixels wide and a finger is
+  forty, so touching the grid picks the **nearest free line** and shows it; a
+  second touch on the same line, or the DRAW button, plays it. A first touch
+  never draws anything — on a board where one line decides a chain of six, a
+  finger landing somewhere unintended is the difference between a game and an
+  argument.
+- **You can watch the others think.** The line under a player's finger is
+  broadcast as `m<n>` and drawn in their colour on every other grid. Bots do it
+  too, for the same reason they show an aim in carrom.
+
+Ending early is a rule here rather than a mercy: once the leader is further
+ahead than every box still on the board, the rest is thirty moves of arithmetic
+nobody can change, so the grid stops. And who opens is drawn from the seed —
+on a grid this small the opening move decides the parity of who has to break
+the first chain, so a fixed first seat would be a fixed handicap.
+
+**8 Ball Pool** is the fifth, and it is the second game here with real physics —
+so carrom's determinism argument applies again unchanged and is not restated: a
+stroke is five integers, the solver uses only `+ - * / sqrt`, and `check:pool`
+greps the source to keep it that way. Two sides always: two players is singles,
+four is scotch doubles with partners alternating. It downloads nothing.
+
+What it deliberately does **not** have is spin. No draw, no follow, no English.
+That is a decision rather than an omission — side and screw need angular
+momentum, a friction torque between cloth and ball, and a contact model that
+turns a two-line collision into thirty, and every one of those lines is another
+place for two devices to round differently. What is left is the game somebody
+actually plays on a phone with one thumb: aim, cut, weight, position.
+
+Three things make it work:
+
+- **A cloth that is a cloth.** This shipped once with the deceleration set to
+  the number that made shots settle promptly, which turned out to be about four
+  times a real table's. It strangled the game: the break's energy is split
+  fifteen ways and a ball at speed *u* runs *u²/2a*, so at that friction every
+  ball off the break had half a table-length in it, the pack never opened, and
+  over four hundred measured racks the break potted **exactly nothing**. On a
+  real table those balls have six table-lengths in them and spend them
+  ricocheting past the pockets. At the honest number two breaks in three pot,
+  and the foul rate fell by half at the same time — most of the "fouls" had been
+  shots where no ball could reach a cushion.
+- **An aim a thumb can actually make.** A pot is about a quarter of a degree
+  wide. Dragging the cloth points the cue at your finger (full 360°, and letting
+  go changes nothing), and a separate **FINE** bar swings the aim two degrees end
+  to end and springs back to the middle, folding what it did into the aim — so it
+  can be used over and over to walk the line onto a ball, which no absolute
+  control can do. The **ghost ball** is drawn on the contact point and a second
+  line shows where the struck ball will set off, because that is how the game is
+  aimed by people who play it.
+- **Ball in hand is a drag, not a menu.** After a foul the cue ball is dragged
+  anywhere on the cloth (behind the head string after a foul on the break, which
+  is drawn as a lit band), and where it lands is decided by the **shared**
+  `nearestSpot` — the same function the server and every replay call, so the
+  ghost under the thumb is exactly the square inch the shot comes from.
+
+The rack is legal by construction and the check says so out loud: a solid at the
+apex, the black in the middle of the third row, and **one solid and one stripe in
+the two back corners**. The last is not decoration — the back corners are the two
+balls a break throws furthest, so a rack with both from the same group hands that
+group's side a real edge on a shot whose taker is drawn from the seed. It was
+wrong in the first draft and the check caught it.
+
+### Four shapes of netcode, all inputs-only
 
 Only **inputs** cross the wire in either game (`{tick, kind}`), and every client
 and the server run the same seeded simulation over them. What differs is who is
@@ -280,6 +363,21 @@ own input (`s<t>,<dx>,<dy>,<p>`). The extra thing that buys here is that the
 striker's placement is settled **once**, in shared code, so the line the player
 is shown before they let go is the line the shot actually travels.
 
+**Dots & Boxes** is the same rule a third time, with one addition: a request for
+a line somebody else already took is **ignored rather than answered**. That is
+the commonest thing a finger lands on, and playing something else on the
+player's behalf would be very much worse than letting them tap again — so the
+server only marks the turn answered once it has actually written a move.
+
+**8 Ball Pool** is the rule a fourth time. A stroke is a request
+(`a<x>,<y>,<dx>,<dy>,<p>`) the simulation ignores; the server reads it against
+the live table and writes the shot (`s…`). The extra thing it buys here is the
+same thing carrom's placement bought: where the cue ball ends up when it is in
+hand is settled **once**, in shared code, so the ghost the player is looking at
+is where the shot will come from. One shot has one encoding, too — the integer
+reader refuses a padded `0500`, because a kind is a string that gets logged,
+compared and replayed.
+
 Two hooks on `GameServerDefinition` exist for this and are optional, so a game
 that needs neither declares neither: `serverInputs` (inputs the server authors —
 also how a board game's bots react, since they cannot be planned up front the
@@ -296,7 +394,14 @@ always drawn:
 | --- | --- |
 | `describeInput(kind)` | a one-line readout under the tape: *0:02 · Bot Kori · flick · 71% power · from centre*, and the tooltip on every mark |
 | `inputWeight(kind)` | the **height** of that input's mark, so a lane becomes a bar chart of how hard somebody played rather than a row of identical ticks |
-| `summarise(inputs)` | numbers under each player's row: *12 shots · 36% avg power · 13% softest · 61% hardest · 0 of 12 full-blooded · 18 aim changes* |
+| `summarise(inputs, match)` | numbers under each player's row: *12 shots · 36% avg power · 13% softest · 61% hardest*, or *14 boxes · 25 lines · 14 best run · 3 given away*, or *5 balls potted · 3 shots best run · 2 fouls · 2 left* |
+
+`summarise`'s second argument is the whole match — every input, seat-tagged,
+plus the seed. It is optional for a reason: a game whose interesting numbers are
+personal (how hard somebody hit things) needs only their own moves, while a game
+whose numbers are POSITIONAL (how many boxes they ended up with) cannot know
+anything without replaying the grid every seat played on. Dots & Boxes replays
+the whole match to answer it, which costs a tenth of a millisecond.
 
 They live on the module rather than on a runtime because they are facts about
 the game's input encoding, not about one match — and because the studio builds
@@ -304,7 +409,16 @@ its tape before any runtime exists. Every call is wrapped: a game that throws in
 one of them loses its tape decorations and nothing else. The studio is evidence
 first.
 
-Carrom declares all three; Trackline and Ludo declare none and are unchanged.
+Carrom, Dots & Boxes and 8 Ball Pool declare all three; Trackline and Ludo
+declare none and are unchanged.
+
+Pool's `inputWeight` is the one worth copying. A mark's height is the SPEED the
+cue ball left at, not the slider position — the slider is deliberately not linear
+(`p·√p`, because almost every shot in a rack is played below half power), so a
+tape of slider positions would draw a gentle roll two thirds as tall as a break.
+Drawn from the speed, a rack has a visible shape: the break at the top, a run of
+soft pots through the middle, and a hard safety wherever somebody was snookered
+— all without a single ball being rendered.
 
 ### Checking a game's simulation
 
@@ -316,17 +430,33 @@ npm run check:sim      # Trackline: determinism, solvability, replay parity
 npm run check:ludo     # Ludo: board geometry, rules, authority, liveness, replay parity
 npm run check:carrom   # Carrom: arithmetic, physics, rules, replay parity, fairness
 npm run check:carromui # Carrom's CLIENT, in a real browser (starts its own dev server)
+npm run check:dots     # Dots & Boxes: geometry, rules, replay parity, BOT STRENGTH, fairness
+npm run check:dotsui   # its CLIENT, in a real browser (starts its own dev server)
+npm run check:pool     # 8 Ball: arithmetic, the rack, pockets, physics, THE BREAK, rules
+npm run check:poolui   # its CLIENT, in a real browser (starts its own dev server)
 ```
 
-Run the one for the game you touched before committing. Ludo's and carrom's
-also drive their own server definitions through a whole match, which is what
-proves the bots, the shots and the ranking rather than just the rules.
+Run the one for the game you touched before committing. Ludo's, carrom's,
+dots' and pool's also drive their own server definitions through a whole match,
+which is what proves the bots, the shots and the ranking rather than just the
+rules.
+
+Pool's has one section worth knowing about by name: **the break**. It measures
+how often a full-power break pots something, how far the furthest ball travels,
+and how long the table takes to settle — the three numbers that were all wrong
+together when the cloth's friction was wrong, and none of which any rules test
+would have noticed.
 
 There is a live one too, against a running backend, Postgres and Redis:
 
 ```bash
 npm run e2e:carrom     # a REAL solo match: bot fill, the flick round trip,
                        # a forged shot refused, and the archive re-ranked
+npm run e2e:dots       # the same for Dots & Boxes, plus: a request for a line
+                       # already drawn is ignored, and the next one still works
+npm run e2e:pool       # the same for 8 Ball, plus: a request made on somebody
+                       # else's turn is ignored, and every shot in the archive
+                       # was struck by the seat whose turn it was
 ```
 
 It starts a real carrom match, lets matchmaking fill it with bots, plays real
@@ -341,8 +471,8 @@ If another backend is already running, give the one under test its own Redis
 database (`REDIS_URL=<the usual>/4`) — every backend on a keyspace runs a
 matchmaker, and the loser of that race reports nothing at all.
 
-`check:carromui` is the only one that opens a browser. It proves four things
-Node cannot see: that the board is really painted (by the *weight* of a PNG of
+`check:carromui`, `check:dotsui` and `check:poolui` are the ones that open a
+browser. Taking carrom's as the example, it proves four things Node cannot see: that the board is really painted (by the *weight* of a PNG of
 each canvas — a blank canvas passes every selector-based test there is); that
 the controls work, driven with real pointer events (the aim goes all the way
 round, each bar moves only its own thing, aiming is *broadcast* but never
@@ -359,6 +489,18 @@ mid-game with the real simulation and mounts the real runtime inside the real
 platform DOM, so what you see is the shipped screen; `p=2` shows the two-handed
 board and `w`/`h` check a phone-shaped landscape. Vite builds only
 `index.html`, so it never ships.
+
+Dots & Boxes has one too: `/dots-preview.html?w=900&h=460&p=4&moves=40`, with
+`&pick=1` (a line chosen and DRAW live), `&watch=1` (what the others see while
+somebody chooses), `&stop=fill` and `&replay=1`.
+
+8 Ball has one as well: `/pool-preview.html?w=900&h=460&p=2&shots=10`, with
+`&aim=1` (an aim lined up and SHOOT live), `&watch=1`, `&hand=1` (the cue ball
+in hand after a foul), `&roll=1` (frozen mid-shot with the balls still moving)
+and `&replay=1`. Its clock is **stopped** rather than merely started in the
+past: the dev server can take twenty seconds to compile the modules underneath
+it, and a running clock would carry the table straight through the shot the page
+was staged to sit in front of.
 
 Carrom has the same page: `/carrom-preview.html?w=900&h=460&p=4&shots=30`.
 `p=2` is singles, `&aim=1` stages a charged aim line and power ring, and
