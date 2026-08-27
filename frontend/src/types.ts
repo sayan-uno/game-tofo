@@ -53,6 +53,10 @@ export interface CatalogCharacter {
   rarity: "starter" | "rare" | "epic" | "legendary";
   /** Chosen server-side so a new character's look is data, not a client branch. */
   aura?: AuraKind;
+  /** Where this character's fist sits in its RightHand joint, in metres. Not a
+   *  shared constant because Meshy does not place a wrist the same way twice —
+   *  see weapon.ts. Absent falls back to the default there. */
+  grip?: [number, number, number];
   url: string | null;
   owned: boolean;
   /** null = free. */

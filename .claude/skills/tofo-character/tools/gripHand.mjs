@@ -35,9 +35,12 @@ import { statSync } from 'node:fs';
 import { mat4, vec3 } from 'gl-matrix';
 import path from 'node:path';
 
-const [src, dst, radiusArg, knuckleArg, twistArg, handArg] = process.argv.slice(2);
+const rawArgs = process.argv.slice(2);
+/** Curl a hand the reach test already calls closed. See the guard below. */
+const FORCE = rawArgs.includes('--force');
+const [src, dst, radiusArg, knuckleArg, twistArg, handArg] = rawArgs.filter((a) => a !== '--force');
 if (!src || !dst) {
-  console.error('usage: node gripHand.mjs <in.glb> <out.glb> [radius_cm] [knuckle_cm] [twist_deg] [RightHand]');
+  console.error('usage: node gripHand.mjs <in.glb> <out.glb> [radius_cm] [knuckle_cm] [twist_deg] [RightHand] [--force]');
   process.exit(1);
 }
 const HAND = handArg ?? 'RightHand';
@@ -217,8 +220,20 @@ const drift = farSum / farN - nearSum / nearN;
 const palmSign = Math.sign(drift) || 1;
 console.log(`· hand reaches ${(reach / cm).toFixed(1)}cm from the wrist (open ~18-21, fist ~10)`);
 console.log(`· fingers drift ${(drift / cm).toFixed(2)}cm toward ${palmSign > 0 ? '+Z' : '-Z'} — that is the palm side`);
-if (reach / cm < 13) {
+if (reach / cm < 13 && !FORCE) {
+  // REACH IS NOT CURL. This measures wrist-to-fingertip, which a small hand
+  // fails whether its fingers are curled or splayed flat — and Meshy's premium
+  // batch came back with hands reaching 9-11cm while the fingers lay open, so
+  // the guard fired on exactly the hands that most needed closing. They shipped
+  // holding a rifle with the fingers passing straight through the pistol grip.
+  //
+  // The guard still earns its place on a hand that IS closed, so it stays the
+  // default. Pass --force when a render shows flat fingers on a small hand, and
+  // LOOK at the result: this is the one operation with no numeric check that
+  // can tell a proper fist from a crushed one.
   console.error('✗ this hand is already closed; curling it again would crush it.');
+  console.error('  If a render shows the fingers flat and passing through the weapon, this is');
+  console.error('  a SMALL hand rather than a closed one — re-run with --force and look at it.');
   process.exit(1);
 }
 

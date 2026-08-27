@@ -162,6 +162,28 @@ catalog there. This has already cost two characters a version number. If a
 fresh path 404s while `HeadObject` finds the object, that is what happened;
 a `?cb=` query string returning 200 confirms it.
 
+**A plain `curl` is NOT enough to prove the path is good.** The CDN sends
+`Vary: Origin`, so every browser origin gets its OWN cache entry, and a curl
+with no `Origin` header checks a variant no browser will ever read. Six
+characters once verified 200 on all eight paths by plain curl and were still
+dead in the browser: `cf-cache-status: HIT` on a 404 carrying
+`max-age=31536000`, poisoned per-origin. Production was fine and only the
+Codespaces dev origin was broken, which makes it look like a local glitch
+rather than what it is. Check the origin you actually load from:
+
+```bash
+curl -sS -o /dev/null -H "Origin: <the dev or prod origin>" \
+  -w "%{http_code}\n" https://cdn.tofo.in/characters/<id>/v1/model.glb
+```
+
+**Upload BEFORE pointing the catalog at the new version, never after.** The
+backend runs under `tsx watch`, so saving `catalog.ts` republishes the new keys
+to every client within a second. Any page load in the gap between that save and
+the upload finishing asks for paths that do not exist yet — and that request,
+carrying a real `Origin`, is what caches the 404 for a year. Editing the
+catalog first is what poisoned those six: the models were correct, the upload
+was correct, and the ordering still cost them a version number each.
+
 ## 6. Add to the game — only when the user asks
 
 One line in `backend/src/services/catalog.ts`:
@@ -275,6 +297,31 @@ a render. And when changing a deformer, re-bake a character it is NOT supposed
 to affect and diff it against the published file — male came back identical
 vertex for vertex, which proved the fix was surgical and saved re-publishing
 three characters.
+
+**A hand that measures "closed" can still be flat.** `gripHand.mjs` refuses to
+run on a hand reaching under 13cm, on the grounds that it is already a fist and
+curling it again would crush it. That test is wrist-to-fingertip DISTANCE, which
+a small hand fails whether its fingers are curled or splayed — and every
+character in the premium batch came back reaching 9-11cm with the fingers lying
+flat. The guard fired on exactly the hands that most needed closing, so they
+shipped holding a rifle with the fingers passing straight through the pistol
+grip, fingertips out the far side. It reads to a player as "the hand goes
+through the gun".
+
+Pass `--force` to curl one of those anyway, around 2.4cm, and then LOOK at it:
+this is the one operation with no numeric check that separates a proper fist
+from a crushed one. Two things follow from a forced curl and both matter:
+
+- **Re-measure `grip` afterwards.** Curling moves the finger mass, so the old
+  offset is stale by centimetres. Measured off the newly closed fist it lands
+  in the tunnel on its own — with a flat hand it lands in solid meat, which is
+  what put the handle inside the fingers in the first place. No fudge offset is
+  needed once the fist is real; if one seems to be, the fist is still open.
+- **The palm direction reported by `fistOffset.mjs` will swing 40 degrees or
+  more, and that is an artefact.** It is derived from how the finger mass
+  drifts, and curling is exactly a change in that drift. The hand has not
+  rotated and does not need re-pronating. Compare palm angles only between
+  hands curled the same amount.
 
 **A fist's tunnel runs across the palm, perpendicular to the forearm.** That,
 not the grip transform, is what decides where a held blade can point: with the
@@ -416,6 +463,51 @@ Nothing is wrong with the texture, the material, the UVs or the mesh at that
 point, which is what makes it so hard to look at. `--crush` darkens only the
 desaturated pixels, on a ramp so no edge appears mid-panel, and lands closer to
 the concept art than the raw bake did.
+
+### Measure the fist, then check which way it FACES
+
+Two per-character numbers decide whether a held weapon looks held, and both are
+read straight off the GLB. Neither is a constant, and both were assumed to be
+one at some point:
+
+```bash
+node fistOffset.mjs <character.glb> [RightHand]     # add --json for a script
+node pronate.mjs <in.glb> <out.glb> <degrees> [RightHand]
+```
+
+**Where the fist is** — `fistOffset.mjs` prints `grip`, the centroid of the
+curled finger mass in the hand joint's own frame. Put it in the catalog as
+`grip`. weapon.ts once carried ONE offset for everybody, on the stated grounds
+that all four characters then shipped "produced the same numbers to five
+decimals". They do not: that value is `male`'s, it fits seraph, it is 2-3 cm
+out on female and zenith, and it was 6-7 cm out on every character generated
+afterwards. On a hand about 10 cm across, 6 cm out is a weapon held beside the
+fist with the fingers splayed past it — which is exactly what shipped.
+
+**Which way it faces** — the same tool reports the palm direction, as the drift
+from the knuckles to the fingertips, and compares it to `male`'s. Meshy builds
+some hands rotated about their own finger axis: in one batch of six, five right
+hands came back 150-180 degrees over and ALL SIX left hands did. `realign.mjs`
+does not catch it and cannot — it conforms the hand JOINT's axes, and those are
+already right to within a degree. It is the mesh hanging off the joint that is
+turned over. Sanity-check every new character against an existing one; a report
+over about 90 degrees means the hand is flipped.
+
+`pronate.mjs` turns it back, in the bind pose, spread from the elbow to the
+wrist because that is what a forearm does — dumping 180 degrees at the wrist
+alone wrings the sleeve into a pinch right where the two meet. Run it AFTER
+`gripHand.mjs` so the closed fist rides along, then RE-MEASURE `grip`: turning
+the hand moves the fist, and the old number is stale by centimetres.
+
+**Do not fix a turned hand by rotating the WEAPON.** It is the obvious move and
+it is wrong. Turning the weapon by the same amount does put the handle back in
+the palm, and swings the BARREL through 180 degrees on the way, so the
+character stands in the lobby aiming behind itself. With a sword the tell is
+subtler and it still ships wrong. The hand is what is wrong, so the hand is
+what gets fixed — before upload, not at render time.
+
+Once every hand agrees with `male`, the client needs no per-character rotation
+at all, which is the state to keep it in.
 
 ### Authoring a stance the animation library doesn't have
 

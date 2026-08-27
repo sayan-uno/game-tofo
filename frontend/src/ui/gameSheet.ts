@@ -51,7 +51,7 @@ export function openGameSheet(opts: GameSheetOptions): void {
       const unavailable = (!free && !g.packUrl) || stopped !== null;
       return `
         <button class="gs-card${selected ? " selected" : ""}" data-id="${esc(g.id)}" ${unavailable ? 'data-unavailable="1"' : ""}>
-          <span class="gs-art" aria-hidden="true"><span class="gs-art-name">${esc(g.name)}</span></span>
+          <span class="gs-art" aria-hidden="true"><span class="gs-art-name">${esc(g.name)}</span><img class="gs-art-img" src="/games/${esc(g.id)}.webp" alt="" loading="lazy" decoding="async"></span>
           <span class="gs-body">
             <span class="gs-name">${esc(g.name)}</span>
             <span class="gs-tag">${esc(stopped ?? g.tagline)}</span>
@@ -88,6 +88,15 @@ export function openGameSheet(opts: GameSheetOptions): void {
     </div>`;
   document.getElementById("ui-root")!.appendChild(root);
   open = root;
+
+  // Art is layered OVER the game's name, not instead of it: a game shipped
+  // without a picture — or one whose picture fails to arrive — then shows the
+  // name it always used to rather than an empty crimson box. Dropping the
+  // <img> on error is what uncovers it, and it costs nothing when the file is
+  // there, which is the usual case.
+  root.querySelectorAll<HTMLImageElement>(".gs-art-img").forEach((img) => {
+    img.addEventListener("error", () => img.remove(), { once: true });
+  });
 
   const close = () => {
     root.remove();

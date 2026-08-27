@@ -737,7 +737,7 @@ export class LobbyScene {
 
     if (!character.weaponId) return;
     const { attachWeapon } = await import("./weapon");
-    const held = await attachWeapon(character.weaponId, rig, this.scene);
+    const held = await attachWeapon(character.weaponId, rig, this.scene, character.characterId);
     if (mine !== character.weaponToken) {
       held?.dispose(); // a newer weapon (or a character swap) won the race
       return;

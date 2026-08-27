@@ -44,6 +44,22 @@ export interface CharacterItem {
   /** Legendary effect variant. Lives here rather than in the client so a new
    *  character's look is data, not a branch in the render code. */
   aura?: AuraKind;
+  /** Where this character's fist sits in its own RightHand joint, in metres —
+   *  the centroid of the curled finger mass, measured off the model by
+   *  fistOffset.mjs.
+   *
+   *  This is data and not a constant because it turned out not to be one.
+   *  weapon.ts carried a single offset for everybody, on the stated grounds
+   *  that all four characters then shipped "produced the same numbers to five
+   *  decimals". They do not: that value is `male`'s, it fits seraph, it is
+   *  2-3 cm out on female and zenith, and it was 6-7 cm out on every character
+   *  generated afterwards — which, on a hand about 10 cm across, is a weapon
+   *  held beside the fist with the fingers splayed past it. Meshy simply does
+   *  not place the wrist joint in the same spot relative to the hand twice.
+   *
+   *  Absent falls back to weapon.ts's default, so a character added without it
+   *  behaves exactly as before rather than losing its weapon. */
+  grip?: [number, number, number];
 }
 
 /** A held prop. Everything about HOW it is held is baked into the model —
@@ -108,8 +124,8 @@ export type CatalogItem = CharacterItem | WeaponItem | EmoteItem;
 // fresh path is the fix, and the lesson is to let an upload settle BEFORE
 // fetching it — a 404 cached against a live path outlives the mistake.
 const CHARACTERS: CharacterItem[] = [
-  { id: "male", kind: "character", name: "Ranger", key: "characters/male/v4/model.glb", rarity: "starter", free: true },
-  { id: "female", kind: "character", name: "Vanguard", key: "characters/female/v3/model.glb", rarity: "starter", free: true },
+  { id: "male", kind: "character", name: "Ranger", key: "characters/male/v4/model.glb", rarity: "starter", free: true, grip: [-0.0326, 0.0946, 0.0346] },
+  { id: "female", kind: "character", name: "Vanguard", key: "characters/female/v4/model.glb", rarity: "starter", free: true, grip: [-0.0313, 0.0852, 0.0058] },
   // Zenith is at v7 for two faults, both in the hands and both peculiar to it.
   //
   // v7 slimmed an oversized THUMB (slimThumb.mjs, 0.62x). Meshy modelled it
@@ -130,12 +146,37 @@ const CHARACTERS: CharacterItem[] = [
   // weapon. Every other character's fingers reach 1.3x the radius and were
   // never affected — re-baking them with the fixed tool reproduces the
   // published files vertex for vertex.
-  { id: "zenith", kind: "character", name: "Zenith", key: "characters/zenith/v7/model.glb", rarity: "legendary", free: true, aura: "ember" },
+  { id: "zenith", kind: "character", name: "Zenith", key: "characters/zenith/v8/model.glb", rarity: "legendary", free: true, aura: "ember", grip: [-0.0114, 0.0901, 0.0185] },
   // Seraph's v6 added the emissive mask that makes the garment itself glow: the
   // chest and back prisms, the wrist and boot crystals, the blue crown horns,
   // and the gold veins that veinFlow.ts runs a pulse down. v7 is that same
   // model with the right fist, v8 with both.
-  { id: "seraph", kind: "character", name: "Seraph", key: "characters/seraph/v8/model.glb", rarity: "legendary", free: true, aura: "crystal" },
+  { id: "seraph", kind: "character", name: "Seraph", key: "characters/seraph/v8/model.glb", rarity: "legendary", free: true, aura: "crystal", grip: [-0.0283, 0.0928, 0.0392] },
+  // Six premium characters, all luxury tactical couture so they read as one
+  // collection rather than six one-offs. EPIC, not legendary, and deliberately:
+  // aura.ts attaches an effect only to `legendary`, and a flame or a crystal
+  // halo fights tailoring — these are meant to look expensive, not enchanted.
+  //
+  // They also arrived with normal HANDS, which is not luck: the design prompt
+  // asked for slim hands with a normal thumb and no gauntlets, after Zenith's
+  // armoured mitt cost three rounds of mesh surgery. slimThumb reports zero
+  // candidate vertices on all twelve of their hands.
+  //
+  // Five of them are at v2 because the LEGS had to be asked for just as
+  // explicitly. v1 came back knock-kneed, with feet turned out or on tiptoe,
+  // and Scarlet's floor-length coat sealed into a solid cone with her legs
+  // inside it — a rig with no cloth simulation cannot do a long coat. Only
+  // Warden, the one whose legs came out straight, is still v1. The v2 prompts
+  // spell the stance out ("legs straight and parallel, knees straight, feet
+  // flat, toes forward") and cut the coats above the knee; the tell that it
+  // worked is that realign's largest mesh correction moved off the legs and
+  // onto the arm, which is where Warden's always was.
+  { id: "warden", kind: "character", name: "Warden", key: "characters/warden/v4/model.glb", rarity: "epic", free: true, grip: [-0.0383, 0.0738, 0.0353] },
+  { id: "sovereign", kind: "character", name: "Sovereign", key: "characters/sovereign/v5/model.glb", rarity: "epic", free: true, grip: [-0.0219, 0.0663, 0.0204] },
+  { id: "eclipse", kind: "character", name: "Eclipse", key: "characters/eclipse/v5/model.glb", rarity: "epic", free: true, grip: [-0.0254, 0.0655, 0.0221] },
+  { id: "scarlet", kind: "character", name: "Scarlet", key: "characters/scarlet/v5/model.glb", rarity: "epic", free: true, grip: [-0.0296, 0.0659, 0.0347] },
+  { id: "vesper", kind: "character", name: "Vesper", key: "characters/vesper/v5/model.glb", rarity: "epic", free: true, grip: [-0.0186, 0.0669, 0.0318] },
+  { id: "lumen", kind: "character", name: "Lumen", key: "characters/lumen/v5/model.glb", rarity: "epic", free: true, grip: [-0.0192, 0.0637, 0.0293] },
 ];
 
 const WEAPONS: WeaponItem[] = [

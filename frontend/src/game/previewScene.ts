@@ -220,7 +220,7 @@ export class PreviewScene {
     const rig = this.rig;
     if (!id || !rig) return;
     const { attachWeapon } = await import("./weapon");
-    const held = await attachWeapon(id, rig, this.scene);
+    const held = await attachWeapon(id, rig, this.scene, this.characterId ?? undefined);
     if (mine !== this.weaponToken) {
       held?.dispose();
       return;
