@@ -20,6 +20,11 @@ import { seedClock, serverToLocal, syncClock } from "./clock";
 import type { GameRuntime, GameRuntimeContext } from "./types";
 import {
   EV,
+  LIVE_EV,
+  type LiveClosing,
+  type LiveEmote,
+  type LivePin,
+  type LiveRoster,
   type MatchEnd,
   type MatchGo,
   type MatchInputRelay,
@@ -30,6 +35,7 @@ import {
   type MatchSync,
   type QuickKind,
   type QuickRelay,
+  type RosterEntry,
   RESULTS_MS,
 } from "../shared/core/protocol";
 
@@ -80,6 +86,11 @@ export class MatchClient {
    *  inputs keep their order both in the server's log and on the wire. */
   private delivered = new Map<string, number>();
   private entering: Promise<void> | null = null;
+  /** The last roster a drop-in world sent while the scene was still being
+   *  built. Kept rather than dropped: it is the WHOLE roster, so replaying
+   *  only the newest one is exactly right, and losing it would leave a world
+   *  drawing people who have already walked out. */
+  private pendingRoster: { roster: RosterEntry[]; endsAt: number; party: string[] } | null = null;
 
   constructor(private deps: MatchClientDeps) {
     // One DOM layer for everything match-related, above the canvas and the
@@ -177,6 +188,36 @@ export class MatchClient {
     s.on(EV.end, (e: MatchEnd | null) => {
       if (!e || e.matchId !== this.matchId) return;
       this.onEnd(e);
+    });
+
+    // ---- drop-in worlds ---------------------------------------------------
+    // Three channels a fixed-roster match has no use for and never sees. All
+    // of them are handed straight to the game: the platform has no opinion
+    // about what a position means.
+    s.on(LIVE_EV.snap, (p: unknown) => {
+      // No matchId check: a snapshot is ten a second and carries no id, which
+      // is the whole reason it is cheap. It is only ever sent to the room of
+      // the world you are standing in, and a runtime that has been torn down
+      // is null here anyway.
+      this.runtime?.onSnap?.(p);
+    });
+    s.on(LIVE_EV.roster, (p: LiveRoster | null) => {
+      if (!p || p.matchId !== this.matchId || !Array.isArray(p.roster)) return;
+      const party = Array.isArray(p.party) ? p.party : [];
+      if (this.runtime) this.runtime.onRoster?.(p.roster, p.endsAt, party);
+      else this.pendingRoster = { roster: p.roster, endsAt: p.endsAt, party };
+    });
+    s.on(LIVE_EV.pinned, (p: LivePin | null) => {
+      if (!p || typeof p.uid !== "string") return;
+      this.runtime?.onPin?.(p.uid, typeof p.x === "number" ? p.x : null, typeof p.z === "number" ? p.z : null);
+    });
+    s.on(LIVE_EV.closing, (p: LiveClosing | null) => {
+      if (!p || p.matchId !== this.matchId) return;
+      this.runtime?.onClosing?.(p.at);
+    });
+    s.on(LIVE_EV.emoted, (p: LiveEmote | null) => {
+      if (!p || typeof p.uid !== "string") return;
+      this.runtime?.onEmote?.(p.uid, String(p.id ?? ""));
     });
     if (import.meta.env.DEV) (window as unknown as Record<string, unknown>).__tofoMatch = this;
   }
@@ -276,6 +317,7 @@ export class MatchClient {
       const ctx: GameRuntimeContext = {
         engine: this.deps.engine,
         canvas,
+        matchId: p.matchId,
         assets: pack.assets,
         roster: p.roster,
         you: p.you,
@@ -289,6 +331,12 @@ export class MatchClient {
           this.delivered.set(uid, (this.delivered.get(uid) ?? 0) + 1);
         },
         sendQuick: (kind, id) => this.deps.socket.emit(EV.quick, { kind, id }),
+        // Fire-and-forget by design: a position that failed to send is
+        // replaced by the next one a tenth of a second later, and a retry
+        // would deliver a place the player is no longer standing in.
+        sendState: (payload) => this.deps.socket.emit(LIVE_EV.state, payload),
+        sendEmote: (id) => emitAck<{ ok?: boolean; error?: string }>(LIVE_EV.emote, { id }),
+        sendPin: (at) => this.deps.socket.emit(LIVE_EV.pin, at ?? {}),
         requestLeave: () => void this.leave(),
         hudRoot: this.hudRoot,
       };
@@ -302,12 +350,18 @@ export class MatchClient {
       }
       for (const i of this.inputBuffer) this.hand(i);
       this.inputBuffer = [];
+      if (this.pendingRoster) {
+        runtime.onRoster?.(this.pendingRoster.roster, this.pendingRoster.endsAt, this.pendingRoster.party);
+        this.pendingRoster = null;
+      }
       if ("left" in p) for (const uid of p.left) runtime.onLeft(uid);
       startRenderLoop(this.deps.engine, () => runtime.render());
       await clockDone;
       this.hideCurtain();
       // Voice follows the match: everyone in the roster shares one room now.
-      void joinVoice(`M${p.matchId}`, (msg, isError) => toast(msg, isError), "match");
+      // A game may ask for that room to be a PLACE instead — see GameModule.
+      const proximity = pack.module.voice === "proximity";
+      void joinVoice(`M${p.matchId}`, (msg, isError) => toast(msg, isError), "match", { proximity });
       if ("startAt" in p && p.startAt !== null) {
         this.go(p.startAt);
       } else {
@@ -459,6 +513,7 @@ export class MatchClient {
     this.runtime = null;
     this.hudRoot.replaceChildren();
     this.inputBuffer = [];
+    this.pendingRoster = null;
     this.delivered.clear();
     this.matchId = null;
     this.layer.classList.add("hidden");

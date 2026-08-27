@@ -336,6 +336,7 @@ export function mountStudio(host: HTMLElement, matchKey: string, go: (h: string)
     const context = (): GameRuntimeContext => ({
       engine: babylon,
       canvas,
+      matchId: file.matchKey,
       assets: pack.assets,
       roster: roster.map((r) => ({ uid: r.uid, name: r.name, character: r.character, weapon: r.weapon })),
       you: focus,
@@ -344,6 +345,12 @@ export function mountStudio(host: HTMLElement, matchKey: string, go: (h: string)
       // Nobody is playing. These exist because the contract has them.
       sendInput: () => undefined,
       sendQuick: () => undefined,
+      // A drop-in world's live channels. Nobody is playing, so nothing is
+      // sent — and the refusal is silent rather than an error, because a game
+      // being watched back must behave exactly as it did live minus the wire.
+      sendState: () => undefined,
+      sendEmote: () => Promise.resolve({ error: "not live" }),
+      sendPin: () => undefined,
       requestLeave: () => undefined,
       hudRoot,
       now,

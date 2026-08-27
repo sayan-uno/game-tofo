@@ -31,6 +31,7 @@ import { config } from "../config.js";
 import { redis, getSocketId } from "../redis.js";
 import { logEvent } from "../services/eventLog.js";
 import { endMatchById, activeMatchIdForUser } from "./match.js";
+import { activeIslandIdForUser, closeIslandById } from "./island.js";
 import { matchVoiceRoom, silenceInVoice } from "./voice.js";
 import { getUserLobby } from "../redis.js";
 
@@ -134,7 +135,9 @@ async function execute(io: Server, c: OpsCommand): Promise<unknown> {
     case "endMatch": {
       const matchId = String(c.args.matchId ?? "");
       if (!matchId) throw new Error("matchId required");
-      const ended = await endMatchById(io, matchId, "aborted");
+      // The console's "end this" button does not know, and should not have to
+      // know, whether the id it is holding is a match or a drop-in world.
+      const ended = (await endMatchById(io, matchId, "aborted")) || (await closeIslandById(io, matchId, "aborted"));
       return { ended };
     }
 
@@ -147,7 +150,7 @@ async function execute(io: Server, c: OpsCommand): Promise<unknown> {
       const rooms: string[] = [];
       const lobbyId = await getUserLobby(userId);
       if (lobbyId) rooms.push(lobbyId);
-      const matchId = activeMatchIdForUser(userId);
+      const matchId = activeMatchIdForUser(userId) ?? activeIslandIdForUser(userId);
       if (matchId) rooms.push(matchVoiceRoom(matchId));
       return { silencedIn: await silenceInVoice(uid, rooms) };
     }

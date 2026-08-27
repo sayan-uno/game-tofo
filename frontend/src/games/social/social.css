@@ -1,0 +1,437 @@
+/* Social Space HUD.
+ *
+ * The island is a bright daytime scene, so the chrome does the opposite of the
+ * lobby's: dark glass panels with the platform's crimson, kept to the corners
+ * and kept small. Nothing here is full-screen except the two sheets, which are
+ * modal on purpose.
+ *
+ * Every element is a DIRECT child of .match-hud-root, which turns pointer
+ * events on for its children — so nothing here may be a transparent
+ * full-bleed layer, or it would swallow the touches that steer.
+ */
+
+.sx-bar {
+  position: absolute;
+  top: max(10px, env(safe-area-inset-top));
+  left: max(12px, env(safe-area-inset-left));
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: "Archivo Black", system-ui, sans-serif;
+}
+
+.sx-clock,
+.sx-people {
+  background: rgba(8, 5, 8, 0.62);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
+  color: #f2f5ff;
+  padding: 7px 12px;
+  font-size: 14px;
+  letter-spacing: 0.04em;
+  line-height: 1;
+}
+
+.sx-clock.soon {
+  color: #ff5d6c;
+  border-color: rgba(229, 24, 46, 0.6);
+  animation: sx-pulse 1s ease-in-out infinite;
+}
+
+@keyframes sx-pulse {
+  50% { opacity: 0.55; }
+}
+
+.sx-people {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  cursor: pointer;
+  font: inherit;
+}
+.sx-people .sx-near {
+  color: #ff8d99;
+  font-size: 15px;
+}
+.sx-people.alone .sx-near {
+  color: rgba(242, 245, 255, 0.5);
+}
+.sx-near-label {
+  font-family: system-ui, sans-serif;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: 0.65;
+}
+
+/* ---------- the two buttons ---------- */
+
+.sx-pad {
+  position: absolute;
+  right: max(14px, env(safe-area-inset-right));
+  bottom: max(26px, env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+
+.sx-btn {
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(8, 5, 8, 0.55);
+  backdrop-filter: blur(8px);
+  color: #f2f5ff;
+  border-radius: 999px;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: transform 0.08s ease, background 0.15s ease, border-color 0.15s ease;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+}
+.sx-btn:active {
+  transform: scale(0.93);
+}
+
+.sx-emote {
+  width: 56px;
+  height: 56px;
+  font-size: 26px;
+  line-height: 1;
+}
+
+.sx-run {
+  width: 84px;
+  height: 84px;
+  font-family: "Archivo Black", system-ui, sans-serif;
+  font-size: 17px;
+  letter-spacing: 0.08em;
+}
+.sx-run.on {
+  background: rgba(229, 24, 46, 0.85);
+  border-color: #ff8d99;
+  box-shadow: 0 0 22px rgba(229, 24, 46, 0.5);
+}
+
+/* ---------- the stick ----------
+ * Follows the thumb, so there is nothing to find first. pointer-events are
+ * disabled INLINE by controls.ts — see the note there. */
+
+.sx-stick {
+  position: absolute;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.sx-stick.on {
+  opacity: 1;
+}
+.sx-stick-base,
+.sx-stick-knob {
+  position: absolute;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+}
+.sx-stick-base {
+  width: 132px;
+  height: 132px;
+  border: 2px solid rgba(255, 255, 255, 0.28);
+  background: radial-gradient(circle, rgba(8, 5, 8, 0.28) 0%, rgba(8, 5, 8, 0.08) 70%, transparent 100%);
+}
+.sx-stick-knob {
+  width: 58px;
+  height: 58px;
+  background: rgba(229, 24, 46, 0.75);
+  border: 2px solid rgba(255, 255, 255, 0.5);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+}
+
+/* ---------- sheets ---------- */
+
+.sx-sheet {
+  position: absolute;
+  inset: 0;
+  background: rgba(4, 2, 4, 0.6);
+  backdrop-filter: blur(4px);
+  display: grid;
+  place-items: end center;
+  z-index: 4;
+}
+
+.sx-sheet-card {
+  width: min(560px, 94vw);
+  margin-bottom: max(14px, env(safe-area-inset-bottom));
+  background: linear-gradient(180deg, #140a10 0%, #0b0507 100%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 18px;
+  padding: 16px 16px 20px;
+  color: #f2f5ff;
+  max-height: 68vh;
+  overflow-y: auto;
+}
+.sx-sheet-card header {
+  position: relative;
+  margin-bottom: 12px;
+}
+.sx-kicker {
+  display: block;
+  color: #e5182e;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+.sx-sheet-card h3 {
+  margin: 2px 0 0;
+  font-family: "Archivo Black", system-ui, sans-serif;
+  font-size: 20px;
+  letter-spacing: 0.04em;
+}
+.sx-close {
+  position: absolute;
+  top: -2px;
+  right: 0;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  color: #f2f5ff;
+  cursor: pointer;
+  font-size: 15px;
+}
+
+.sx-quick {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.sx-quick button {
+  flex: 1 1 auto;
+  min-width: 56px;
+  height: 52px;
+  font-size: 26px;
+  line-height: 1;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  cursor: pointer;
+}
+.sx-quick button:active {
+  transform: scale(0.94);
+}
+
+.sx-emotes {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
+}
+.sx-emotes button {
+  display: grid;
+  gap: 4px;
+  padding: 12px 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.sx-em-name {
+  font-weight: 700;
+  font-size: 13px;
+}
+.sx-em-len {
+  font-size: 11px;
+  opacity: 0.6;
+}
+
+.sx-empty {
+  margin: 6px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  opacity: 0.72;
+}
+
+.sx-people-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.sx-people-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 9px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid transparent;
+  font-size: 13px;
+}
+/* Inside twenty metres — the ones who can actually hear you. */
+.sx-people-list li.heard {
+  border-color: rgba(229, 24, 46, 0.55);
+  background: rgba(229, 24, 46, 0.12);
+}
+.sx-pn {
+  font-weight: 700;
+}
+.sx-pd {
+  opacity: 0.62;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- closing ---------- */
+
+.sx-closing {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 6px;
+  pointer-events: none;
+  background: radial-gradient(circle at 50% 45%, rgba(229, 24, 46, 0.18) 0%, rgba(4, 2, 4, 0.72) 70%);
+  z-index: 6;
+}
+.sx-closing-n {
+  font-family: "Archivo Black", system-ui, sans-serif;
+  font-size: clamp(84px, 26vw, 190px);
+  line-height: 0.9;
+  color: #fff;
+  text-shadow: 0 0 40px rgba(229, 24, 46, 0.75);
+}
+.sx-closing-n.pop {
+  animation: sx-pop 0.42s ease-out;
+}
+@keyframes sx-pop {
+  from { transform: scale(1.35); opacity: 0.25; }
+  to { transform: scale(1); opacity: 1; }
+}
+.sx-closing-t {
+  font-family: "Archivo Black", system-ui, sans-serif;
+  font-size: 15px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #ffb3bb;
+}
+
+/* ---------- the map ----------
+ * A dial under the clock that turns with the player, and the whole island
+ * behind a tap. Both are canvas: the island is drawn once into an offscreen
+ * buffer and everything after that is one rotated blit, so this costs the
+ * frame almost nothing however often it repaints. */
+
+.sx-minimap {
+  position: absolute;
+  top: calc(max(10px, env(safe-area-inset-top)) + 44px);
+  left: max(12px, env(safe-area-inset-left));
+  width: 124px;
+  height: 124px;
+  padding: 0;
+  border: 2px solid rgba(255, 255, 255, 0.22);
+  border-radius: 50%;
+  background: rgba(8, 5, 8, 0.55);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  display: block;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+.sx-minimap:active {
+  transform: scale(0.96);
+}
+.sx-minimap canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  border-radius: 50%;
+  pointer-events: none;
+}
+/* The name of the place you are standing in, hung under the dial. */
+.sx-where {
+  position: absolute;
+  left: 50%;
+  top: calc(100% + 5px);
+  transform: translateX(-50%);
+  white-space: nowrap;
+  font-family: "Archivo Black", system-ui, sans-serif;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #f2f5ff;
+  background: rgba(8, 5, 8, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  padding: 3px 8px;
+  pointer-events: none;
+}
+
+@media (max-height: 420px) {
+  /* A short landscape phone has no room under the clock for both. */
+  .sx-minimap {
+    width: 96px;
+    height: 96px;
+  }
+}
+
+/* ---------- the whole island ---------- */
+
+.sx-map-sheet {
+  place-items: center;
+}
+.sx-map-card {
+  /* The map is SQUARE, so its width is also its height, and the card has a
+     header and a legend on top of that. Sizing by width alone put the southern
+     half of the island below the fold on a landscape phone — which is the half
+     you were trying to look at. The third term is what makes it fit. */
+  width: min(460px, 92vw, calc(88vh - 132px));
+  margin-bottom: 0;
+  max-height: none;
+  overflow: visible;
+}
+.sx-map-wrap {
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: 14px;
+  overflow: hidden;
+  background: #1d6285;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+.sx-map-wrap canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.sx-map-key {
+  margin: 10px 0 0;
+  font-size: 11px;
+  opacity: 0.78;
+  text-align: center;
+  line-height: 1.7;
+}
+.sx-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  vertical-align: -1px;
+  margin-right: 2px;
+}
+.sx-dot.me { background: #e5182e; }
+.sx-dot.friend { background: #4ade80; }
+.sx-dot.near { background: #ff8d99; }
+.sx-dot.other { background: rgba(255, 255, 255, 0.72); }
+.sx-dot.squad { background: #3fa9ff; }
+.sx-map-hint {
+  margin-top: 2px;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  opacity: 0.6;
+}

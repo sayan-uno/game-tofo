@@ -16,6 +16,7 @@ import { redis, countOnline } from "../redis.js";
 import { eventLogStats } from "../services/eventLog.js";
 import { listGames } from "./games.js";
 import { liveMatchSnapshot } from "./match.js";
+import { liveIslandSnapshot } from "./island.js";
 import { poolDepth, poolKeyFor } from "./matchmaking.js";
 import { evidenceBackend } from "./evidence.js";
 import { replayStats } from "./replay.js";
@@ -29,6 +30,14 @@ const SNAPSHOT_TTL_SEC = 8;
 
 export const liveKey = (instanceId: string) => `ops:live:${instanceId}`;
 export const liveMatchesKey = (instanceId: string) => `ops:live:matches:${instanceId}`;
+/** The islands, with everybody's position on them.
+ *
+ *  Its own key rather than a field on the snapshot above, because it is the
+ *  only part of the picture that is per-PLAYER: twenty rows an island, several
+ *  islands, written every two seconds. Splitting it means the console's
+ *  overview — which is opened far more often than the map — still reads one
+ *  small hash. */
+export const liveIslandsKey = (instanceId: string) => `ops:live:islands:${instanceId}`;
 
 let timer: NodeJS.Timeout | null = null;
 const startedAt = Date.now();
@@ -38,6 +47,7 @@ const startedAt = Date.now();
 function pools(): { gameId: string; size: number }[] {
   const out: { gameId: string; size: number }[] = [];
   for (const game of listGames()) {
+    if (game.dropIn) continue; // no queue to be deep
     const sizes = new Set<number>();
     for (const mode of ["solo", "duo", "squad"] as const) sizes.add(poolKeyFor(game, mode));
     for (const size of sizes) out.push({ gameId: game.id, size });
@@ -68,6 +78,9 @@ async function writeSnapshot(io: Server): Promise<void> {
   // the most expensive thing this process does, in aid of a page nobody has
   // open (W2).
   const worlds = await allWorldCounts();
+  // The drop-in worlds. Costs nothing to build: every position in it is
+  // already in memory because proximity voice needed it.
+  const isles = liveIslandSnapshot();
 
   const snapshot: Record<string, string> = {
     ts: String(Date.now()),
@@ -91,6 +104,9 @@ async function writeSnapshot(io: Server): Promise<void> {
     worldHumans: String(worlds.reduce((n, w) => n + w.humans, 0)),
     worldBots: String(worlds.reduce((n, w) => n + w.bots, 0)),
     worldChat: JSON.stringify(worldChatStats()),
+    islands: String(isles.length),
+    islandHumans: String(isles.reduce((n, i) => n + i.humans, 0)),
+    islandBots: String(isles.reduce((n, i) => n + i.bots, 0)),
     rssMb: String(Math.round(process.memoryUsage().rss / 1048576)),
   };
 
@@ -109,6 +125,7 @@ async function writeSnapshot(io: Server): Promise<void> {
     .hset(liveKey(config.instanceId), snapshot)
     .expire(liveKey(config.instanceId), SNAPSHOT_TTL_SEC)
     .set(liveMatchesKey(config.instanceId), JSON.stringify(live), "EX", SNAPSHOT_TTL_SEC)
+    .set(liveIslandsKey(config.instanceId), JSON.stringify(isles), "EX", SNAPSHOT_TTL_SEC)
     .exec();
 }
 

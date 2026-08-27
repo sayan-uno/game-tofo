@@ -51,7 +51,16 @@ lobby, means mint again.
 | `admin-signin.mts` | The console's sign-in over HTTP: enrolment, the authenticator, recovery codes, sudo, refresh rotation and reuse detection, and that a player's token is refused. `npm run e2e:admin`. |
 | `test_admin_console.py` | The console in a real browser: the sign-in screen, an httpOnly cookie resuming a session across origins, the overview painting real numbers, and signing out actually ending it. `npm run e2e:console`. |
 | `world-chat.mts` | A world exists and talks; a team-up card puts a group together within ten seconds whether or not anybody real answers; a bot's card is one a person can walk into; a real player takes a seat from a bot when the thousand is full; and the teammates who come out of it own the careers they earn, read back out of `bot_stats` after a real match. No browser — `PORT=4100 npm run e2e:world`, with `TRACKLINE_MATCH_SECONDS=30` on the backend to keep the last leg short. Pass `E2E_REDIS_URL` when the backend is on its own Redis database. |
+| `social-island.mts` | A drop-in world: START goes straight in with nineteen of the population already on it, a second player joins the SAME island and a bot stands down, positions are batched and range-filtered, a teleport is clamped and a walk into the fountain ends on its rim, emotes and emoji relay, leaving hands the seat back, and the console can see all of it. No browser — `PORT=4100 npm run e2e:social`, with `E2E_REDIS_URL` when the backend is on its own Redis database. |
 | `enforcement.mts` | A banned player is refused at the API *and* at the socket handshake, lifting the ban lets them back in at once, an ordinary session leaves the trail the admin console reads, two accounts on one device are linked, and nobody is left marked online afterwards. No browser — run it with `npm run e2e:enforcement`. |
+
+### One more, if a browser test hangs on "downloading"
+
+The dev server **hot-reloads the page whenever `shared/` is re-synced** — and
+every `npm run check:*` and every `typecheck` re-syncs it. So running a check in
+one terminal while a browser test is downloading a pack in another reloads the
+page under it and the download starts again, for as long as you keep editing.
+It looks exactly like a stalled CDN. Let the code settle, then run the browser.
 
 ## Two facts that shape every test here
 

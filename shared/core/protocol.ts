@@ -17,6 +17,14 @@ export interface RosterEntry {
   character: string;
   /** Catalog id of the held weapon, or null. */
   weapon: string | null;
+  /** Where they sit in the roster.
+   *
+   *  A fixed-roster match does not need it — the array is already in seat
+   *  order and the index IS the seat. A DROP-IN world does: its roster changes
+   *  while people are standing in it, and the position channel names a seat
+   *  rather than a uid because a seat is one byte and a uid is ten, twenty
+   *  times a snapshot, ten times a second. */
+  seat?: number;
 }
 
 export type MatchPhase = "prepare" | "countdown" | "running" | "ended";
@@ -202,6 +210,95 @@ export const EV = {
 /** How often a client may report download progress. The server ignores
  *  anything faster; the client throttles itself to the same rate. */
 export const PROGRESS_MAX_HZ = 4;
+
+/** ---------------------------------------------------------------------------
+ *  Drop-in worlds
+ *
+ *  A match is assembled, played and finished by the same set of people. A
+ *  drop-in world is a PLACE: it opens, people arrive and leave while it runs,
+ *  the seats nobody is standing in are held by the server population, and
+ *  after a fixed span everybody is sent home and a fresh one opens.
+ *
+ *  It reuses the whole match lifecycle on the wire — `match:prepare` /
+ *  `match:resume` to arrive, `match:end` to be sent home, `match:leave` to
+ *  walk out — because all of that is already correct and already tested. What
+ *  it adds is the three things a fixed roster never needed:
+ *
+ *    * a roster that CHANGES while you are in it;
+ *    * a position channel that is relayed and then forgotten, rather than
+ *      logged as an input and replayed (forty minutes of twenty people walking
+ *      is half a million entries, and none of them decides anything);
+ *    * a warning that the place is about to close.
+ *
+ *  Nothing here can separate a bot from a person, for the same reason nothing
+ *  else on this platform can.
+ * ------------------------------------------------------------------------- */
+
+/** Everybody in the world right now, in seat order. Sent whole on every
+ *  change rather than as a delta: it is under two kilobytes, it changes a
+ *  handful of times in forty minutes, and a delta stream that drops one
+ *  message is wrong for ever. */
+export interface LiveRoster {
+  matchId: string;
+  roster: RosterEntry[];
+  /** Server clock at which this world closes. */
+  endsAt: number;
+  /** The uids of the people the RECIPIENT walked in with, in a stable order,
+   *  so a map can number them the way a squad is numbered.
+   *
+   *  Per-recipient, which is why this message is sent to each person rather
+   *  than to the room: who is grouped with whom is the recipient's own
+   *  business, and a single serialisation to twenty sockets could only carry
+   *  everybody's affiliations to everybody — which would hand a stranger the
+   *  shape of the room. */
+  party: string[];
+}
+
+/** Somebody in your group dropped a marker on the map.
+ *
+ *  Deliberately group-scoped rather than island-wide: a pin is "come here",
+ *  which is a thing you say to the people you arrived with. `x` is null when
+ *  it has been taken down. */
+export interface LivePin {
+  uid: string;
+  x: number | null;
+  z: number | null;
+}
+
+/** The world is closing. Sent once, CLOSING before the end, so every screen
+ *  counts the same seconds down and everybody lands home together. */
+export interface LiveClosing {
+  matchId: string;
+  /** Server clock of the end. */
+  at: number;
+}
+
+/** Somebody performed an emote. Relayed, never logged. */
+export interface LiveEmote {
+  uid: string;
+  /** Catalog emote id. */
+  id: string;
+}
+
+export const LIVE_EV = {
+  /** client→server: where I am and what I am doing (a PoseReport). */
+  state: "live:state",
+  /** server→room: where everybody is (a Snapshot). One message per tick for
+   *  the whole world, not one per player per player. */
+  snap: "live:snap",
+  /** server→room: the roster changed — somebody arrived, or left. */
+  roster: "live:roster",
+  /** server→room: this world ends at… */
+  closing: "live:closing",
+  /** client→server {id}: perform this emote. */
+  emote: "live:emote",
+  /** server→room: LiveEmote. */
+  emoted: "live:emoted",
+  /** client→server {x, z} — mark this spot for my group; null takes it down. */
+  pin: "live:pin",
+  /** server→group: LivePin. */
+  pinned: "live:pinned",
+} as const;
 
 /** ---------------------------------------------------------------------------
  *  World chat (W2)

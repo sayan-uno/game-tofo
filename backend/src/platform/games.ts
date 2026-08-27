@@ -63,6 +63,18 @@ export interface GameServerDefinition {
   tagline: string;
   /** Runners a match holds for a party started in this mode. */
   matchSizeFor(mode: PartyMode): number;
+  /** This game is a PLACE, not a match.
+   *
+   *  Set it and the platform stops treating START as "queue for a match to be
+   *  assembled" and starts treating it as "walk into the world that is already
+   *  running" — see platform/island.ts. Nothing else about the definition
+   *  changes shape; the fields a match runtime uses (createSim, rank,
+   *  planBot…) are simply never asked for, and are declared as the stubs
+   *  TypeScript requires rather than as lies about behaviour.
+   *
+   *  Optional and absent everywhere else, so the five games that were here
+   *  first are untouched by it. */
+  dropIn?: true;
   /** The downloadable pack: CDN key prefix (versioned folder) and its size,
    *  so the picker can show honest numbers before a byte is fetched. */
   pack: { key: string; version: string; bytes: number };

@@ -736,3 +736,77 @@ table.rt .rt-cell.muted b, table.rt .rt-cell.muted { color: var(--faint); }
    glance is a column that hides the odd one out — and the odd one out is the
    whole point of the collision scheme. */
 .tbl td.num, .tbl th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* ---------- Islands: the live map of a drop-in world ---------- */
+/* The SVG is the island in metres, so its viewBox is world coordinates and
+   every number in the markup is a real position. Nothing here is scaled in
+   JavaScript — the browser does it, and the map stays sharp at any size. */
+.isle-wrap {
+  max-width: 720px;
+  margin: 12px auto 4px;
+}
+.isle-map {
+  width: 100%;
+  height: auto;
+  display: block;
+  border-radius: 14px;
+  background: #0e2b3a;
+}
+.isle-ear {
+  fill: rgba(229, 24, 46, 0.1);
+  stroke: rgba(229, 24, 46, 0.4);
+  stroke-width: 0.5;
+}
+.isle-dot {
+  fill: #ff5d6c;
+  stroke: #fff;
+  stroke-width: 0.7;
+}
+.isle-bot .isle-dot {
+  fill: #cfd6e4;
+  stroke: rgba(0, 0, 0, 0.35);
+  stroke-width: 0.5;
+}
+.isle-me .isle-dot {
+  fill: #ffd23f;
+  stroke: #000;
+  stroke-width: 1;
+}
+.isle-me .isle-ear {
+  fill: rgba(255, 210, 63, 0.16);
+  stroke: rgba(255, 210, 63, 0.75);
+  stroke-width: 0.8;
+}
+.isle-face {
+  stroke: rgba(255, 255, 255, 0.7);
+  stroke-width: 0.8;
+}
+.isle-bot .isle-face {
+  stroke: rgba(255, 255, 255, 0.35);
+}
+.isle-name {
+  fill: #fff;
+  font-size: 4px;
+  text-anchor: middle;
+  paint-order: stroke;
+  stroke: rgba(0, 0, 0, 0.75);
+  stroke-width: 1.4px;
+  font-weight: 700;
+}
+.isle-key {
+  text-align: center;
+}
+.isle-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  vertical-align: -1px;
+  margin-right: 2px;
+}
+.isle-swatch.person {
+  background: #ff5d6c;
+}
+.isle-swatch.bot {
+  background: #cfd6e4;
+}

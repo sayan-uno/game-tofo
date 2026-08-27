@@ -50,6 +50,14 @@ export interface ReplayRosterEntry {
   userId: string | null;
   left: boolean;
   leftAtTick: number | null;
+  /** When they ARRIVED, for a world whose roster changed while it ran.
+   *
+   *  A match has no use for it — everybody is there from tick zero — so it is
+   *  optional and absent from every file the five older games write. A drop-in
+   *  world cannot do without it: its seats are occupancies, one per person per
+   *  visit, and a viewer scrubbing to minute two should not see somebody who
+   *  turned up at minute thirty. */
+  joinedAtTick?: number;
 }
 
 export interface ReplayFile {

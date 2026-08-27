@@ -1688,6 +1688,636 @@ balances, every payment they opened, and every movement with its reason.
   id**, and sweeps its own residue at the start as well as the end — a run
   killed by a closed pipe (`| head`) never reaches its own `finally`.
 
+## Social Space: a place, not a match (S1)
+
+The sixth game is the first that nobody wins.
+
+**Social Space** is an island for twenty. You walk on it, and the people within
+twenty metres of you can hear you talk. That is the whole game. It opens, it
+stays open for forty minutes, people arrive and leave the whole time, and when
+its clock runs out everybody on it counts down five seconds together and lands
+back in their own lobby while a fresh island opens for the next arrivals.
+
+Everything below follows from the fact that it is **a place rather than a
+match**, and that difference is deep enough that it needed its own runtime
+(`backend/src/platform/island.ts`) beside the match one rather than a flag on
+it. A game says which it is with one field:
+
+```ts
+registerGame({ id: "social", dropIn: true, matchSizeFor: () => 20, … });
+```
+
+`dropIn` is the only line the platform reads. START then stops meaning "queue
+for a match to be assembled" and starts meaning "walk into the world that is
+already running" — no pool, no ten-second fill, no FINDING PLAYERS screen. The
+five games that were here first do not have the field and are untouched by it.
+
+### The seats are always full, and always twenty
+
+The rule that makes a social space social is that it must never look empty. So
+every seat nobody real is standing in is held by somebody from the server
+population, and the swaps go both ways:
+
+- the first person to press START lands on a **new island with nineteen others
+  already walking around it** — immediately, with nothing to wait for;
+- the next person to press START joins **that** island, and a bot walks off to
+  make room. Two people, eighteen bots — still twenty;
+- somebody leaves, and a bot takes the empty seat back within the second;
+- twenty people, and the twenty-first to press START opens a fresh island with
+  nineteen bots, exactly as the first person did.
+
+Which island a party gets is decided by `pickIsland`: one with room, that is
+not in its last five minutes, and among those **the one with the most people
+already on it** — because a social space is only social if the real players end
+up in the same one rather than spread thinly over four. An island in its last
+minutes is still joinable when it is the only one, which is deliberate:
+arriving at minute thirty-five gets you five minutes, and that is better than
+being told to come back later.
+
+Seats are **handed round rather than appended**, so seat numbers stay inside
+0…19 whoever is sitting in them — which is what lets the position channel name
+a person in one byte instead of ten.
+
+### Nothing here is simulated, and that is the point
+
+Every other game on this platform relays inputs and lets every device run the
+same deterministic simulation over them, because a match has a RESULT and the
+result has to be the same everywhere. An island has no result. Nobody wins it,
+nothing is ranked, and there is nothing for a simulation to protect.
+
+So positions are **relayed and forgotten**: not logged, not replayed, not part
+of any record. Forty minutes of twenty people walking is about half a million
+messages, every one of which decides nothing, and an input log holding them
+would be the most expensive object on the platform in aid of a replay nobody
+would ever watch. `isValidInputKind` returns **false for everything**, so a
+client that tries to put a position on the input channel is refused; the live
+channels (`live:state`, `live:snap`, `live:roster`, `live:closing`,
+`live:emote`) are their own thing and are documented in the shared protocol.
+
+What IS shared, in `shared/games/social/`, is the three things the client, the
+server and the admin console all have to agree about: where the ground is
+(`heightAt`), what you cannot walk through (`resolveMove`), and how loud
+somebody twelve metres away should be (`hearGain`).
+
+### Twenty metres, and why it is a subscription rather than a volume
+
+Everybody on an island shares one LiveKit room, and each client hears only the
+people near it: full volume inside ten metres, fading to silence at twenty, on
+an inverse curve rather than a straight line because a linear ramp sounds like
+a fader being pulled and that is exactly the thing that gives away that this is
+a game.
+
+The important part is what happens past twenty metres. Their audio is **not
+subscribed to at all** — the room is joined with `autoSubscribe: false` and the
+client takes out and drops subscriptions as people walk in and out of range,
+with a few metres of hysteresis so somebody pacing across the line does not
+make their own voice stutter. So a voice you are not meant to hear never
+arrives at your device, rather than arriving and being turned down. That is a
+privacy property a volume slider cannot give you, and it is also the reason
+twenty people in one room costs a phone about four audio streams instead of
+nineteen.
+
+Two details that are not optional:
+
+- **`webAudioMix: true`.** LiveKit's `setVolume` falls back to
+  `element.volume`, and **iOS ignores writes to that** — so without the WebAudio
+  path every distance sounds identical on an iPhone, which is the whole feature
+  silently absent on half the phones in the world.
+- **The server clamps position reports.** A lie about where you are standing
+  buys exactly one thing here: standing inside somebody's twenty metres without
+  walking there. So a report further than a running player could have got is
+  clamped to the step they could have taken, and every report is run through
+  the same `resolveMove` the client walks with — which is also why walking into
+  the fountain leaves you on its rim on everybody's screen and not just your
+  own.
+
+### The population walks a graph, not a path-finder
+
+Nineteen bots have to look like they are there: going somewhere, stopping,
+looking around, going somewhere else. The obvious way to do that is to give
+them a destination and a path-finder. The cheap way is to give them a
+destination and no path-finder, and then they walk through a tree.
+
+So they walk a **graph** (`shared/games/social/life.ts`): the plaza rim, a loop
+round the fountain, the ring path, the four avenues, arcs on the sand, and ten
+landmarks attached to whichever node they can actually be reached from. It is
+built once from the island itself, and **every edge is checked clear of every
+prop at build time** — a landmark that cannot be reached is simply left out,
+and anything the walk cannot reach from the plaza is dropped, so there is no
+node a bot can be dropped into and never leave. `check:social` asserts both
+properties, and walks forty minutes of five bots to prove none of them ever
+stands inside anything or steps into the sea.
+
+A bot's walk is a pure function of (island seed, bot uid, milliseconds since it
+opened), which means a bot seated at minute thirty is already in the right
+place in its own rhythm without any state having been kept for it.
+
+### The bots are in the snapshot, and that cost is deliberate
+
+Because the walk is deterministic, every client could compute it and no bot
+would ever need to appear on the wire at all. It would work, and it would be
+free.
+
+It is not what happens, and the reason is the platform's oldest rule: **nothing
+a client receives may separate a bot from a person.** A seat that never appears
+in a snapshot is a seat with nobody behind it, and no amount of care in the
+payload shapes survives that. So the walk runs on the server and a bot is a row
+in the snapshot exactly like everybody else.
+
+What pays for it is that the snapshot is built **per recipient**: anybody more
+than seventy metres away is left out of yours. They are further off than the
+island draws a name tag, so it costs you nothing to lose them — and it means a
+client cannot be used to find out where somebody it has never met is standing.
+The server builds all twenty poses once per tick and then filters, which is
+twenty distance checks per person per tick and nothing else.
+
+### Twenty characters on a phone
+
+That number is the whole rendering problem. A character here is a skinned mesh
+with a skeleton and a retargeted clip; the lobby draws four and that is already
+the most expensive thing in it. So `Crowd` applies three budgets, all
+distance-first and all hysteretic so nothing flickers on a boundary:
+
+| budget | ceiling | what happens past it |
+| --- | --- | --- |
+| models | 12 nearest | a name tag and a shadow — which is most of what somebody forty metres away is anyway |
+| skeletons | 8 nearest | the model stands still rather than being evaluated for a walk cycle nobody can see |
+| tags | 62 m | nothing; a name you cannot read is clutter |
+
+Models load nearest-first, two at a time, because a burst of twenty parallel
+downloads on arrival is what costs a phone the first ten seconds of a session.
+
+The scenery is the cheap half: **four ground draws** (grass, paving, sand, sea),
+one sky, and **one draw per KIND of prop** however many there are — so three
+hundred and five trees, benches, lamps, planters and rocks cost fourteen
+instanced draws, every instance's world matrix frozen the moment it is placed.
+The ground is a radial sheet rather than a square grid, because the island is a
+circle and a square grid spends two thirds of its triangles on sea; sand fades
+over grass through vertex alpha so the beach has an edge you walk across
+instead of a line somebody drew on the island.
+
+Draw calls were never going to be the problem, though — **triangles were**, and
+the first look at this island found 1.5 million of them, which is a scene no
+phone will draw. The usual answer is to decimate the models in the pack
+pipeline, and on generated meshes that **does not work**: they arrive with
+their vertices split at every UV seam and every hard normal, so meshopt's
+simplifier sees almost every edge as a border it must preserve and takes about
+four per cent off however hard it is asked. Welding does not help either — the
+vertices genuinely differ.
+
+So the count is decided at the SOURCE instead. Meshy's remesher rebuilds the
+topology at a target and re-bakes the UVs onto it, which took the nine props
+that are instanced dozens of times from 3.5–9 k triangles each down to
+700–2 500 — **1.53 M across the island to 444 k**, textures intact, for about
+forty-five credits and five minutes. `buildModel.mjs` grew a `SIMPLIFY_TRIS`
+knob at the same time, because a RATIO is the wrong thing to ask for when the
+input count is whatever the generator felt like.
+
+Two more things then decide how much of that 444 k is actually submitted:
+
+- **Distance culling per KIND.** A bush is four pixels at sixty metres and
+  there are seventy of them, so a bush stops being drawn at 52 m, a rock at 62,
+  a bench at 72, a lamp at 95, a tree at 140. The landmarks — the fountain, the
+  bandstand — are never culled, because they are how you say where you are
+  standing. Three hundred distance checks four times a second, and `setEnabled`
+  only ever on a change.
+- **Fog set FROM those numbers**, not chosen independently of them: at 140 m,
+  where the trees stop, about a third of the object is still showing through
+  the haze, which is little enough that nobody sees one go. `maxZ` comes down
+  to 260 m for the same reason, which is depth precision back for free.
+
+The check prints the number rather than a frame rate — `activeIndices` is the
+same on every machine, and a frame rate measured on a box with no GPU is not.
+
+### Knowing where you are
+
+An island a hundred and fifty metres across is bigger from the inside than it
+looks, and the two questions people actually ask in one — *where am I* and
+*where has my friend got to* — cannot be answered by looking around. So there
+is a map, in the two halves every game of this kind has:
+
+- **A dial in the corner**, showing the island around you.
+- **The whole island behind a tap**, labelled.
+
+**Both hold north up, and the ARROW turns** — the CHARACTER's heading, not the
+camera's. That distinction cost a round: while the map still rotated, pointing
+it at the camera was right, because a player standing still and looking around
+should see something respond. The moment the map stopped rotating it became
+wrong, and quietly: with a fixed map the arrow is the player's marker on it,
+and a marker has to point where the player points. **On a phone you turn by
+walking, which does not move the camera at all** — so the arrow sat still
+through every turn a player actually made, which is the one thing it exists to
+show.
+
+The maths is now in shared (`mapArrow`) with `check:social` asserting it
+against an independent statement of the same fact at 720 headings, plus the
+four a player would name. It is the sort of formula that gets "corrected"
+wrongly — world +Z is screen DOWN and a canvas rotation takes the up vector to
+`(sin θ, −cos θ)` — and it has now been wrong twice, so it is proven rather
+than eyeballed. The scene also reports its own heading and arrow angle to the
+look-at-it check, which walks in three directions and counts the distinct
+angles: a 124-pixel dial in a screenshot is not evidence that anything moved.
+
+ The other tradition — spinning the
+map under a fixed arrow so it agrees with what is in front of you — was tried
+first and reads worse here, because this island has a shape worth learning:
+four avenues, a ring path, a bandstand on the north-west knoll. A map that
+spins takes that away, since "the bandstand is north-west" stops meaning
+anything the moment north moves. A fixed map and a turning arrow carry the same
+information with none of the disorientation, and they let the dial and the full
+map be one picture at two scales.
+
+A landmark carries two separate facts and it matters that they are separate:
+how far its name REACHES, which is what `placeOf` answers with, and whether it
+is WRITTEN on the map, which is about how crowded the map would be. They were
+one number to begin with, and tightening the reaches so a stall stopped
+claiming the ring path silently dropped the fountain, both stalls and every
+gate off the map — two labels left on the whole island. The check now asserts
+the map keeps its names, including the one in the middle.
+
+Under the dial is the name of the place you are standing in. `placeOf` lives in
+shared/ beside the geometry it reads: *The Fountain*, *The Bandstand*, *The
+Ring Path*, *The Beach*. Coordinates are not an answer to "where are you" and a
+name is, and the check asserts that every square metre of the island has one —
+a map that goes blank where you are standing is worse than no map.
+
+**A friend is on it wherever they are.** Everybody else is cut at
+`SNAPSHOT_RANGE_M`, which is what stops a client being used to find a stranger
+— but that same cut makes "where has my friend got to" unanswerable exactly
+when it matters, on an island twice as wide as the range. So a player's friend
+list is loaded once when they walk in, and a friend is in their snapshot at any
+distance. One read per arrival, nothing on the hot path.
+
+**What it costs is almost nothing, and that is the whole design.** The island
+is a constant, so it is drawn ONCE into an offscreen canvas at load; a frame is
+then one rotated `drawImage` of that plus a handful of small arcs, and it
+repaints twelve times a second rather than sixty — a dot moves two pixels a
+second at walking pace and nobody has ever seen the other forty-eight frames.
+The full map repaints once a second while it is open, for the same reason.
+
+**North is where the gates say it is.** The names of the four gates are the
+only thing on the island that states which way north is, and they shipped
+pointing the wrong way: the "north gate" sat at +Z, which the map draws at the
+BOTTOM. A player standing at it was drawn in the south of their own map while
+the HUD named it. `check:social` now asserts the compass and the island agree —
+north gate above the middle, east gate to the right, and `placeOf` naming the
+one the map draws above you.
+
+### Your group on it
+
+A map with a dot for everybody answers *where is somebody*. It does not answer
+*where is **Ravi***, and on an island of twenty that is the only question a
+group actually asks. So the people you walked in with are drawn the way every
+game of this kind draws them:
+
+- **By NUMBER, not by dot.** The server tells each client who they arrived
+  with, in seat order, and the map numbers them from that list — so the same
+  teammate is 2 on everybody's map, every time, for as long as the group is
+  together. Names are twenty characters and there may be twenty of them; a
+  number is one glyph and reads at a glance.
+- **One colour per slot**, because a squad is read by colour before it is read
+  by number.
+- **With a spur off the dot showing WHICH WAY THEY ARE FACING.** Where somebody
+  was is half an answer; a friend heading away from you is a different fact
+  from a friend heading towards you. The spur is drawn straight along
+  `(sin ry, cos ry)` with no rotation to get wrong, and the check cross-checks
+  it against the player's own arrow — which goes through `mapArrow` and a
+  canvas `rotate` — so the two statements of "which way is that" cannot drift
+  apart.
+- **Party bots are in the list.** A duo whose second seat the server filled is
+  still a duo to the player, and a teammate missing from the map is the one
+  thing that would give it away. Ambient island bots carry no lobby id, so the
+  same test excludes them.
+
+**And a marker.** Tap the island on the full map and it is marked for everybody
+you came with, with a dashed line from each of them to it and the distance on
+it. Tapping the marker again takes it down. It is relayed on its own event to
+the sender's party and nobody else — a marker is a group's business — and it is
+also KEPT on the island, so somebody who opens the map a minute later, or walks
+in after the tap, sees the same spot everybody else is walking towards. A tap
+in the sea is clamped onto the island rather than refused: a thumb on a map is
+not precise, and "as close to there as you can get" is what tapping the water
+means. Rounded to a decimetre TOWARDS the middle, never away — ordinary
+rounding put a shore marker six centimetres back into the water, where the
+client's own `isClear` disagrees with the server that had just produced it.
+
+`tools/checks/social-map.py` draws all of it — a squad of three, a friend
+across the park, a stranger in earshot, a marker with its route — straight off
+the dev server with no backend, no pack and no sign-in, in about ten seconds.
+Opening a real island to look at the map costs six minutes and shows you one
+player with no group, which is the case that proves least.
+
+### Turning, and the camera behind it
+
+The complaint was "turning doesn't feel like Free Fire, I can't explain it",
+and it had two halves.
+
+**The camera never came round.** It moved only under a thumb, so walking east
+while it faced north meant watching your own character run sideways across the
+screen — every turn you made left you looking at your own shoulder. Every
+third-person game on a phone settles the camera behind the direction of travel.
+So this one does, exponentially and slower than the character's own turn rate:
+the character snaps round and the camera catches up, which reads as the player
+leading rather than the world swinging. A deliberate look is left alone for
+`CAM_FOLLOW_HOLD_MS`, because a camera that drags itself back is a camera
+arguing with the player.
+
+**And then holding the stick still walked you in a circle.** That is the half
+worth writing down, because each piece was right on its own. The stick was read
+in camera space every frame — push up, walk away from the camera — which is the
+only scheme that survives a player spinning the view mid-stride. Add a camera
+that settles behind you and the two chase each other: the stick says "left of
+the camera", the character turns left, the camera swings left to get behind
+them, and the same unmoved thumb now means left of THAT. The stable state is
+not "eventually behind you"; it is both rotating together for ever, about one
+turn every two seconds. The browser check measured 66° of permanent lag and the
+arithmetic one measures 586° of turn in three seconds.
+
+The fix is one rule: **camera space at the moment the stick MOVES, world-locked
+while it is held.** Push left and you turn left once and keep going that way
+with the camera coming round behind you. Roll the stick and you turn by however
+far it rolled. Let go, and the next push is read against the camera again — so
+"tap left" turns you left from wherever you are now looking. While a thumb is
+actually dragging the view it stays camera space throughout, because that is
+the other way anybody steers and it has to keep working.
+
+That loop lives in `shared/games/social/steer.ts` rather than in the runtime,
+for the same reason the smoothing does: it is the sort of arithmetic whose
+stable state nobody can see by reading it, so the check runs the real functions
+at sixty frames a second and asserts what comes out — a stick held left turns
+you 90° and not a circle, the camera ends up behind you, a view dragged 90°
+takes the character with it, a thumb resting on the stick does not steer, and
+the loop it replaced would have spun you three times.
+
+### Meeting somebody
+
+- **Tap them.** Their card opens — the same card the lobby shows, with their
+  level, rank and headline stats — and, if they can be added, an **Add friend**
+  button. Only the invisible capsules around people are pickable, so a tap is a
+  ray against twenty small meshes and never against the props.
+- **Who can be added is asked, never inferred.** The card offers it only for
+  uids in the answer to `match:addable`, which is computed per asker: a uid is
+  missing from that list whether it belongs to the server population, to
+  somebody already on your friend list, or to somebody you already have a
+  request out to. The button's absence therefore says nothing about which.
+- **Emotes.** Everything you own, plus the six-emoji wheel — which is what
+  somebody with no microphone actually uses, so burying it would be burying
+  that player's whole conversation. The bots use the wheel too.
+- **Leaving.** The results card is not a scoreboard and does not read like one:
+  every placement is 1, because nobody came first at standing in a park. What
+  it says is how long you were there and how many people you actually stood
+  next to — which is also what makes the friend offer beside it mean something.
+
+### Ten seconds, not twenty
+
+A dropped socket keeps its seat for **ten** seconds here, against a match's
+twenty and a board game's several minutes. A seat in a match is a row on a
+scoreboard; a seat here is a body standing in front of somebody, and holding
+one open for a phone that went into a tunnel means a motionless person in the
+middle of a conversation and — worse — a seat a real arrival cannot have.
+
+### What the console sees
+
+**Islands** in the admin console lists every live world and opens one as a
+**live map**: the real island, drawn from the same module the game draws it
+from, with everybody's dot on it, the way they are facing, and a faint circle
+showing their twenty-metre earshot — so "who could have heard that" is a thing
+you can see rather than a thing you work out. Under it, a row per player:
+what they are doing, where, how many people are inside their earshot right now,
+how many they have stood next to, how long they have been there, and how many
+position reports the server refused (which is what a client walking through
+walls looks like from here).
+
+None of it costs the game server anything: every position on that map was
+already in memory because proximity voice needed it, and it reaches the console
+through the ordinary two-second ops snapshot, on its own Redis key so the
+overview — opened far more often — still reads one small hash.
+
+**Voice recording works here too, and it had to change shape to.** A match asks
+"is anybody at this table flagged" once, at assembly, because everybody who
+will ever be in it is already in it. An island cannot: people walk in for forty
+minutes and the flagged player may be the fourteenth through the door. So
+`considerRoom` is asked on **every arrival**, costs one Redis read against a
+set that is empty for almost every arrival, and once armed stays armed for the
+life of the island — the flagged player leaving does not un-say what was
+already said. When it is armed, all twenty voices in the room are recorded,
+exactly as in a match.
+
+### It can be watched back, and that took a trick
+
+Every other game archives itself for free: a match is completely described by
+its seed and its `{tick, kind}` inputs, so the replay is a serialization of
+what the runtime was already holding. An island has **no inputs at all** — that
+is the whole reason its live channel exists — so on the face of it there is
+nothing to archive and nothing for the studio to play.
+
+What it archives instead is a **track**: everybody's position, a couple of
+times a second, written as ordinary `{tick, kind}` inputs where the kind is an
+encoded pose. That is not a dodge around the format, it IS the format — and
+because it is, the console's replay studio plays an island with **no change to
+the studio whatsoever**. It builds its tape from the marks, seeds a runtime
+with everything before the playhead, hands the rest over as its clock reaches
+them, and the social runtime reads a pose out of each kind instead of a swipe.
+Scrubbing, 0.25×–8× speed, the talk feed and the per-player readouts all come
+along for nothing.
+
+Four things had to be got right for that to hold:
+
+- **Sampled, not streamed.** Ten a second is what a player's eye needs; two a
+  second, and only when something actually changed, is what a moderator needs.
+  A person standing still costs one sample every three seconds. A full
+  forty-minute island is about fifty thousand samples and lands around 6 KB
+  gzipped — smaller than a game of Ludo.
+- **Seats are OCCUPANCIES, not seats.** Over forty minutes seat 3 might hold a
+  bot, then Alice, then a bot, then Bob, and a format with one roster row per
+  seat cannot say that. So the replay numbers people by arrival instead, and
+  `ReplayRosterEntry` gained an optional `joinedAtTick` — without it a viewer
+  scrubbing to minute two would see somebody who turned up at minute thirty.
+- **A departure is a moment.** It goes on the tape as its own mark rather than
+  as a track that stops, because the studio plays moments and infers nothing.
+- **Nobody's career moves.** An island writes a `matches` row and its
+  `match_players` rows so the console can find it, and *nothing else* — no XP,
+  no player stats, no bot stats. Every seat on an island "finishes first" by
+  construction; through the ordinary path that is twenty people and twenty bots
+  gaining a win apiece, and every win-rate on the platform quietly wrong from
+  the first evening. `recordSession` exists to make that impossible rather than
+  merely unlikely. One row per PERSON, too: a player who leaves and comes back
+  is two occupancies in the replay and one row in the table, because
+  `match_players` is unique on (match, user) and on an island being there twice
+  is not a bug.
+
+The three studio hooks are declared, so the tape means something: a mark reads
+*"walking · 14, −22 · grass"*, its HEIGHT is how fast they were going (so a
+whole session shows at a glance who was running about and who stood by the
+fountain), and each player's row prints *18 min · 340 m walked · 12% running*.
+
+### Checking it
+
+```bash
+npm run check:social     # the island, the routes, the walk, the curve, the wire, the track
+npm run e2e:social       # the server's half over a real socket, and the archive
+python3 tools/checks/social-look.py     # what it actually looks like
+python3 tools/checks/social-map.py      # the map, with a squad and a marker on it
+python3 tools/checks/social-studio.py   # …and that the console can watch it back
+```
+
+`check:social` is the one to run after touching anything under
+`shared/games/social/`. It is arithmetic and takes about a second: it walks
+60,000 points at the island from every direction including from inside the
+fountain and asserts none of them ends up inside something solid or off the
+edge, checks every edge of the bot graph is clear, walks forty minutes of five
+bots, and proves the volume curve is continuous at both ends.
+
+### Why bots were smooth and people were not
+
+The most interesting bug in this game, and the one it took a second report to
+find: with the sliding and the buffer fixed, the population moved perfectly and
+real players still stuttered. The two travel the same channel and are drawn by
+the same code, so the difference had to be in what was being SENT — and it was.
+
+A snapshot stamps every entry with one timestamp: the moment it was built.
+
+For a bot that is exactly true. Their position is a function of the clock, and
+it is evaluated *at* that instant, so two consecutive samples lie exactly on a
+smooth curve.
+
+For a person it is a lie, and a lie whose SIZE changes every tick. Their
+position is whatever they last reported, which was true at some earlier moment
+— and how much earlier depends on where their packet happened to land relative
+to the snapshot tick. So two samples labelled a fifteenth of a second apart
+might hold nothing at all, or two fifteenths' worth of walking. The receiver
+divides the distance by the stated interval and gets a speed that alternately
+falls to zero and doubles. **That is the stutter**, and it is a textbook
+variable-rate-into-fixed-rate resampling fault wearing a network's clothes.
+
+The fix is to carry the spacing the SENDER measured. A report now says how many
+milliseconds of walking it contains; the server keeps a per-player timeline
+advanced by those gaps rather than by arrival times, and each snapshot entry
+says how old its pose is. The receiver places the sample where it belongs
+instead of where it arrived.
+
+`check:social` measures it end to end — a jittery frame loop, a network
+delivering 20–90 ms late, the server's fixed tick, and sixty-a-second
+interpolation at the far end — and reports the worst deviation from a steady
+walk:
+
+| | worst drawn speed error |
+| --- | --- |
+| stamped with the snapshot's clock | **143%** — stalls to nothing, then doubles |
+| stamped with the pose's own | **0%** |
+
+Two smaller things came out of the same work. Latency does not only get worse:
+when it *improves*, a burst of reports lands together carrying half a second of
+real walking, and pinning their timeline to "now" compresses that into one
+tick — so a sender's timeline may run up to a quarter second ahead, and the
+receiver's own window absorbs it. And a stream that genuinely stalls cannot be
+drawn over — nobody knows where the sender went — but the RETURN can be: the
+correction is walked off over two hundred milliseconds instead of jumped, which
+took the worst case from four thousand per cent of walking speed to two
+hundred and fifty. A character breaking step reads as "they lagged for a
+moment"; a character teleporting reads as a broken game.
+
+The whole of that smoothing lives in `shared/games/social/smooth.ts` rather
+than in the renderer, because three things run it: the client drawing a live
+island, the console replaying a recorded one, and the check that proves the
+result is smooth.
+
+### A legendary has to look legendary HERE most of all
+
+The island shipped without the legendary effects. Attaching them is one call —
+`attachAura` decides from the catalog, so nothing here knows which characters
+are which — but three things around it were not one call:
+
+- **A scene-wide `blockMaterialDirtyMechanism` swallowed them.** It was set
+  after the scenery was built, to stop two hundred frozen materials from ever
+  re-checking themselves, and left on. Characters load *after* that, so every
+  material they created never got its effect rebuilt when something changed it
+  — which is a quiet way to lose an emissive mask. It now wraps the loop it was
+  meant for and is released again immediately.
+- **The bloom is built only when there is something to bloom.** The runner goes
+  without a glow layer on purpose: it is a full-screen pass and the most
+  expensive thing in the scene. An island is the one place people come to be
+  looked at, so it gets one — created when a legendary is actually on screen
+  and disposed when the last one walks away.
+- **And it has to be told what NOT to bloom.** Left to itself a glow layer
+  considers everything with an emissive contribution, which on this island was
+  the ground, the sea, the sky, two hundred and ninety props and every name
+  plate. Measured: **1,045,980 triangles a frame**. Two fixes, and both were
+  worth having anyway — the scenery is excluded outright, and `daylight()` now
+  strips the emissive map that generated models routinely arrive carrying (a
+  copy of the albedo, which had been making the whole park read a stop too
+  bright long before any glow existed; with a glow it made the foliage
+  luminous and the benches give off orange light). Back to **437,116**, with
+  sixteen characters and six legendary effects running.
+
+Effects are budgeted like everything else on this island: the six nearest, out
+to thirty-four metres, and your own always — a cosmetic you own is worth least
+in the one place you cannot see it.
+
+### And three more that were also real
+
+None of them the network either:
+
+- **Half the island was sliding.** The crowd budget animated the nearest eight
+  characters and left the rest frozen in a pose — on the theory that a walk
+  cycle you cannot make out is not worth evaluating. That was false economy
+  twice over: the saving is a couple of dozen bone matrices (the skinning
+  happens in the vertex shader whether or not a clip is advancing), and the
+  cost is a character whose position is still being interpolated gliding about
+  in a fixed stance. Twelve of twenty people doing that is exactly what a
+  player would describe as lag. Everything with a model now animates.
+- **The interpolation window was too tight.** Snapshots arrive every 100 ms and
+  remote players were drawn 140 ms behind — forty milliseconds of slack, less
+  than the jitter on an ordinary mobile connection. One late packet emptied the
+  buffer and the character stopped dead until it landed. It is 180 ms behind
+  now, keeps six samples instead of three, and **extrapolates** from the last
+  two for up to a quarter of a second rather than freezing.
+- **The server was punishing bunched packets.** The speed limit was measured
+  between two ARRIVALS, so two reports four milliseconds apart carrying two
+  hundred milliseconds of walking had the second one clamped — and everybody
+  else watching saw a snap backwards. It is a token bucket now: it fills at the
+  speed a running player is allowed and is spent by the distance claimed, so a
+  burst is fine and a sustained lie is not. The bucket's ceiling is one second
+  of running, deliberately: two seconds let a single message move somebody
+  seventeen metres, which is most of the way into a stranger's earshot, and
+  walking there is supposed to be the only way to get there.
+
+### Four traps this game cost
+
+- **Clamping to the edge lands ON the edge.** `resolveMove` pushed a player
+  who walked into the sea back to exactly `WALK_R`, and about half the time the
+  square of that number rounds to just above `WALK_R²` — so `isClear` then said
+  the position `resolveMove` had just produced was invalid. Harmless-looking,
+  except the two callers are the client and the server, and a client that
+  believes it is standing somewhere the server rejects is a player being
+  dragged backwards. It clamps a millimetre inside now.
+- **Two rings of park furniture, seven centimetres apart.** Benches were laid
+  round the ring path by angle and lamp posts by a different angle, and one
+  pair came out 45 cm apart with a gap between their collision circles too
+  narrow for a player to fit. Anybody pushed into it was pushed back and forth
+  between them for ever. Separating the two rings by RADIUS makes it impossible
+  by geometry rather than by luck, and the check asserts no two solid props
+  overlap so it cannot come back.
+- **A free item is not an owned item.** The first end-to-end run failed on
+  `live:emote` for a brand-new account, and the code was right: since the
+  pricing milestone a free emote still has to be CLAIMED into `user_items`
+  before it can be performed. The test was wrong, and now checks both halves —
+  an unclaimed emote is refused, a granted one is accepted.
+- **Pushing out of colliders one at a time never finishes.** Solid props are
+  built from OVERLAPPING circles — the stall is three in a row — and the
+  obvious resolver, walk the list and push out of each, moves a point from the
+  middle circle into the right-hand one, back into the middle, and round again
+  for as long as you let it. Leaving the DEEPEST overlap first always walks the
+  point towards open ground; twelve passes then clears every arrangement on the
+  island, verified over a million points thrown at it from every direction
+  including from dead centre inside the stall. It costs nothing in the case
+  that matters, because a walking player is inside one circle by a few
+  centimetres and the loop breaks after the first pass. The same afternoon also
+  turned up its cousin: the layout sampler asked each prop how much room it
+  took up and got its BLOCKING radius, which is zero for the three props you
+  can walk into — so it scattered bushes inside the stall. A prop now has a
+  footprint as well as a collider, and they are different numbers on purpose.
+
 ## What's next (planned)
 
 - Trackline gameplay: obstacles, jump/roll, crashes, coins, scoring.

@@ -249,11 +249,15 @@ let ticker: NodeJS.Timeout | null = null;
 /** Start the packer. Idempotent — called once from the server bootstrap. */
 export function startMatchmaker(io: Server): void {
   if (ticker) return;
-  console.info(`[mm] matchmaker started (${listGames().length} game(s), fill deadline ${FILL_DEADLINE_MS}ms)`);
+  const queued = listGames().filter((g) => !g.dropIn).length;
+  console.info(`[mm] matchmaker started (${queued} queued game(s), fill deadline ${FILL_DEADLINE_MS}ms)`);
   ticker = setInterval(() => {
     void (async () => {
       try {
         for (const game of listGames()) {
+          // A drop-in world has no pool — START walks you into one (see
+          // platform/island.ts), so there is nothing here to pack.
+          if (game.dropIn) continue;
           const sizes = new Set([game.matchSizeFor("solo"), game.matchSizeFor("duo"), game.matchSizeFor("squad")]);
           for (const size of sizes) {
             if ((await redis.zcard(poolKey(game.id, size))) === 0) continue;

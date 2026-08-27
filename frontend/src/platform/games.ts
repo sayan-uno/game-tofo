@@ -15,6 +15,7 @@ const CLIENT_GAMES: GameClientDefinition[] = [
   { id: "carrom", load: () => import("../games/carrom/entry") },
   { id: "dots", load: () => import("../games/dots/entry") },
   { id: "pool", load: () => import("../games/pool/entry") },
+  { id: "social", load: () => import("../games/social/entry") },
 ];
 
 export const getClientGame = (id: string): GameClientDefinition | undefined => CLIENT_GAMES.find((g) => g.id === id);

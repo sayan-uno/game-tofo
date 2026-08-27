@@ -37,3 +37,8 @@ tools/packs/out/
 tools/packs/*/src/models/
 tools/packs/*/src/textures/
 tools/packs/*/art/*_raw.*
+
+# Screenshots from the look-at-it checks (tools/checks/social-look.py and
+# friends). They are evidence for one run on one machine, not a record — the
+# thing worth committing is the script that produces them.
+tools/checks/.out/

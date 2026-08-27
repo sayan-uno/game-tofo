@@ -34,6 +34,7 @@ import { mountParty } from "./screens/party";
 import { mountParties } from "./screens/parties";
 import { mountHistory } from "./screens/history";
 import { mountWorld, mountWorlds } from "./screens/worlds";
+import { mountIsland, mountIslands } from "./screens/islands";
 import { mountPayments } from "./screens/payments";
 import { mountPaySessions } from "./screens/paySessions";
 import { mountPayLog } from "./screens/payLog";
@@ -52,7 +53,7 @@ const go = (hash: string) => {
 
 interface Route {
   nav:
-    | "overview" | "history" | "players" | "matches" | "parties" | "worlds" | "sanctions" | "voice"
+    | "overview" | "history" | "players" | "matches" | "parties" | "worlds" | "islands" | "sanctions" | "voice"
     | "games" | "notices" | "events" | "platform" | "reports" | "analytics" | "signals"
     | "payments" | "paysessions" | "paylog" | "pricing" | "orders";
   title: string;
@@ -114,6 +115,13 @@ function parse(): Route {
   if (parts[0] === "worlds") {
     return { nav: "worlds", title: "Worlds", mount: (h) => mountWorlds(h, go) };
   }
+  if (parts[0] === "islands" && parts[1]) {
+    const id = decodeURIComponent(parts[1]);
+    return { nav: "islands", title: "Island", crumb: id, mount: (h) => mountIsland(h, id, go) };
+  }
+  if (parts[0] === "islands") {
+    return { nav: "islands", title: "Islands", mount: (h) => mountIslands(h, go) };
+  }
   if (parts[0] === "parties" && !parts[1]) {
     return { nav: "parties", title: "Parties", mount: (h) => mountParties(h, go) };
   }
@@ -167,6 +175,7 @@ function shell(who: SignedIn): void {
           <a href="#/" data-nav="overview">${icon("gauge")} Overview</a>
           <a href="#/players" data-nav="players">${icon("users")} Players</a>
           <a href="#/matches" data-nav="matches">${icon("play")} Matches</a>
+          <a href="#/islands" data-nav="islands">${icon("map")} Islands</a>
           <a href="#/analytics" data-nav="analytics">${icon("gauge")} Analytics</a>
           <div class="heading">Moderation</div>
           <a href="#/reports" data-nav="reports">${icon("flag")} Reports<span class="badge hidden" id="qbadge"></span></a>

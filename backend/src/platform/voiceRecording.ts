@@ -162,6 +162,57 @@ export async function noteMatchStart(matchId: string, startAt: number): Promise<
   await setSessionAnchor(matchId, startAt).catch(() => undefined);
 }
 
+/** The same decision for a room whose roster is NOT settled when it opens.
+ *
+ *  A match asks once, at assembly, because everybody who will ever be in it is
+ *  already in it. A drop-in world cannot: people walk in for forty minutes,
+ *  and the flagged player may be the fourteenth through the door. So this is
+ *  asked on every arrival, and is written to be cheap in the case that is
+ *  almost all of them — one Redis read against a set that is usually empty,
+ *  and then nothing.
+ *
+ *  Once armed, it STAYS armed for the life of the room. Everybody else in
+ *  there is only being recorded because of who they are standing with, but the
+ *  flagged player leaving does not un-say what was already said, and stopping
+ *  halfway would leave a file that ends mid-sentence for no reason anybody
+ *  reading it later could reconstruct.
+ *
+ *  Budget is spent ONCE per room, on the arming, exactly as a match spends one
+ *  unit however many people were at the table. */
+export async function considerRoom(
+  key: string,
+  userIds: string[],
+  opts: { already: boolean; anchor: number | null }
+): Promise<boolean> {
+  if (!readiness().ready) return false;
+  if (!(await anyFlagged(userIds))) return opts.already;
+  if (opts.already || (await isSessionRegistered(key))) return true;
+
+  await redis.set(matchKey(key), "1", "EX", MATCH_TTL);
+  await registerSession({
+    key,
+    room: matchVoiceRoom(key),
+    scope: "match",
+    anchor: opts.anchor,
+    at: Date.now(),
+  });
+  const spent = await db
+    .update(recordingTargets)
+    .set({ matchesUsed: sql`${recordingTargets.matchesUsed} + 1` })
+    .where(
+      and(
+        eq(recordingTargets.kind, "voice"),
+        isNull(recordingTargets.revokedAt),
+        gt(recordingTargets.expiresAt, sql`now()`),
+        inArray(recordingTargets.userId, userIds),
+        sql`${recordingTargets.matchesUsed} < ${recordingTargets.maxMatches}`
+      )
+    )
+    .returning({ userId: recordingTargets.userId, used: recordingTargets.matchesUsed, max: recordingTargets.maxMatches });
+  for (const row of spent) if (row.used >= row.max) await unflagVoiceTarget(row.userId);
+  return true;
+}
+
 export const isRecordable = async (matchId: string): Promise<boolean> =>
   (await redis.get(matchKey(matchId))) === "1";
 

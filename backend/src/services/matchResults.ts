@@ -105,6 +105,84 @@ export interface RecordedResult {
   xp: Record<string, number>;
 }
 
+/** The same two tables for something that was NOT a contest.
+ *
+ *  A drop-in world writes a `matches` row and its `match_players` rows so the
+ *  console can find it — the replay list joins both, and a player's history is
+ *  a query over the second — and it writes NOTHING ELSE. No XP, no
+ *  playerStats, no botStats, no wins.
+ *
+ *  That last part is the whole reason this exists rather than a flag on
+ *  recordMatch. Standing in a park is not winning a match, and every islander
+ *  finishes in first place by construction — put that through the ordinary
+ *  path and twenty people gain a win, twenty bots gain a win, and every
+ *  win-rate on the platform is quietly wrong from the first evening. The
+ *  console gets its rows; nobody's career notices.
+ *
+ *  Idempotent on the match key, exactly like recordMatch. */
+export async function recordSession(input: {
+  matchKey: string;
+  gameId: string;
+  seed: number;
+  reason: string;
+  ticks: number;
+  members: {
+    uid: string;
+    name: string;
+    userId: string | null;
+    botId: string | null;
+    isBot: boolean;
+    /** Minutes they were there, as the score — it is the only number an
+     *  island has that means anything. */
+    score: number;
+    detail: Record<string, number>;
+    left: boolean;
+    samples: number;
+    rejects: Record<string, number>;
+  }[];
+}): Promise<boolean> {
+  try {
+    return await db.transaction(async (tx) => {
+      const inserted = await tx
+        .insert(matches)
+        .values({
+          matchKey: input.matchKey,
+          gameId: input.gameId,
+          seed: input.seed,
+          reason: input.reason,
+          ticks: input.ticks,
+          playerCount: input.members.length,
+        })
+        .onConflictDoNothing({ target: matches.matchKey })
+        .returning({ id: matches.id });
+      const matchId = inserted[0]?.id;
+      if (!matchId) return false;
+      await tx.insert(matchPlayers).values(
+        input.members.map((m) => ({
+          matchId,
+          userId: m.userId,
+          botId: m.botId,
+          isBot: m.isBot,
+          name: m.name,
+          // Everybody the same, and it is not a placing: see the note above.
+          placement: 1,
+          score: m.score,
+          forfeit: m.left,
+          detail: m.detail,
+          inputs: m.samples,
+          rejects: Object.values(m.rejects).reduce((a, b) => a + b, 0),
+          rejectKinds: m.rejects,
+          cadence: null,
+        }))
+      );
+      return true;
+    });
+  } catch (err) {
+    console.error(`[session ${input.matchKey}] could not be recorded:`, err);
+    return false;
+  }
+}
+
 export async function recordMatch(input: RecordMatchInput): Promise<RecordedResult> {
   const { standings, runners } = input;
   const byUid = new Map(runners.map((r) => [r.uid, r]));

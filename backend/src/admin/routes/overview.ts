@@ -80,7 +80,14 @@ async function instances(): Promise<InstanceView[]> {
   do {
     const [next, keys] = await redis.scan(cursor, "MATCH", "ops:live:*", "COUNT", 100);
     cursor = next;
-    for (const k of keys) if (!k.startsWith("ops:live:matches:")) found.push(k);
+    // Only the per-instance HASH is an instance. The two per-instance STRING
+    // keys published alongside it (live matches, live islands) share the
+    // prefix, and HGETALL against a string is an error that would take the
+    // whole overview down.
+    for (const k of keys) {
+      if (k.startsWith("ops:live:matches:") || k.startsWith("ops:live:islands:")) continue;
+      found.push(k);
+    }
   } while (cursor !== "0");
 
   const out: InstanceView[] = [];

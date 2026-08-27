@@ -20,6 +20,14 @@ export interface MemberCardOptions {
   manage?: { onTransfer: () => void; onKick: () => void };
   /** Handed to the full page so it can park the lobby's render loop. */
   profileHooks?: ProfileHooks;
+  /** Offer to send them a friend request.
+   *
+   *  Present ONLY when the caller has already established that this player can
+   *  be added — which is a question only the server can answer, and one whose
+   *  answer must never be inferable: a uid is un-addable whether it belongs to
+   *  the server population, to somebody already on your list, or to somebody
+   *  you already have a request with. See `match:addable`. */
+  befriend?: () => void | Promise<void>;
 }
 
 const CROWN = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 18h18"/><path d="m3 7 4.5 4L12 4l4.5 7L21 7l-2 8H5z"/></svg>`;
@@ -87,6 +95,10 @@ export function showMemberCard(member: LobbyMember, opts: MemberCardOptions = {}
   button("View full profile", "btn btn-red mc-go", () => {
     openProfile(member, { self: false, ...opts.profileHooks });
   });
+  if (opts.befriend) {
+    const add = opts.befriend;
+    button("Add friend", "btn btn-ghost mc-add", () => void add());
+  }
   // Leader controls act immediately — opening the card is the deliberate step,
   // a second accept/decline prompt was dropped on purpose.
   if (opts.manage) {

@@ -23,6 +23,10 @@ export interface PackAssets {
 export interface GameRuntimeContext {
   engine: Engine;
   canvas: HTMLCanvasElement;
+  /** The id of the match — or the drop-in world — this runtime is drawing.
+   *  Games that need to ask the server a question ABOUT it (who here can I
+   *  still add as a friend?) need to name it. */
+  matchId: string;
   assets: PackAssets;
   roster: RosterEntry[];
   /** The local player's uid. */
@@ -38,6 +42,24 @@ export interface GameRuntimeContext {
   sendQuick(kind: QuickKind, id: string): void;
   /** The player wants out (game HUD's leave button). */
   requestLeave(): void;
+  /** ---------------------------------------------------------------------
+   *  Drop-in worlds only (see LIVE_EV in the shared protocol).
+   *
+   *  A social world's players are not sending INPUTS at each other — they are
+   *  walking around, and where somebody is standing decides nothing. So this
+   *  channel is relayed and forgotten: not logged, not replayed, not part of
+   *  any result. A game that has a result must not use it for anything that
+   *  decides one.
+   * ------------------------------------------------------------------- */
+  /** Tell the world where I am / what I am doing. Rate-limited server-side. */
+  sendState(payload: unknown): void;
+  /** Perform an equipped emote. Resolves with the server's answer so the HUD
+   *  can say "you can't perform that" rather than silently doing nothing. */
+  sendEmote(id: string): Promise<{ ok?: boolean; error?: string }>;
+  /** Mark a spot for the people you arrived with; null takes the mark down.
+   *  Relayed to the group and forgotten, like everything else on this
+   *  channel. */
+  sendPin(at: { x: number; z: number } | null): void;
   /** A DOM layer above the canvas for the game's own HUD. Emptied on dispose. */
   hudRoot: HTMLElement;
   /** Nobody is playing: this runtime is being WATCHED, not driven.
@@ -84,6 +106,21 @@ export interface GameRuntime {
   onLeft(uid: string): void;
   /** Someone in this match sent a quick message. */
   onQuick?(uid: string, kind: QuickKind, id: string): void;
+
+  /** ---- drop-in worlds (all optional; a match declares none of them) ---- */
+  /** Everybody's position, batched. The payload is the game's own shape. */
+  onSnap?(payload: unknown): void;
+  /** The roster CHANGED — somebody arrived, or left, or a seat changed hands.
+   *  A fixed-roster game never sees this. `party` is who the RECIPIENT walked
+   *  in with, which is why the message is sent per person rather than to the
+   *  room. */
+  onRoster?(roster: RosterEntry[], endsAt: number, party: string[]): void;
+  /** Somebody in the group marked a spot; null coordinates take it down. */
+  onPin?(uid: string, x: number | null, z: number | null): void;
+  /** The world closes at this server time. Sent once, seconds before. */
+  onClosing?(at: number): void;
+  /** Somebody performed an emote. */
+  onEmote?(uid: string, id: string): void;
   /** The match is over: freeze the world (the platform shows the results). */
   end(result: MatchEnd): void;
   /** How this game words the top of the results card. The platform draws the
@@ -101,6 +138,18 @@ export interface GameRuntime {
 
 export interface GameModule {
   createRuntime(ctx: GameRuntimeContext): GameRuntime | Promise<GameRuntime>;
+
+  /** What kind of voice room this game wants.
+   *
+   *  Absent — the default and what every match game gets — means everybody in
+   *  the roster hears everybody, which is what a team of four playing a game
+   *  together wants. "proximity" means the room is a PLACE: you hear the
+   *  people standing near you, and everybody else's audio is not subscribed to
+   *  at all rather than merely turned down.
+   *
+   *  On the MODULE rather than in the runtime because the platform joins the
+   *  room before the runtime exists. */
+  voice?: "proximity";
 
   /** ---------------------------------------------------------------------
    *  What a WATCHER can be told about an input, for the admin console's

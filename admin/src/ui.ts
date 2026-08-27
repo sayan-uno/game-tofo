@@ -84,6 +84,7 @@ const ICONS: Record<string, string> = {
   mail: '<rect x="2" y="5" width="20" height="14" rx="2"/><path d="m2 7 10 6 10-6"/>',
   box: '<path d="M21 8 12 3 3 8v8l9 5 9-5Z"/><path d="m3 8 9 5 9-5"/><path d="M12 13v8"/>',
   flag: '<path d="M4 21V4h11l-1 3h7v9h-8l-1-3H4"/>',
+  map: `<path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3z"/><path d="M9 3v15"/><path d="M15 6v15"/>`,
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18Z"/>',
   gem: '<path d="M6 3h12l4 6-10 12L2 9Z"/><path d="M2 9h20"/><path d="m12 21-4-12 2-6"/><path d="m12 21 4-12-2-6"/>',
   receipt: '<path d="M5 3v18l2.5-2 2.5 2 2-2 2 2 2.5-2L19 21V3Z"/><path d="M9 8h6"/><path d="M9 12h6"/>',

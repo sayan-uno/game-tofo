@@ -94,6 +94,32 @@ for (const scene of root.listScenes()) {
 }
 
 // ---- 2..4 optimise ---------------------------------------------------------
+/** Triangles in the document as it stands. */
+function triangles() {
+  let n = 0;
+  for (const mesh of root.listMeshes()) {
+    for (const prim of mesh.listPrimitives()) {
+      const idx = prim.getIndices();
+      n += (idx ? idx.getCount() : prim.getAttribute("POSITION").getCount()) / 3;
+    }
+  }
+  return Math.round(n);
+}
+
+// How much to decimate. A RATIO is the wrong knob for a prop that is going to
+// be instanced two hundred times: what matters is the triangle count it ends
+// up at, and the count it starts at is whatever the generator felt like. So
+// SIMPLIFY_TRIS names the target directly and the ratio is worked out from
+// what is actually in the file. SIMPLIFY_RATIO still works for a one-off.
+//
+// The error bound has to move with it: meshopt refuses to go past `error`
+// however low the ratio, so a tight bound silently ignores an aggressive
+// target and the model ships at full density.
+const before_tris = triangles();
+const wantTris = Number(process.env.SIMPLIFY_TRIS ?? 0);
+const ratio = wantTris > 0 ? Math.min(1, wantTris / Math.max(1, before_tris)) : Number(process.env.SIMPLIFY_RATIO ?? 0.5);
+const simpError = Number(process.env.SIMPLIFY_ERROR ?? (wantTris > 0 ? 0.05 : 0.004));
+
 await doc.transform(
   dedup(),
   flatten(),
@@ -102,7 +128,7 @@ await doc.transform(
   // and an unwelded mesh cannot be decimated at all — simplify silently does
   // nothing and the model stays at full density.
   weld({ tolerance: 0.0001 }),
-  simplify({ simplifier: MeshoptSimplifier, ratio: Number(process.env.SIMPLIFY_RATIO ?? 0.5), error: 0.004 }),
+  simplify({ simplifier: MeshoptSimplifier, ratio, error: simpError }),
   resample(),
   textureCompress({ encoder: sharp, targetFormat: "webp", resize: [texSize, texSize], quality: 84 }),
   prune()
@@ -125,5 +151,6 @@ for (const mesh of root.listMeshes()) {
 }
 console.log(
   `out: ${(after / 1e6).toFixed(2)} MB (${((1 - after / before) * 100).toFixed(0)}% smaller) · ` +
-    `${Math.round(tris)} tris · ${(b1.max[1] - b1.min[1]).toFixed(2)} m tall · ${outPath}`
+    `${Math.round(tris)} tris (from ${before_tris}, ratio ${ratio.toFixed(3)}) · ` +
+    `${(b1.max[1] - b1.min[1]).toFixed(2)} m tall · ${outPath}`
 );

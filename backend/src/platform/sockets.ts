@@ -32,8 +32,22 @@ import {
   throttle,
 } from "./store.js";
 import { FILL_DEADLINE_MS, dequeue, enqueue, packNow } from "./matchmaking.js";
-import { countBotSeats } from "./botSeats.js";
-import { EV, PROGRESS_MAX_HZ, type MatchAddable, type MatchSync, type TimePong } from "../shared/core/protocol.js";
+import { botSeatIdentities, countBotSeats } from "./botSeats.js";
+import {
+  getIslandForUser,
+  humansOnIsland,
+  isLive,
+  joinIsland,
+  leaveIsland,
+  onEmote,
+  onIslandDisconnect,
+  onIslandPin,
+  onIslandQuick,
+  onIslandReconnect,
+  onReport,
+} from "./island.js";
+import { canPerform } from "../services/catalog.js";
+import { EV, LIVE_EV, PROGRESS_MAX_HZ, type MatchAddable, type MatchSync, type TimePong } from "../shared/core/protocol.js";
 import { noteLobbyPick, noteLobbyReady, noteLobbySearch } from "./partyLog.js";
 import { bannedAmong, gameHeld, hiddenGames } from "./gameLocks.js";
 import { getSanctions } from "../services/sanctions.js";
@@ -223,6 +237,28 @@ export function registerPlatformHandlers(io: Server, socket: AuthedSocket, deps:
       if (!(await throttle("start", userId, 3))) return reply?.({ error: "Hold on a moment" });
 
       const size = game.matchSizeFor(mode);
+      // A DROP-IN WORLD IS NOT QUEUED FOR.
+      //
+      // Matchmaking's whole shape is "hold this party until enough others turn
+      // up, then build a match out of them". A social island already exists and
+      // already has twenty people on it; what a party needs is a door, not a
+      // queue. So START skips the pool entirely and the seats are taken from
+      // the population — which is also why nobody here ever sees a "finding
+      // players" screen.
+      if (game.dropIn) {
+        logEvent({
+          ...trace(socket),
+          type: "lobby.search",
+          userId,
+          uid,
+          lobbyId,
+          gameId,
+          data: { mode, party: users.length, size, solo: users.length === 1, dropIn: true },
+        });
+        const joined = await joinIsland(io, game, { lobbyId, users, bots: await botSeatIdentities(lobbyId) });
+        if ("error" in joined) return reply?.({ error: joined.error });
+        return reply?.({ ok: true, matchId: joined.id });
+      }
       // PRESSING START IS AN ACT, and until now only its consequence was on
       // record: a match appeared, with nothing saying who asked for it or when
       // — and nothing at all when the ask never turned into a match. Logged
@@ -357,7 +393,12 @@ export function registerPlatformHandlers(io: Server, socket: AuthedSocket, deps:
   socket.on(EV.ready, (_payload: unknown, ack?: (r: object) => void) => {
     const reply = typeof _payload === "function" ? (_payload as (r: object) => void) : ack;
     const m = getMatchForUser(userId);
-    if (!m || !isActive(m)) return reply?.({ error: "No match to be ready for" });
+    if (!m || !isActive(m)) {
+      // A world is already running, so there is nothing to be ready FOR — but
+      // a client that says so is not wrong and must not be told it is.
+      if (getIslandForUser(userId)) return reply?.({ ok: true });
+      return reply?.({ error: "No match to be ready for" });
+    }
     markReady(io, m, uid);
     reply?.({ ok: true });
   });
@@ -370,10 +411,55 @@ export function registerPlatformHandlers(io: Server, socket: AuthedSocket, deps:
   });
 
   socket.on(EV.quick, (payload: unknown) => {
+    const island = getIslandForUser(userId);
+    if (island) {
+      const why = onIslandQuick(io, island, uid, payload);
+      if (why) dropped.set(`quick:${why}`, (dropped.get(`quick:${why}`) ?? 0) + 1);
+      return;
+    }
     const m = getMatchForUser(userId);
     if (!m) return;
     const why = onQuick(io, m, uid, payload);
     if (why) dropped.set(`quick:${why}`, (dropped.get(`quick:${why}`) ?? 0) + 1);
+  });
+
+  // ---- drop-in worlds: where I am, and what I am performing ----
+  //
+  // Deliberately NOT on the input channel. An input is logged, simulated,
+  // relayed and replayed; a position is none of those things — twenty people
+  // walking for forty minutes is half a million messages that decide nothing,
+  // and the day one of them is treated as evidence is the day a replay claims
+  // somebody stood somewhere they did not.
+  socket.on(LIVE_EV.state, (payload: unknown) => {
+    const island = getIslandForUser(userId);
+    if (!island) return;
+    const why = onReport(island, uid, payload);
+    if (why) dropped.set(`live:${why}`, (dropped.get(`live:${why}`) ?? 0) + 1);
+  });
+
+  socket.on(LIVE_EV.pin, (payload: unknown) => {
+    const island = getIslandForUser(userId);
+    if (!island) return;
+    const why = onIslandPin(io, island, uid, payload);
+    if (why) dropped.set(`pin:${why}`, (dropped.get(`pin:${why}`) ?? 0) + 1);
+  });
+
+  socket.on(LIVE_EV.emote, async (payload: { id?: unknown } | null, ack?: (r: object) => void) => {
+    const reply = typeof payload === "function" ? (payload as (r: object) => void) : ack;
+    try {
+      const island = getIslandForUser(userId);
+      if (!island || !isLive(island)) return reply?.({ error: "You are not in a world" });
+      const id = String((payload ?? {}).id || "");
+      // The sheet is a menu, not a guarantee: a modified client can ask for
+      // "fall", or for a dance it has not bought.
+      if (!(await canPerform(userId, id))) return reply?.({ error: "You can't perform that" });
+      const why = onEmote(io, island, uid, id);
+      if (why === "rate") return reply?.({ error: "Slow down" });
+      reply?.(why ? { error: "Emote failed" } : { ok: true });
+    } catch (err) {
+      console.error("live:emote error:", err);
+      reply?.({ error: "Emote failed" });
+    }
   });
 
   // Who from the match just finished can I still send a friend request to?
@@ -388,7 +474,10 @@ export function registerPlatformHandlers(io: Server, socket: AuthedSocket, deps:
     try {
       const { matchId } = (payload ?? {}) as { matchId?: unknown };
       if (typeof matchId !== "string") return reply?.({ uids: [] });
-      const people = humansIn(matchId);
+      // An island answers the same question, and it is the more useful half of
+      // it: the whole point of standing in a park with strangers is leaving
+      // with one of them on your friend list.
+      const people = humansIn(matchId).size > 0 ? humansIn(matchId) : humansOnIsland(matchId);
       // Only someone who was actually in the match may ask about it.
       if (![...people.values()].includes(userId)) return reply?.({ uids: [] });
       const others = [...people.entries()].filter(([, id]) => id !== userId);
@@ -403,6 +492,11 @@ export function registerPlatformHandlers(io: Server, socket: AuthedSocket, deps:
   socket.on(EV.leave, async (_payload: unknown, ack?: (r: object) => void) => {
     const reply = typeof _payload === "function" ? (_payload as (r: object) => void) : ack;
     try {
+      const island = getIslandForUser(userId);
+      if (island) {
+        await leaveIsland(io, island, uid);
+        return reply?.({ ok: true });
+      }
       const m = getMatchForUser(userId);
       if (!m) return reply?.({ ok: true }); // nothing to leave — already out
       await leave(io, m, uid);
@@ -423,7 +517,7 @@ export function registerPlatformHandlers(io: Server, socket: AuthedSocket, deps:
 /** Called once the connection is set up (presence + lobby). If this user is
  *  mid-match, put the socket back into it and send the catch-up payload. */
 export function platformOnConnect(socket: AuthedSocket): void {
-  const resume = onReconnect(socket, socket.data.auth.userId);
+  const resume = onReconnect(socket, socket.data.auth.userId) ?? onIslandReconnect(socket, socket.data.auth.userId);
   if (resume) socket.emit(EV.resume, resume);
 }
 
@@ -438,7 +532,8 @@ export function platformOnConnect(socket: AuthedSocket): void {
 function registerSync(socket: AuthedSocket): void {
   socket.on(EV.sync, (_p: unknown, ack?: (r: MatchSync) => void) => {
     const reply = typeof _p === "function" ? (_p as (r: MatchSync) => void) : ack;
-    const resume = onReconnect(socket, socket.data.auth.userId);
+    const resume =
+      onReconnect(socket, socket.data.auth.userId) ?? onIslandReconnect(socket, socket.data.auth.userId);
     reply?.(resume ? { in: true, resume } : { in: false, reason: "gone" });
   });
 }
@@ -447,4 +542,5 @@ function registerSync(socket: AuthedSocket): void {
  *  owned the user's presence (a replacement socket means they're still here). */
 export function platformOnDisconnect(io: Server, socket: AuthedSocket): void {
   onDisconnect(io, socket.data.auth.userId);
+  onIslandDisconnect(io, socket.data.auth.userId);
 }

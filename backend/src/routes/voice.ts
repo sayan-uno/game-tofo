@@ -4,6 +4,7 @@ import { config } from "../config.js";
 import { requireAuth } from "../middleware/auth.js";
 import { getLobbyMembers, getUserLobby } from "../redis.js";
 import { activeMatchIdForUser, humansIn } from "../platform/match.js";
+import { activeIslandIdForUser, humansOnIsland } from "../platform/island.js";
 import { matchVoiceRoom } from "../platform/voice.js";
 import { getSanctions } from "../services/sanctions.js";
 
@@ -26,20 +27,27 @@ voiceRouter.post("/token", async (req, res) => {
   let room: string;
   let ttl: string;
   if (scope === "match") {
+    // A match and a drop-in world are the same thing here: one room, named
+    // after the thing everybody is standing in, deleted when it ends.
     const matchId = activeMatchIdForUser(req.auth!.userId);
-    if (!matchId) {
+    const islandId = matchId ? null : activeIslandIdForUser(req.auth!.userId);
+    if (!matchId && !islandId) {
       res.status(400).json({ error: "You are not in a match" });
       return;
     }
+    const id = (matchId ?? islandId)!;
     // Nobody to talk to → no room. See the party branch below; the reasoning
     // is the same and a match of one person and three bots is the commonest
     // case of it.
-    if (humansIn(matchId).size < 2) {
+    const heads = matchId ? humansIn(matchId).size : humansOnIsland(id).size;
+    if (heads < 2) {
       res.json({ room: null, reason: "alone" });
       return;
     }
-    room = matchVoiceRoom(matchId);
-    ttl = "20m"; // a match is minutes; a leaked token must not outlive it by much
+    room = matchVoiceRoom(id);
+    // A match is minutes and an island is forty of them. A leaked token must
+    // not outlive the thing it lets you into by much, so they differ.
+    ttl = islandId ? "45m" : "20m";
   } else {
     const lobbyId = await getUserLobby(req.auth!.userId);
     if (!lobbyId) {

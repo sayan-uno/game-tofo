@@ -45,6 +45,13 @@ export type EventType =
   | "match.joined"
   | "match.left"
   | "match.ended"
+  /** A drop-in world: opened, walked into, and closed under everybody at once.
+   *  Kept apart from the match lines because the questions asked of them are
+   *  different — a match asks who won, an island asks who was there and when
+   *  they arrived, and people arrive at an island one at a time. */
+  | "island.opened"
+  | "island.join"
+  | "island.closed"
   /** A game taken away, and given back. Two sizes of the same act: the whole
    *  game held for everybody, or one player barred from one game.
    *

@@ -272,6 +272,8 @@ async function start() {
       io.emit("platform:maintenance", { active: true, at: flags.maintenanceAt, message: flags.maintenanceMessage });
       const { endAllMatches } = await import("./platform/match.js");
       await endAllMatches(io, "maintenance");
+      const { closeAllIslands } = await import("./platform/island.js");
+      await closeAllIslands(io, "maintenance");
       // …and close every connection. The page can be edited; the socket
       // cannot. See the ops command for the reasoning.
       setTimeout(() => {

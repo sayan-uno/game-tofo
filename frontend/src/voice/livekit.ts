@@ -1,10 +1,23 @@
-import type { Room } from "livekit-client";
+import type { RemoteAudioTrack, RemoteTrackPublication, Room } from "livekit-client";
 import { api, ApiError } from "../api/http";
 
 // livekit-client is ~500 kB — it is dynamically imported the first time a
 // squad actually forms, so it costs nothing at startup.
 let room: Room | null = null;
 let currentRoomName: string | null = null;
+/** Proximity mode: this room is a PLACE, and you hear the people near you.
+ *
+ *  Two things change, and the first is the one that matters. Nobody's audio is
+ *  subscribed to by default — a voice you are not meant to hear does not
+ *  arrive at the device at all, rather than arriving and being turned down,
+ *  which is both the honest reading of "out of earshot" and the reason twenty
+ *  people in one room costs a phone about four streams instead of nineteen.
+ *
+ *  The second is that the mix goes through WebAudio. LiveKit's setVolume falls
+ *  back to `element.volume` otherwise, and iOS ignores writes to that — so on
+ *  an iPhone every distance would sound identical. */
+let proximity = false;
+let gains = new Map<string, number>();
 // Mic starts OFF — players hear the squad immediately but only transmit after
 // deliberately unmuting (which is also when the browser asks mic permission).
 let micEnabled = false;
@@ -94,10 +107,13 @@ function setTalking(uids: string[]): void {
 export async function joinVoice(
   roomName: string,
   onStatus: (message: string, isError?: boolean) => void,
-  scope: "party" | "match" = "party"
+  scope: "party" | "match" = "party",
+  opts: { proximity?: boolean } = {}
 ): Promise<void> {
   if (currentRoomName === roomName && room) return;
   await leaveVoice();
+  proximity = opts.proximity === true;
+  gains = new Map();
 
   let token: string, url: string;
   try {
@@ -129,12 +145,21 @@ export async function joinVoice(
   const newRoom = new Room({
     adaptiveStream: true,
     dynacast: true,
+    // See `proximity` above: without this, distance is silent on iOS.
+    webAudioMix: proximity,
   });
 
-  newRoom.on(RoomEvent.TrackSubscribed, (track) => {
+  newRoom.on(RoomEvent.TrackSubscribed, (track, _pub, participant) => {
     if (track.kind === Track.Kind.Audio) {
       const el = track.attach();
       document.getElementById("audio-root")?.appendChild(el);
+      // A track that arrives after its distance was decided has to be told
+      // what that distance was, or the first thing you hear of somebody
+      // walking up to you is them at full volume.
+      if (proximity) {
+        const g = gains.get(participant.identity);
+        if (g !== undefined) (track as RemoteAudioTrack).setVolume(g);
+      }
     }
   });
   newRoom.on(RoomEvent.TrackUnsubscribed, (track) => {
@@ -155,7 +180,12 @@ export async function joinVoice(
   });
 
   try {
-    await newRoom.connect(url, token);
+    // autoSubscribe false is the whole of the proximity guarantee — see above.
+    await newRoom.connect(url, token, proximity ? { autoSubscribe: false } : undefined);
+    // Browsers will not start audio without a gesture, and by the time a
+    // player is in a world they have made several. Best effort: a refusal here
+    // is retried by the next tap the page sees.
+    void newRoom.startAudio().catch(() => undefined);
     try {
       await newRoom.localParticipant.setMicrophoneEnabled(micEnabled);
     } catch {
@@ -201,11 +231,46 @@ export async function revalidateVoice(roomName: string, join: () => Promise<void
   }
 }
 
+/** Who this player can hear, and how loudly: identity → gain, 0…1.
+ *
+ *  Anyone missing from the map, or at zero, is UNSUBSCRIBED — their audio
+ *  stops being sent to this device entirely. Called a few times a second by
+ *  the world that is drawing everybody; every call is a walk over the handful
+ *  of people in the room and two comparisons each, and it only ever touches
+ *  LiveKit when something actually changed.
+ *
+ *  Silently does nothing outside a proximity room, so a caller does not have
+ *  to know which kind of room it is in. */
+export function setVoiceProximity(next: Map<string, number>): void {
+  if (!room || !proximity) return;
+  gains = next;
+  for (const participant of room.remoteParticipants.values()) {
+    const gain = next.get(participant.identity) ?? 0;
+    const want = gain > 0.001;
+    for (const pub of participant.trackPublications.values()) {
+      if (String(pub.kind) !== "audio") continue;
+      const rp = pub as RemoteTrackPublication;
+      if (rp.isSubscribed !== want) rp.setSubscribed(want);
+      if (!want) continue;
+      const track = rp.track as RemoteAudioTrack | undefined;
+      // A tenth of a decibel is not worth a WebAudio ramp; a step of one part
+      // in fifty is what you can hear.
+      if (track && Math.abs((track.getVolume() ?? 1) - gain) > 0.02) track.setVolume(gain);
+    }
+  }
+}
+
+/** Is this room a proximity room? The world asks before it starts computing
+ *  distances for a room that would ignore them. */
+export const isProximityVoice = (): boolean => proximity && room !== null;
+
 export async function leaveVoice(): Promise<void> {
   if (!room) return;
   const r = room;
   room = null;
   currentRoomName = null;
+  proximity = false;
+  gains = new Map();
   setTalking([]);
   await r.disconnect();
 }
