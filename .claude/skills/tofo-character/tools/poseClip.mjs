@@ -1,6 +1,7 @@
 // Derives a new clip from an existing one by rotating named joints.
 //
 //   node poseClip.mjs <source-anim.glb> <out.glb> <clipName> <offsets.json>
+//        [--freeze=Joint,Joint,...]
 //
 // Used to author a STANCE the animation library doesn't have — an idle for a
 // character holding a weapon, say — without going back to Meshy for a clip
@@ -12,6 +13,21 @@
 // breathing in idle, the stride in walk — survives underneath the new pose.
 // A joint with no rotation track gets a constant one, built from its rest
 // rotation, rather than being silently ignored.
+//
+// --freeze REPLACES a joint's animation with a constant instead of adding to
+// it, and a two-handed weapon does not work without it. A weapon is bolted to
+// ONE hand; the other hand only looks like it is holding the thing while it
+// stays in the same place relative to it. The idle these stances derive from
+// swings a hand 31 cm, and it does not swing both arms identically — so a
+// constant offset, which faithfully preserves that motion, slides the support
+// hand up to 13 cm along the handguard and the grip visibly lets go.
+//
+// Freezing every joint from both shoulders outward fixes it exactly, because
+// both shoulders hang off the same `Spine` joint: the arms and the weapon
+// become one rigid assembly relative to the chest, while the chest, hips, legs
+// and head keep every bit of their breathing. The weapon then rises and falls
+// with the ribcage, which is what a person holding a rifle actually does —
+// this reads as MORE alive than the sliding version, not less.
 //
 // The Euler convention and the multiply order below are Babylon's exactly
 // (RotationYawPitchRoll, then q_key * q_offset), because the numbers are tuned
@@ -25,11 +41,14 @@ import { readFile, unlink, mkdir } from 'node:fs/promises';
 import { statSync } from 'node:fs';
 import path from 'node:path';
 
-const [src, dst, clipName, offsetsPath] = process.argv.slice(2);
+const argv = process.argv.slice(2);
+const flag = (name) => argv.find((a) => a.startsWith(`--${name}=`))?.split('=')[1];
+const [src, dst, clipName, offsetsPath] = argv.filter((a) => !a.startsWith('--'));
 if (!src || !dst || !clipName || !offsetsPath) {
-  console.error('usage: node poseClip.mjs <source-anim.glb> <out.glb> <clipName> <offsets.json>');
+  console.error('usage: node poseClip.mjs <source-anim.glb> <out.glb> <clipName> <offsets.json> [--freeze=Joint,...]');
   process.exit(1);
 }
+const frozen = new Set((flag('freeze') ?? '').split(',').map((s) => s.trim()).filter(Boolean));
 const offsets = JSON.parse(await readFile(path.resolve(offsetsPath), 'utf8'));
 
 /** Babylon's Quaternion.RotationYawPitchRoll, in Babylon's argument order. */
@@ -82,11 +101,14 @@ const wanted = new Map(
 );
 
 const touched = new Set();
+const held = new Set();
 for (const channel of anim.listChannels()) {
-  if (channel.getTargetPath() !== 'rotation') continue;
   const name = channel.getTargetNode()?.getName();
-  const off = name && wanted.get(name);
-  if (!off) continue;
+  if (!name) continue;
+  const path = channel.getTargetPath();
+  const freeze = frozen.has(name);
+  const off = path === 'rotation' ? wanted.get(name) : undefined;
+  if (!off && !freeze) continue;
   const out = channel.getSampler()?.getOutput();
   if (!out) continue;
   // getElement/setElement, NOT getArray: a meshopt clip stores rotations as
@@ -94,7 +116,21 @@ for (const channel of anim.listChannels()) {
   // quaternion maths on those saturates every key to a constant. The element
   // API denormalises on the way in and re-normalises on the way out.
   const count = out.getCount();
-  const q = [0, 0, 0, 0];
+  const q = new Array(out.getElementSize()).fill(0);
+  if (freeze) {
+    // Hold the FIRST keyframe, which is the pose the stance was solved and
+    // looked at. Everything downstream of this joint stops moving on its own
+    // and rides its parent instead.
+    out.getElement(0, q);
+    let v = path === 'rotation' && off ? mul(q, off) : q.slice();
+    if (path === 'rotation') {
+      const n = Math.hypot(v[0], v[1], v[2], v[3]) || 1;
+      v = v.map((x) => x / n);
+    }
+    for (let i = 0; i < count; i++) out.setElement(i, v);
+    if (path === 'rotation') { touched.add(name); held.add(name); }
+    continue;
+  }
   for (let i = 0; i < count; i++) {
     out.getElement(i, q);
     const r = mul(q, off);
@@ -104,6 +140,11 @@ for (const channel of anim.listChannels()) {
   touched.add(name);
   console.log(`✓ ${name.padEnd(14)} ${String(count).padStart(4)} keyframes rotated by [${offsets[name]}]`);
 }
+for (const name of held) {
+  console.log(`✓ ${name.padEnd(14)} HELD at frame 0${offsets[name] ? ` (offset [${offsets[name]}])` : ''} — rides its parent`);
+}
+const missed = [...frozen].filter((n) => !held.has(n));
+if (missed.length) console.log(`· not animated, so nothing to freeze: ${missed.join(', ')}`);
 
 // A joint the clip never rotates still has to take the offset, or the stance
 // silently comes out half-applied.

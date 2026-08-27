@@ -236,6 +236,46 @@ measured length, and the palm side is detected from the way relaxed fingers
 already drift, so it needs no per-character tuning. Run `verify.mjs` after —
 the bind report must be identical to the original.
 
+**The curl is a BEND, and a bend has a radius it cannot exceed.** It maps a
+vertex sitting `d` off the neutral surface onto an arc of radius `R - d`, so
+material further from that surface than R sweeps around the FAR SIDE of the
+centre of curvature and is flung outward instead of curled in. On flesh this
+never comes up — the thickest finger on any shipped character reaches 1.3R.
+On ARMOUR it does: Zenith's gauntlet plate sits 7.8 cm off the surface against
+a 2.8 cm radius, and ten of its vertices came out past the fingertips as a
+single long spike that read, exactly, as one very long finger draped over the
+weapon it was holding. The fix is in gripHand — the curl fades out across
+`FLESH`..`RIGID` (1.6R to 2.4R) and geometry beyond that stays where the artist
+put it, riding the hand rigidly like a real cuff would.
+
+**A thumb that is too big cannot be fixed by the curl either — resize it.**
+
+```bash
+node slimThumb.mjs <in.glb> <out.glb> <scale> [RightHand] [--report]
+```
+
+Same geometry, different symptom, and it took two rounds to separate them.
+A thumb sits out on the PALM side, past the bend radius, so it barely folds:
+on a normal hand that is fine, and on Zenith — whose thumb Meshy modelled half
+again the size it should be — it left a full-size thumb lying across the front
+of the closed fist, reading as one enormous finger draped over the weapon.
+Curling harder makes it worse (three tighter settings were tried; one grew a
+new spike). So it is resized in the BIND POSE before the hand is closed, which
+is indistinguishable from its having been modelled smaller.
+
+Run it with `--report` first: it prints what it found and touches nothing.
+On the hand that needed it, it finds ~130 vertices in one lump; on female and
+seraph it finds ZERO candidates and refuses, which is the check that says this
+is one character's mesh rather than something the pipeline does.
+
+Two things worth copying from how that was found. Look at the DISTRIBUTION of a
+hand's vertices along its own finger axis: the bad hand had ten vertices 2 cm
+past a p95 that every other character sat inside, which named the fault without
+a render. And when changing a deformer, re-bake a character it is NOT supposed
+to affect and diff it against the published file — male came back identical
+vertex for vertex, which proved the fix was surgical and saved re-publishing
+three characters.
+
 **A fist's tunnel runs across the palm, perpendicular to the forearm.** That,
 not the grip transform, is what decides where a held blade can point: with the
 arm hanging at the character's side, a truly gripped weapon is stuck within
@@ -255,6 +295,128 @@ The weapon's grip constants and the characters' baked hands are ONE unit.
 Changing either means re-publishing every character together, which is why
 they all moved to a new version at the same time.
 
+### Firearms, and anything held with two hands
+
+```bash
+node buildGun.mjs <input.glb> <id> "<Name>" [lengthMetres] [textureSize] \
+     [--foregrip=0..1] [--tune=x,y,z,w] [--deep=0..1] [--crush=0..1]
+```
+
+**A gun does not go through buildProp.mjs.** That tool assumes the long axis
+is the handle's axis, that the fattest slice is a crossguard, and that the
+thin run below it is the grip. A rifle breaks all three — its long axis is the
+BARREL, perpendicular to the grip, and its fattest slice is the magazine — so
+buildProp pivots it around its magwell and holds it sideways.
+
+buildGun finds the parts instead: PCA for the gun's own frame, the thin end for
+the muzzle, and the things hanging under the bore for the magazine and grip.
+It bakes pivot-at-the-trigger-fist, muzzle along +Z, receiver up +Y, metres,
+and writes a `marks.json` beside the model. That sidecar is the point: a sword
+needs nothing from the model to author its stance, and a two-handed weapon
+needs to know where the SUPPORT hand goes, which only the builder can measure.
+
+**Measure the fist before posing anything into it.**
+
+```bash
+node fistAxis.mjs <character.glb> [RightHand|LeftHand]
+```
+
+The tunnel is a hole, so it is measured as one: the widest empty cylinder
+through the hand, solved for position and direction together. Do not use the
+cheaper "the finger mass sits at a constant radius about the true axis" —
+curled fingers are a C, not a ring, and that metric reported 25 degrees of
+baked twist on a hand baked with none. The honest version reproduces the
+shipped GRIP_OFFSET to about a centimetre and recovers the documented 45
+degrees of pronation as 41, which is what makes it trustworthy.
+
+**REACH is what picks the pose, and it is worth measuring first.** These arms
+are ~45 cm shoulder to wrist. A rifle held with the hands 36 cm apart cannot
+be pointed forward by any arrangement of them — the support hand simply does
+not reach — so the pose is decided before any solving starts. Two ways out,
+both legitimate: move the support hand back along the handguard (`--foregrip`,
+which shortens the span), or accept the across-the-body carry, which is what a
+rifle idle actually looks like and reads best from a fixed lobby camera
+anyway. Print the hand separation and the arm's reach and compare them before
+concluding that a solver is stuck.
+
+**Solve the stance and the weapon's baked aim TOGETHER.** They are not
+separable for the same reason the sword's grip was solved backwards: the
+client's single grip transform fixes the angle between the weapon and the
+palm. Fix the aim first and every arm pose that points the barrel right rolls
+the palm wrong. Score the whole thing at once — barrel direction, handle along
+the fist's tunnel, support fist ON the handguard landmark, support tunnel
+along the barrel, clearance against limb RADII, elbows below shoulders, and a
+small penalty on total effort so a solver with slack does not spend it.
+
+**SCORE THE ARM, NOT JUST THE WEAPON.** This shipped a version and had to be
+withdrawn. Every measurement above was excellent — handle 2 degrees off the
+tunnel, support hand a millimetre off its landmark, weapon clear of every limb
+— and the stance still looked broken, because not one of those questions was
+about the arm doing the holding. It had gone straight through the ribcage:
+elbow 10.9 cm inside the torso, forearm 12.5 cm, so the hand appeared out of
+the middle of the chest with no elbow anywhere on the body. A held weapon is
+two problems, and the limb is the one that is easy to forget while staring at
+the prop. Three things make the test work:
+
+- *Model the torso as an ELLIPSE, not a capsule.* A chest is ~32 cm wide and
+  ~23 cm deep. A round capsule fat enough to cover the shoulders also swallows
+  the space in front of the sternum, which is exactly where a rifle carry
+  legitimately puts the support forearm — so a round model tells the solver
+  the correct pose is illegal.
+- *Take the floor from the plain idle, not from zero.* An upper arm RESTS on
+  the ribs: the authored idle already sits 2 cm inside this model, and
+  demanding daylight there rejects the pose the character stands in carrying
+  nothing. Hold the upper arm to the idle's own number and the forearm to a
+  real gap.
+- *Say elbow-out and weapon-centred separately, or you get neither.* Told only
+  to keep the arm out of the chest, a solver satisfies it by swinging the HAND
+  out sideways — anatomically fine, and it parks the weapon out past the hip
+  where nobody can see it. Elbow lateral with the hand medial is a rifle carry;
+  elbow medial with the hand lateral is an arm through the ribs. Both need
+  naming.
+
+**Then bake the solved rotation into the vertices** (`--tune`) rather than
+adding a per-weapon offset on the client. It composes with the shared grip
+transform, so a second weapon stays one catalog line.
+
+**FREEZE BOTH ARMS IN THE STANCE CLIP** (`poseClip --freeze=...`). This is not
+a refinement; a two-handed weapon does not work without it, and it is the
+difference between a support hand that holds the weapon and one that hovers
+near it. A weapon is bolted to ONE hand. The other hand only looks like it is
+holding the thing while it stays put relative to it — and a constant offset,
+which faithfully preserves whatever the source clip did, does not do that: the
+idle these stances derive from swings a hand **31 cm**, and it does not swing
+both arms identically, so the support hand slid **8.7 cm** back and forth along
+the handguard every cycle.
+
+Freeze every joint from both shoulders outward — shoulder, arm, forearm, hand,
+both sides. Both shoulders hang off the same `Spine` joint, so the arms and the
+weapon become one rigid assembly relative to the chest while the chest, hips,
+legs and head keep every bit of their breathing and carry it with them.
+Measured after: 0.000 cm of movement between the support hand and its spot on
+the handguard. It also looks BETTER, not deader — a rifle that rises and falls
+with the ribcage is what a person holding one looks like, and hands that slide
+on it are what nobody looks like.
+
+**Getting the mirror wrong bakes the weapon in backwards.** A rotation baked
+into glTF vertices equals `S · R · S` applied in Babylon, where S is what the
+loader puts between the mount and the model. weapon.ts describes that node as
+a "(1, 1, -1) mirror" and that is only half of it: the node ALSO carries a
+180-degree turn about Y, and composed they are **diag(-1, 1, 1)** — a mirror
+in X. So the conjugation is `(x, y, z, w) -> (x, -y, -z, w)`. Conjugating with
+the scaling alone flips the wrong two components and the barrel comes out
+pointing through the character's back, with every number on both sides looking
+correct. Read the node's composed local matrix rather than its scaling field.
+
+**Crush the albedo before asking it to be the emissive map too.** The sword
+gets that trick free because its texture really is flat colour over near-black.
+Meshy paints a gun's receiver mid-grey, and a mid-grey at 0.85 emissive is a
+LIT mid-grey: the whole weapon glows white and the neon stops reading as neon.
+Nothing is wrong with the texture, the material, the UVs or the mesh at that
+point, which is what makes it so hard to look at. `--crush` darkens only the
+desaturated pixels, on a ramp so no edge appears mid-panel, and lands closer to
+the concept art than the raw bake did.
+
 ### Authoring a stance the animation library doesn't have
 
 ```bash
@@ -272,6 +434,20 @@ offsets live in an `onBeforeRenderObservable` (animations update BEFORE that, so
 they stick), and solve numerically against something measurable — the reference
 blade's direction, which principal-axis analysis of the most elongated connected
 component gets off an unrigged mesh.
+
+**Start from the last stance, not from zero.** `clipOffsets.mjs <from> <to>`
+inverts poseClip and recovers exactly what a shipped stance was made of — the
+sword carry comes back as nine degrees of feet-apart and sixty of forearm
+pronation. Sub-degree "drift" in its output is meshopt's int16 rotation
+quantisation, not disagreement.
+
+**A frozen clip keeps WRITING.** `speedRatio = 0` is right (a paused group stops
+writing and per-frame offsets then compound), but it means the clip re-applies
+its own rotations on every render — so anything set between frames is gone by
+the time the pixels land. Offsets have to be re-applied from
+`onBeforeRenderObservable`, or the solve is correct and every screenshot of it
+shows the plain idle with the weapon floating in the solved place. That looks
+exactly like a grip bug and is not one.
 
 **Score the whole pose, not one direction.** A solver told only to match a blade
 direction will wreck everything else to get it, and each failure ships looking
@@ -380,9 +556,58 @@ Two traps, each of which cost a debugging cycle:
   characters from bone positions divided by the skeleton root's scale — the
   mesh box reads 100× off. Do not "fix" that division.
 - **Don't ship a character you have not looked at**, however clean the numbers.
+- **`goToFrame()` does NOTHING on a group frozen at `speedRatio = 0`.** It
+  adjusts a time offset that the next evaluation is meant to consume, and at
+  speed zero that evaluation never advances. Stepping a clip that way returns
+  the identical pose at every frame — which reads as "the stance is perfectly
+  stable across the cycle" when it means "nothing was ever measured", and a
+  contact sheet of six identical frames looks like a pass. To sample a clip,
+  set a real speedRatio and let it RUN, rendering between samples.
+- **Measure both halves of a chain at the same instant.** `getAbsolutePosition()`
+  returns a cached value and never recomputes; `getWorldMatrix()` does. Read
+  joints one way and a weapon's mount the other and the two are a frame apart,
+  which invents drift out of nothing — here, a support hand appearing to slide
+  10 cm along a handguard it was rigidly bolted to, and worse the faster the
+  clip was played. Refresh everything you are about to compare, in one pass.
+  The way to catch it is a quantity that CANNOT change: the weapon's pivot sits
+  at GRIP_OFFSET in the hand, so hand-to-pivot is 10.8 cm by construction. It
+  was reading 6 to 16, which named the broken half immediately.
+- **Look at the pose from the SIDE, and from the armed side specifically.** A
+  stance whose every metric passed, and which read fine in front, three-quarter
+  and lineup shots, had its trigger forearm coming out of the sternum — and the
+  one view that shows it instantly is the profile, where a limb passing through
+  a torso has no elbow in it. Front-on, the body hides the whole mistake.
 - **A verification harness must play a clip before it reads any joint.** In the
   rest pose the joints are a hundredth of the size of the character they belong
   to, so every position read off them is wrong by 100x — and wrong in a way
   that still renders, which is how it gets believed.
 - Triangle counts: the live characters are ~10k. Over ~40k is fine for a lobby,
   heavy for a crowded match.
+- **A screenshot harness has no render loop, and two things quietly depend on
+  one.** `Tools.CreateScreenshot*` waits for the next tick of one and never
+  returns — it reads as a hang, not an error; take the picture with
+  `canvas.toDataURL()` and `preserveDrawingBuffer: true` instead. And a WebP
+  texture is still decoding when its container resolves, so a single-frame
+  screenshot draws the material with its baseColorFactor — white — while the
+  emissive factor lights the whole thing up. Await `scene.whenReadyAsync()`
+  and then render until nothing in `scene.textures` reports `!isReady()`.
+- **Match the harness's lights to previewScene.ts.** Brighter ones turn a matte
+  black weapon into a white one, which reads as a broken texture and sends you
+  looking in the wrong place. Rendering a SHIPPED asset beside the new one
+  settles that in one frame: if the sword looks right and the gun does not, the
+  harness is fine.
+- **A left-handed basis mirrors the model.** Building a frame as
+  `cross(long, up)` instead of `cross(up, long)` reverses every triangle's
+  winding, and with single-sided materials the weapon draws inside out. Check
+  `x = y × z` when you build one.
+- **Don't compare heights along a long object.** A gun is 1.9 units long, and a
+  2-degree residual tilt in a fitted axis moves every height by more than the
+  2 cm difference being measured — the "the muzzle sits above the centroid, so
+  that way is up" test flipped a rifle upside down while reporting that its two
+  independent checks agreed. Prefer tests a tilt cannot manufacture: how ragged
+  each side's profile is, and which side of the mid-range the median sits on.
+- **A grip ends in a NECK, not a bulge.** Walking up a pistol grip until the
+  section widens walks straight through the trigger-guard gap and takes the
+  receiver with it, putting the fist three-quarters of the way up the handle.
+  Stop on a sharp narrowing too, and fit the handle's rake over its upper part
+  only — the flared butt at the bottom halves the angle if included.

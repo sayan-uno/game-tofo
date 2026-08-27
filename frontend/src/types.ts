@@ -59,9 +59,12 @@ export interface CatalogCharacter {
   price?: ItemPrice | null;
 }
 
-/** A held prop. How it is held is baked into the model (pivot at the grip,
- *  blade +Y, metres) — see buildProp.mjs — so there is nothing positional here
- *  and a second weapon is a catalog line, not a change to the render code. */
+/** A held prop. How it is held is baked into the model — pivot at the grip,
+ *  sized in metres, and whatever rotation aims it (a blade up +Y for a sword,
+ *  a barrel along +Z for a firearm) — see buildProp.mjs and buildGun.mjs. So
+ *  there is nothing positional here and a second weapon is a catalog line, not
+ *  a change to the render code; even a two-handed one, whose support hand is
+ *  placed by its `stance` clip rather than by anything on the client. */
 export interface CatalogWeapon {
   id: string;
   kind: "weapon";

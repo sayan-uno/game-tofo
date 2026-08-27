@@ -116,14 +116,22 @@ export async function attachWeapon(weaponId: string, rig: CharacterRig, scene: S
   // Mount in the SAME frame the joint lives in — the glTF loader's own root
   // node, one level under rig.root — not under rig.root itself.
   //
-  // That node carries a (1, 1, -1) mirror, because glTF is right-handed and
-  // Babylon is not. Measure the hand across that boundary and the matrix you
-  // decompose contains a reflection, which decompose() cannot express as a
-  // rotation: it hides it in the scale and hands back a rotation that is
-  // flipped. The sword hangs point-down and every attempt to fix it by
-  // rotating the grip fails, because the error is a mirror and not an angle.
-  // Staying inside the frame keeps the reflection on both sides, where it
-  // cancels — and it is the same frame the character's own mesh is drawn in.
+  // That node carries a reflection, because glTF is right-handed and Babylon
+  // is not. Measure the hand across that boundary and the matrix you decompose
+  // contains it, which decompose() cannot express as a rotation: it hides it
+  // in the scale and hands back a rotation that is flipped. The sword hangs
+  // point-down and every attempt to fix it by rotating the grip fails, because
+  // the error is a mirror and not an angle. Staying inside the frame keeps the
+  // reflection on both sides, where it cancels — and it is the same frame the
+  // character's own mesh is drawn in.
+  //
+  // WHICH AXIS that reflection is in is not what the node's scaling says, and
+  // the difference matters to anything that bakes a rotation into a model's
+  // vertices instead of setting it here (buildGun.mjs --tune). The loader
+  // writes scaling (1, 1, -1) AND a 180-degree turn about Y; composed, those
+  // are diag(-1, 1, 1) — a mirror in X. Conjugating a rotation by the scaling
+  // alone flips the wrong two components, which bakes a weapon in pointing
+  // backwards while every number involved looks right.
   let frame = hand;
   while (frame.parent && frame.parent !== rig.root) frame = frame.parent as TransformNode;
 

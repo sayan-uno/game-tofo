@@ -90,6 +90,13 @@ export type CatalogItem = CharacterItem | WeaponItem | EmoteItem;
 // client's weapon.ts holds the matching grip transform, so a character left
 // on an older version would go back to a sword floating past an open palm.
 //
+// The latest bump closed the LEFT hand as well, for the same reason and with
+// the same tool: a two-handed weapon needs a second fist to wrap its
+// handguard, and an open hand with splayed fingers passes straight through
+// one. It costs nothing anywhere else — a relaxed closed hand is how a game
+// character stands — and, like the right, it rides the bind pose so no clip
+// changed and the joint list is still the canonical 24.
+//
 // Earlier versions stay published — /vN/ is immutable and cached for a year,
 // so nothing is reclaimed by pointing away from them, and a client that
 // fetched the catalog before this edit still wants the old one.
@@ -101,18 +108,44 @@ export type CatalogItem = CharacterItem | WeaponItem | EmoteItem;
 // fresh path is the fix, and the lesson is to let an upload settle BEFORE
 // fetching it — a 404 cached against a live path outlives the mistake.
 const CHARACTERS: CharacterItem[] = [
-  { id: "male", kind: "character", name: "Ranger", key: "characters/male/v3/model.glb", rarity: "starter", free: true },
-  { id: "female", kind: "character", name: "Vanguard", key: "characters/female/v2/model.glb", rarity: "starter", free: true },
-  { id: "zenith", kind: "character", name: "Zenith", key: "characters/zenith/v3/model.glb", rarity: "legendary", free: true, aura: "ember" },
+  { id: "male", kind: "character", name: "Ranger", key: "characters/male/v4/model.glb", rarity: "starter", free: true },
+  { id: "female", kind: "character", name: "Vanguard", key: "characters/female/v3/model.glb", rarity: "starter", free: true },
+  // Zenith is at v7 for two faults, both in the hands and both peculiar to it.
+  //
+  // v7 slimmed an oversized THUMB (slimThumb.mjs, 0.62x). Meshy modelled it
+  // half again the size it should be, and nothing downstream could hide that:
+  // a thumb sits out on the palm side further from the neutral surface than
+  // the curl's radius, so it barely folds and ends up lying across the front
+  // of the closed fist at nearly full size — reading as one enormous finger
+  // draped over the weapon. Curling harder made it worse. Female and Seraph
+  // have no such lump at all (the finder reports zero candidate vertices on
+  // both), so this is Zenith's mesh, not the pipeline's.
+  //
+  // v5 came first, because it is the only character with ARMOUR on its hands,
+  // and gripHand's curl is a bend: material further from the neutral surface
+  // than the bend radius sweeps around the far side of the centre of curvature
+  // instead of curling in. Its gauntlet plate sits 7.8 cm off that surface
+  // against a 2.8 cm radius, so ten vertices were flung out past the
+  // fingertips and read, exactly, as one very long finger draped over the
+  // weapon. Every other character's fingers reach 1.3x the radius and were
+  // never affected — re-baking them with the fixed tool reproduces the
+  // published files vertex for vertex.
+  { id: "zenith", kind: "character", name: "Zenith", key: "characters/zenith/v7/model.glb", rarity: "legendary", free: true, aura: "ember" },
   // Seraph's v6 added the emissive mask that makes the garment itself glow: the
   // chest and back prisms, the wrist and boot crystals, the blue crown horns,
   // and the gold veins that veinFlow.ts runs a pulse down. v7 is that same
-  // model with the fist.
-  { id: "seraph", kind: "character", name: "Seraph", key: "characters/seraph/v7/model.glb", rarity: "legendary", free: true, aura: "crystal" },
+  // model with the right fist, v8 with both.
+  { id: "seraph", kind: "character", name: "Seraph", key: "characters/seraph/v8/model.glb", rarity: "legendary", free: true, aura: "crystal" },
 ];
 
 const WEAPONS: WeaponItem[] = [
   { id: "crimson-fang", kind: "weapon", name: "Crimson Fang", key: "weapons/crimson-fang/v1/model.glb", rarity: "legendary", free: true, stance: "sword-idle" },
+  // The first TWO-handed weapon, and the reason every character grew a left
+  // fist. Nothing on the client knows that: the support hand is placed by the
+  // stance clip, and where the barrel points is baked into the model's own
+  // vertices (buildGun.mjs --tune), so this is still one catalog line sharing
+  // the single grip transform in weapon.ts with the sword.
+  { id: "crimson-viper", kind: "weapon", name: "Crimson Viper", key: "weapons/crimson-viper/v3/model.glb", rarity: "legendary", free: true, stance: "gun-idle" },
 ];
 
 const EMOTES: EmoteItem[] = [
@@ -146,6 +179,47 @@ const EMOTES: EmoteItem[] = [
   // safe; bending is not. If the blade's angle needs changing, change the grip
   // constant in weapon.ts, not the arm.
   { id: "sword-idle",         kind: "emote", name: "Sword Stance", key: "animations/sword-idle/v12/anim.glb",        category: "locomotion", duration: 9.97,  loop: true,  rootMotion: false, free: true },
+  // The rifle carry, derived from idle the same way sword-idle was, so the
+  // breathing still runs underneath it. Eight joints: the same 9-degree feet
+  // apart the sword stance uses, both shoulders, both arms, and both forearms.
+  //
+  // A two-handed weapon is a different problem from a one-handed one, and the
+  // difference is REACH. The right hand is wherever the weapon's grip is put;
+  // the LEFT hand then has to land on a specific spot on the handguard, and
+  // the arm is only 45 cm long. That single fact chose the pose: a rifle
+  // pointed forward is out of range no matter how the arms are arranged, so
+  // the carry is across the body — muzzle out past the character's left,
+  // angled down, which is also what reads best from the lobby's fixed camera.
+  //
+  // Solved against the fist's measured tunnel rather than eyeballed: the
+  // handle runs along the hole in the right fist to within half a degree, the
+  // left fist's centre sits on the handguard landmark to within a millimetre,
+  // and the weapon clears every limb by more than its own radius.
+  //
+  // v2 moved the TRIGGER ARM, and is the whole reason a v1 exists. v1 scored
+  // perfectly on every one of those measurements and still looked wrong,
+  // because all of them were about the WEAPON: nothing asked where the arm
+  // holding it had gone. It had gone through the ribcage — elbow 10.9 cm
+  // inside the torso, forearm 12.5 cm, so the hand appeared out of the middle
+  // of the chest with no elbow anywhere. A held weapon is two problems and the
+  // arm is the one that is easy to forget.
+  //
+  // v3 is the one that actually HOLDS it, and it holds it closer. Two changes:
+  //
+  //  1. Both arms are FROZEN (poseClip --freeze), not offset. A constant
+  //     offset preserves the source idle's motion faithfully — and that idle
+  //     swings a hand 31 cm, differently for each arm. The weapon is bolted to
+  //     ONE hand, so the other one slid 8.7 cm back and forth along the
+  //     handguard every cycle and visibly let go. Freezing from both shoulders
+  //     outward makes the arms and the weapon one rigid assembly hanging off
+  //     `Spine`, which both shoulders share: the support hand now moves 0.000
+  //     cm relative to the handguard, while the chest, hips, legs and head
+  //     keep all of their breathing and carry the whole assembly with them.
+  //     A rifle that rises and falls with the ribcage reads as MORE alive than
+  //     one whose hands slide on it, not less.
+  //  2. The carry came in 11 cm closer to the chest. Held out at arm's length
+  //     it read as presenting the weapon to somebody rather than carrying it.
+  { id: "gun-idle",           kind: "emote", name: "Rifle Stance", key: "animations/gun-idle/v3/anim.glb",           category: "locomotion", duration: 9.97,  loop: true,  rootMotion: false, free: true },
   { id: "walk",               kind: "emote", name: "Walk",         key: "animations/walk/v1/anim.glb",               category: "locomotion", duration: 1.03,  loop: true,  rootMotion: false, free: true },
   { id: "run",                kind: "emote", name: "Run",          key: "animations/run/v1/anim.glb",                category: "locomotion", duration: 0.63,  loop: true,  rootMotion: false, free: true },
   { id: "run-fast",           kind: "emote", name: "Run Fast",     key: "animations/run-fast/v1/anim.glb",           category: "locomotion", duration: 0.57,  loop: true,  rootMotion: true,  free: true },

@@ -30,7 +30,7 @@ import { ALL_EXTENSIONS } from '@gltf-transform/extensions';
 import { dequantize } from '@gltf-transform/functions';
 import { MeshoptDecoder } from 'meshoptimizer';
 import { execFileSync } from 'node:child_process';
-import { unlink } from 'node:fs/promises';
+import { unlink, mkdir } from 'node:fs/promises';
 import { statSync } from 'node:fs';
 import { mat4, vec3 } from 'gl-matrix';
 import path from 'node:path';
@@ -59,6 +59,12 @@ const RADIUS_ARG = Number(radiusArg) || 0;
 const KNUCKLE_ARG = Number(knuckleArg) || 0;
 const KNUCKLE_FRACTION = 0.4;
 const RADIUS_FRACTION = 0.143;
+/** How far off the neutral surface, in multiples of the curl radius, material
+ *  can sit and still be treated as bendable flesh — and where it is treated as
+ *  rigid instead. Every shipped character's fingers reach 1.3; Zenith's
+ *  gauntlet reaches 2.8. */
+const FLESH = 1.6;
+const RIGID = 2.4;
 
 await MeshoptDecoder.ready;
 const io = new NodeIO().registerExtensions(ALL_EXTENSIONS).registerDependencies({ 'meshopt.decoder': MeshoptDecoder });
@@ -229,10 +235,68 @@ for (const prim of prims) {
 }
 neutral = neutralN ? neutral / neutralN : 0;
 
+// ---- rigid pieces ------------------------------------------------------------
+// A thumb cap or a gauntlet plate is not flesh and must not be BENT — but it
+// must still move, or it stands there straight while the fingers close around
+// nothing and reads, unmistakably, as one enormous finger. So each such piece
+// is found as a connected lump and swung RIGIDLY about the knuckle, by the
+// angle the flesh at its own base turns through. Rotating about the knuckle
+// (rather than about the bend's centre, which sits a radius away toward the
+// palm) is what keeps it rigid: every vertex holds its distance from the
+// hinge, so nothing stretches and nothing is flung.
+const parent = new Map();
+const find = (a) => { while (parent.get(a) !== a) { parent.set(a, parent.get(parent.get(a))); a = parent.get(a); } return a; };
+const union = (a, b) => { a = find(a); b = find(b); if (a !== b) parent.set(a, b); };
+/** Vertex key: primitives are indexed independently, so a piece is only ever
+ *  connected within one of them. */
+const key = (pi, v) => `${pi}:${v}`;
+const thickOf = new Map();
+const localOf = new Map();
+prims.forEach((prim, pi) => {
+  const pos = prim.getAttribute('POSITION').getArray();
+  for (let v = 0; v < pos.length / 3; v++) {
+    if (handWeight(prim, v) < 0.5) continue;
+    const [, along, palmward] = toLocal([pos[v * 3], pos[v * 3 + 1], pos[v * 3 + 2]]);
+    if (along <= KNUCKLE) continue;
+    const thickness = Math.abs((palmward - neutral) * palmSign) / R;
+    if (thickness < FLESH) continue;
+    const k = key(pi, v);
+    parent.set(k, k);
+    thickOf.set(k, along);
+    localOf.set(k, [toLocal([pos[v * 3], pos[v * 3 + 1], pos[v * 3 + 2]])[0], along, palmward]);
+  }
+});
+// Grouped by PROXIMITY, not by mesh adjacency. Thick vertices are the sparse
+// outer skin of a lump — a thumb cap's outermost points are rarely triangle
+// neighbours of each other — so connecting only touching pairs shattered the
+// thumb into 27 fragments, each swinging by its own angle. Single-linkage at a
+// finger's width puts a lump back together.
+const CLUSTER = 1.5 * cm;
+const thickPts = [...thickOf.keys()].map((k) => ({ k, p: localOf.get(k) }));
+for (let i = 0; i < thickPts.length; i++) {
+  for (let j = i + 1; j < thickPts.length; j++) {
+    const a = thickPts[i].p, b = thickPts[j].p;
+    if (Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) < CLUSTER) union(thickPts[i].k, thickPts[j].k);
+  }
+}
+/** Each piece's base — the nearest point to the knuckle it reaches — decides
+ *  how far it swings, because that is where it is attached. */
+const pieceBase = new Map();
+for (const [k, along] of thickOf) {
+  const r = find(k);
+  pieceBase.set(r, Math.min(pieceBase.get(r) ?? Infinity, along));
+}
+if (pieceBase.size) {
+  const sizes = new Map();
+  for (const k of thickOf.keys()) { const r = find(k); sizes.set(r, (sizes.get(r) ?? 0) + 1); }
+  console.log(`· ${pieceBase.size} rigid piece(s) past the knuckle — swung, not bent:` +
+    [...pieceBase].map(([r, b]) => ` [${sizes.get(r)} verts, base ${(b / cm).toFixed(1)}cm -> ${(((b - KNUCKLE) / R) * 180 / Math.PI).toFixed(0)}°]`).join(''));
+}
+
 // ---- curl -------------------------------------------------------------------
 let moved = 0;
 let maxTurn = 0;
-for (const prim of prims) {
+prims.forEach((prim, pi) => {
   const posAcc = prim.getAttribute('POSITION');
   const normAcc = prim.getAttribute('NORMAL');
   const tanAcc = prim.getAttribute('TANGENT');
@@ -253,11 +317,50 @@ for (const prim of prims) {
     // be torn away from it — though in practice the curl starts well past
     // there and those vertices are untouched anyway.
     const theta = (t / R) * w;
-    maxTurn = Math.max(maxTurn, theta);
     const d = (palmward - neutral) * palmSign; // + is toward the palm
     const arm = R - d;
-    const newAlong = KNUCKLE + arm * Math.sin(theta);
-    const newPalmward = neutral + palmSign * (R - arm * Math.cos(theta));
+
+    // LEAVE ARMOUR ALONE. The bend above is correct for flesh, and only for
+    // flesh: it puts a vertex `d` off the neutral surface onto an arc of
+    // radius R - d, so material further from that surface than R sweeps around
+    // the FAR SIDE of the centre of curvature and is flung outward instead of
+    // curled in. On a finger, |d| is a centimetre against a ~3 cm radius and
+    // none of that matters. On an armoured character it does: a gauntlet plate
+    // sitting 7.8 cm off the surface — 2.8x the radius — came out past the
+    // fingertips as a single long spike that read, exactly, as one very long
+    // finger.
+    //
+    // So the curl fades out across the band where the bend stops describing
+    // anything real, and geometry beyond it simply stays where the artist put
+    // it. Fingers keep every bit of their curl (the thickest flesh on any
+    // shipped character reaches 1.3R, well inside FLESH), and a cuff or a claw
+    // rides the hand rigidly, which is what it would do anyway.
+    const thickness = Math.abs(d) / R;
+    const stiff = thickness <= FLESH ? 0
+      : thickness >= RIGID ? 1
+      : (thickness - FLESH) / (RIGID - FLESH);
+
+    // FLESH: the constant-curvature bend. Correct only while the material is
+    // nearer the neutral surface than the radius it is bent around — past
+    // that it would sweep around the far side of the centre of curvature and
+    // be flung outward, which is how a gauntlet plate once ended up out past
+    // the fingertips.
+    const bentAlong = KNUCKLE + arm * Math.sin(theta);
+    const bentPalmward = neutral + palmSign * (R - arm * Math.cos(theta));
+
+    // RIGID: swing about the knuckle by the angle this piece's base turns
+    // through, holding every distance. Falls back to the vertex's own angle
+    // when it belongs to no piece, which only happens for stray geometry.
+    const base = pieceBase.get(find(key(pi, v))) ?? along;
+    const swing = ((base - KNUCKLE) / R) * w;
+    const ra = along - KNUCKLE;
+    const rp = (palmward - neutral) * palmSign;
+    const swungAlong = KNUCKLE + ra * Math.cos(swing) - rp * Math.sin(swing);
+    const swungPalmward = neutral + palmSign * (ra * Math.sin(swing) + rp * Math.cos(swing));
+
+    maxTurn = Math.max(maxTurn, theta);
+    const newAlong = bentAlong + (swungAlong - bentAlong) * stiff;
+    const newPalmward = bentPalmward + (swungPalmward - bentPalmward) * stiff;
 
     // Back to mesh space.
     const rebuilt = vec3.clone(origin);
@@ -271,12 +374,13 @@ for (const prim of prims) {
 
     // Normals (and tangents) turn with the surface, or the fingers keep the
     // shading of a flat hand and the fist reads as a smear.
+    const turned = theta + (swing - theta) * stiff;
     const turn = (dir, arr, stride) => {
       const l = [vec3.dot(dir, AX), vec3.dot(dir, AY), vec3.dot(dir, AZ)];
       const a = l[1];
       const b = (l[2] - 0) * palmSign;
-      const na = a * Math.cos(theta) - b * Math.sin(theta);
-      const nb = a * Math.sin(theta) + b * Math.cos(theta);
+      const na = a * Math.cos(turned) - b * Math.sin(turned);
+      const nb = a * Math.sin(turned) + b * Math.cos(turned);
       const out = vec3.create();
       vec3.scaleAndAdd(out, out, AX, l[0]);
       vec3.scaleAndAdd(out, out, AY, na);
@@ -292,13 +396,14 @@ for (const prim of prims) {
   posAcc.setArray(pos);
   if (norm) normAcc.setArray(norm);
   if (tan) tanAcc.setArray(tan);
-}
+});
 console.log(`✓ curled ${moved} finger vertices, up to ${((maxTurn * 180) / Math.PI).toFixed(0)}° around a ${(R / cm).toFixed(1)}cm radius`);
 
 // ---- write ------------------------------------------------------------------
 // meshopt only, NO texture step: the textures are already the WebP the pipeline
 // produced, and re-encoding them here would lose a generation for nothing.
 const out = path.resolve(dst);
+await mkdir(path.dirname(out), { recursive: true });
 const raw = out.replace(/\.glb$/, '.raw.glb');
 await io.write(raw, doc);
 execFileSync('npx', ['--yes', '@gltf-transform/cli@latest', 'meshopt', raw, out], { stdio: 'inherit' });
